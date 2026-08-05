@@ -469,3 +469,45 @@ def test_set_listing_obs_seller_is_idempotent_and_only_fills_nulls(store):
     assert store.set_listing_obs_seller("ebay:2", "B") is False, "只補不改"
     assert store.listing_obs(limit=10)[0]["seller_id"] == "A"
     assert store.set_listing_obs_seller("ebay:missing", "A") is False
+
+
+# ---------------------------------------------------------------------------
+# 6. `sellers --supply` 的 Alpha 欄：0 分與證據不足不可混為一談（Task 6a）
+# ---------------------------------------------------------------------------
+def test_fmt_alpha_total_distinguishes_zero_from_insufficient_evidence():
+    """`_fmt_alpha_total` 是供給契合度排行榜 Alpha 欄的格式化函式。
+
+    0.0 分（`ok=True`）＝「算出來就是比同儕貴」；`ok=False`＝「湊不到同儕，
+    不知道」。兩者的語意相反，顯示成同一個東西會讓使用者把「不知道」
+    讀成「比同儕貴」。CLAUDE.md 第四節：不要拿自己的模型當尺——這裡的
+    對應教訓是不要把「沒有證據」讀成「證據顯示很差」。
+    """
+    from ygo_sniper.cli import _fmt_alpha_total
+    from ygo_sniper.seller_alpha import SellerScore
+
+    zero_score = SellerScore(seller_key="ebay:x", ok=True, reason="算出來", total=0.0)
+    assert _fmt_alpha_total(zero_score) == "0.0"
+
+    no_evidence_score = SellerScore(
+        seller_key="ebay:y", ok=False, reason="可比不足", total=None
+    )
+    assert _fmt_alpha_total(no_evidence_score) == "證據不足"
+
+    # 賣家在 Alpha 那邊完全沒有分數紀錄（例如只出現在 Supply Fit 側）
+    assert _fmt_alpha_total(None) == "證據不足"
+
+
+def test_supply_dim_raw_reads_available_dimension_and_none_when_missing():
+    from ygo_sniper.cli import _supply_dim_raw
+    from ygo_sniper.seller_supply import SupplyDimension, SupplyFit
+
+    fit = SupplyFit(
+        seller_key="ebay:x", site="ebay", ok=True, reason="ok", total=90.0,
+        dimensions=[
+            SupplyDimension.of("supply_depth", raw=12.0, detail="累積觀測 12 列"),
+            SupplyDimension.unavailable("persistence", "只觀測到單一時間點"),
+        ],
+    )
+    assert _supply_dim_raw(fit, "supply_depth") == 12.0
+    assert _supply_dim_raw(fit, "persistence") is None
+    assert _supply_dim_raw(fit, "series_focus") is None  # 根本不在 dimensions 裡

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 import typer
@@ -697,14 +698,23 @@ def sellers(
     sync_watch: bool = typer.Option(
         False, "--sync-watch", help="把分數過門檻的賣家自動加進監控名單（只加不刪）"
     ),
+    supply: bool = typer.Option(
+        False, "--supply", help="供給契合度排行榜（值不值得盯，與 Alpha 是兩件事）"
+    ),
 ):
     """賣家帳本（Seller Alpha 地基）。計數是從 listing_obs／comps 重算的聚合。
 
     `--rank` 走 `seller_alpha.analyze`：主指標是**同儕相對折價**
     （同站×同卡×同版次×同分數×同價格基準的其他賣家中位），不是模型公允價。
+
+    `--supply` 走 `seller_supply.supply_fit_all`：回答「值不值得盯」，
+    跟便不便宜無關，**不可與 Alpha 相加**（見 seller_supply.py 頂註）。
     """
     cfg = load_config()
     store = Store(cfg.db_path)
+    if supply:
+        _print_supply_fit(cfg, store, site=site, limit=limit)
+        return
     if rank:
         _print_seller_rank(
             cfg, store, site=site, limit=limit,
@@ -865,6 +875,102 @@ def _print_seller_rank(cfg, store, *, site, limit, show_rejected, sync_watch=Fal
             )
         if rej:
             console.print(f"[dim]  缺什麼（共通）：{rej[0][0].missing[0].split('——')[-1]}[/dim]")
+
+
+def _fmt_alpha_total(score) -> str:
+    """Supply Fit 排行榜的 Alpha 欄：`ok=False`／沒有分數一律「證據不足」。
+
+    **絕不可以顯示成 `0.0`**——0 分的語意是「算出來就是比同儕貴」，
+    證據不足的語意是「湊不到同儕，不知道」，兩者顯示成同一個東西
+    會讓使用者把「不知道」讀成「比同儕貴」，方向剛好相反。
+    """
+    if score is None or not score.ok or score.total is None:
+        return "證據不足"
+    return f"{score.total:.1f}"
+
+
+def _supply_dim_raw(fit, name: str) -> float | None:
+    """取 `SupplyFit.dimensions` 裡某個維度的 `raw`，不可得回 None。"""
+    for d in fit.dimensions:
+        if d.name == name and d.available and d.raw is not None:
+            return d.raw
+    return None
+
+
+def _print_supply_fit(cfg, store, *, site, limit) -> None:
+    from .seller_supply import SupplyParams, supply_fit_all
+
+    rep = _alpha_report(cfg, store, with_model=False)
+    if not rep.metrics:
+        console.print("[dim]沒有任何帶賣家的市場列——先跑 scan 或 backfill-sellers。[/dim]")
+        return
+
+    metrics = list(rep.metrics.values())
+    if site:
+        metrics = [m for m in metrics if m.site == site]
+    if not metrics:
+        console.print(f"[dim]站 {site} 沒有任何帶賣家的市場列。[/dim]")
+        return
+
+    fits = supply_fit_all(metrics, params=SupplyParams())
+    scores = rep.scores
+
+    console.print(
+        "[dim]供給契合度回答「值不值得盯」，不是「便不便宜」——"
+        "這兩欄是兩把不同的尺，不可相加。[/dim]"
+    )
+
+    ok_fits = [f for f in fits.values() if f.ok]
+    n_alpha_ok = sum(1 for k in fits if scores.get(k) is not None and scores[k].ok)
+    console.print(
+        f"[bold]{len(ok_fits)}/{len(fits)}[/bold] 個賣家算得出供給契合度"
+        f"（對照：Alpha 只有 {n_alpha_ok} 個）"
+    )
+
+    ranked = sorted(ok_fits, key=lambda f: (-(f.total or 0.0), f.seller_key))[:limit]
+
+    if not ranked:
+        console.print("[yellow]目前沒有任何賣家達到供給契合度門檻。[/yellow]")
+    else:
+        t = Table(title=f"供給契合度排行榜（{len(ranked)} 個達門檻）")
+        for col, just in (
+            ("seller_key", "left"), ("供給分", "right"), ("維度", "right"),
+            ("深度", "right"), ("跨度", "right"), ("8-9分", "right"),
+            ("系列", "right"), ("Alpha", "right"),
+        ):
+            t.add_column(col, justify=just)
+        for fit in ranked:
+            depth = _supply_dim_raw(fit, "supply_depth")
+            span = _supply_dim_raw(fit, "persistence")
+            grade = _supply_dim_raw(fit, "grade_profile")
+            series = _supply_dim_raw(fit, "series_focus")
+            t.add_row(
+                fit.seller_key,
+                f"{fit.total:.1f}",
+                f"{fit.n_dimensions_used}/{fit.n_dimensions_total}",
+                f"{depth:.0f}" if depth is not None else "—",
+                f"{span:.0f}天" if span is not None else "—",
+                f"{grade:.0%}" if grade is not None else "—",
+                f"{series:.0%}" if series is not None else "—",
+                _fmt_alpha_total(scores.get(fit.seller_key)),
+            )
+        console.print(t)
+
+        n_caveat_rows = min(5, limit)
+        for fit in ranked[:n_caveat_rows]:
+            if fit.caveats:
+                console.print(f"[dim]  {fit.seller_key}：[/dim]")
+                for cv in fit.caveats:
+                    console.print(f"[yellow]    {cv}[/yellow]")
+
+    rejected = [f for f in fits.values() if not f.ok]
+    if rejected:
+        reason_counts = Counter(f.reason for f in rejected)
+        top_reason, top_count = reason_counts.most_common(1)[0]
+        console.print(
+            f"\n[dim]未達門檻 {len(rejected)} 個賣家，最常見的原因"
+            f"（{top_count} 個）：{top_reason}[/dim]"
+        )
 
 
 @app.command()
