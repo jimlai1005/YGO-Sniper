@@ -1,0 +1,2356 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ygo-sniper</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1e222b; --line:#2a2f3a;
+    --ink:#e6e9ef; --dim:#8b93a7; --accent:#5eead4; --warn:#fbbf24;
+    --danger:#f87171; --good:#4ade80; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box;min-width:0}
+  /* min-width:0 是全域的，不是裝飾：flex/grid 子項的預設 min-width:auto 會讓
+     長標題與長網址把父格撐開，於是整頁多出一條水平捲軸——而使用者的抱怨
+     正是「放大以後還要左右調整」。破字換行的 overflow-wrap 是同一件事的另一半。 */
+  html{overflow-x:hidden}   /* 最後防線；真正的修法是下面每一格都 minmax(0,…) */
+  body{margin:0;background:var(--bg);color:var(--ink);overflow-wrap:anywhere;
+       font:14px/1.55 -apple-system,BlinkMacSystemFont,"Helvetica Neue","PingFang TC",sans-serif}
+  img{max-width:100%}
+  a{color:var(--accent);text-decoration:none}
+  header{position:sticky;top:0;z-index:10;background:rgba(15,17,21,.94);
+         backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:14px 20px}
+  .row{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  h1{font-size:16px;margin:0;letter-spacing:.5px}
+  h1 span{color:var(--dim);font-weight:400;font-size:12px;margin-left:8px}
+  .pill{background:var(--panel-2);border:1px solid var(--line);border-radius:999px;
+        padding:3px 11px;font-size:12px;color:var(--dim)}
+  .pill b{color:var(--ink)}
+  button{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);
+         border-radius:7px;padding:6px 12px;font-size:12px;cursor:pointer;font-family:inherit}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button.on{background:var(--accent);color:#06231f;border-color:var(--accent);font-weight:600}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  button:disabled:hover{border-color:var(--line);color:var(--ink)}
+  select{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);
+         border-radius:7px;padding:6px 10px;font-size:12px;font-family:inherit}
+  .lbl{font-size:11.5px;color:var(--dim);letter-spacing:.4px}
+  .pill.live{border-color:var(--accent);color:var(--accent)}
+  .pill.stale{border-color:#6b5322;color:var(--warn)}
+  main{padding:20px;max-width:1500px;margin:0 auto}
+
+  /* ---- 一列一個標的的全寬橫幅 -------------------------------------------
+     使用者原話：「一次有三個，我還必須左右調整，瀏覽速度很慢」。
+     所以版面只有一欄，垂直滾動就能看完；圖大到看得出卡況（左 260px），
+     資訊在右。視窗窄（或頁面放大）時自動變成圖上文下，**永遠只有垂直捲軸**。
+     兩欄都用 minmax(0,…)：預設的 auto 最小寬度會被長標題撐爆。 */
+  .rows{display:flex;flex-direction:column;gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:14px;display:grid;gap:16px;
+        grid-template-columns:minmax(0,260px) minmax(0,1fr);align-items:start}
+  @media(max-width:900px){
+    .card{grid-template-columns:minmax(0,1fr)}
+    .shot-wrap{max-width:360px}
+  }
+  .card.hot{border-color:#3f6b5f;box-shadow:0 0 0 1px rgba(94,234,212,.14)}
+  /* 有觸發旗標的（白撿／折價／可丟 offer）挑出來；沒觸發的維持素色，
+     它們是「符合條件、請你自己判斷」，不是系統在推薦。 */
+  .card.trig{border-color:#4a5570}
+
+  /* 圖用 contain 不用 cover：卡面被裁掉就失去預覽的意義（邊角與置中
+     正是鑑定卡最該看的地方）。aspect-ratio 固定容器高度，避免圖片載入
+     前後版面跳動。 */
+  .shot-wrap{position:relative;width:100%;aspect-ratio:3/4;border-radius:9px;
+        background:var(--panel-2);border:1px solid var(--line);overflow:hidden}
+  .shot{width:100%;height:100%;object-fit:contain;display:block;cursor:zoom-in}
+  .shot-ph{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+        color:var(--dim);font-size:12px;text-align:center;padding:8px}
+  .shot-wrap.noimg .shot{display:none}
+  .shot-wrap.noimg .shot-ph{display:flex}
+  .body{display:flex;flex-direction:column;gap:8px;min-width:0}
+  .badge{font-size:10.5px;padding:1px 7px;border-radius:5px;border:1px solid var(--line);
+         background:var(--panel-2);color:var(--dim);margin-left:6px;vertical-align:2px;
+         white-space:nowrap}
+  .badge.on{border-color:#3f6b5f;background:#153029;color:var(--good)}
+  /* 卡片分類徽章（CardBucket）。刻意跟 .badge（觸發／候選）與 .tier-chip（競標梯隊）
+     不同色系：那兩個是**系統算出來的**，這個是**使用者自己指派的**，
+     混色的話會讓人以為分類也是自動判的（它不是，也刻意不是）。 */
+  .bkt{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 7px;
+       border-radius:5px;margin-left:6px;vertical-align:2px;white-space:nowrap;
+       background:#2a1f3d;color:#c4b5fd;border:1px solid #5b4b8a}
+  .top{display:flex;gap:12px;padding:12px}
+  .thumb{width:88px;height:88px;flex:0 0 88px;border-radius:7px;object-fit:contain;
+         background:var(--panel-2);border:1px solid var(--line)}
+  .title{font-size:15px;line-height:1.45;margin:0}
+  .money{font-family:var(--mono);font-size:22px;font-weight:600;letter-spacing:-.4px}
+  .money small{font-size:11px;color:var(--dim);font-weight:400;margin-left:6px;font-family:inherit}
+  .cmp{font-size:12px;color:var(--dim);font-family:var(--mono)}
+  .flags{display:flex;flex-wrap:wrap;gap:5px}
+  .flag{font-size:11px;padding:2px 8px;border-radius:5px;background:var(--panel-2);
+        border:1px solid var(--line);color:var(--dim)}
+  .flag.free{background:#153029;border-color:#2f6b57;color:var(--good)}
+  .flag.disc{background:#12283a;border-color:#2b5b7d;color:#7dd3fc}
+  .flag.warn{background:#33280f;border-color:#6b5322;color:var(--warn)}
+  .flag.bad{background:#331616;border-color:#6b2a2a;color:var(--danger)}
+  .reason{font-size:12px;color:var(--dim);line-height:1.6}
+  .routes{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+  .routes div{display:flex;justify-content:space-between;gap:12px;padding:1px 0}
+  .routes div.best{color:var(--ink)}
+  .acts{display:flex;gap:6px;padding-top:10px;border-top:1px solid var(--line);
+        flex-wrap:wrap;align-items:center;margin-top:auto}
+  .acts button{padding:5px 9px;font-size:11.5px}
+  .score{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--dim)}
+  .empty{color:var(--dim);padding:60px 20px;text-align:center}
+  /* 表格是唯一「內容天生比容器寬」的東西：讓它在自己的框裡橫捲，
+     頁面本體永遠不橫捲。 */
+  .scroll-x{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+  th,td{text-align:right;padding:5px 10px;border-bottom:1px solid var(--line);
+        white-space:nowrap}
+  th:first-child,td:first-child{text-align:left;font-family:inherit}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:11px;
+         padding:14px 16px;margin-bottom:18px}
+  .panel h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600;letter-spacing:.4px}
+  .kpi{font-family:var(--mono);font-size:22px;font-weight:600}
+  .kpi.good{color:var(--good)}
+  /* auto-fit 而不是寫死三欄：放大到 150% 時視窗只剩 ~960 CSS px，
+     三欄各 320px 再加 gap 就會溢出，於是整頁橫捲。 */
+  .split{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(260px,100%),1fr));gap:20px}
+  #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel-2);
+         border:1px solid var(--accent);color:var(--accent);padding:9px 18px;border-radius:8px;
+         font-size:13px;opacity:0;transition:.25s;pointer-events:none}
+  #toast.show{opacity:1}
+
+  /* --- 鑑價 --------------------------------------------------------- */
+  .apr-form{display:flex;gap:8px;flex-wrap:wrap}
+  /* flex-basis 240 但 min-width:0：窄視窗時它會縮，不會把整列頂出去 */
+  .apr-form input{flex:1 1 240px;min-width:0;background:var(--bg);color:var(--ink);
+        border:1px solid var(--line);border-radius:7px;padding:8px 11px;
+        font:13px/1.4 var(--mono)}
+  .apr-form input:focus{outline:none;border-color:var(--accent)}
+  .apr-form button{padding:8px 18px;font-size:13px}
+  .hint{font-size:11.5px;color:var(--dim);margin-top:8px;line-height:1.6}
+  .verdict{border-radius:10px;padding:14px 16px;margin:14px 0;border:1px solid}
+  .verdict h3{margin:0 0 4px;font-size:22px;letter-spacing:.5px}
+  .verdict .sub{font-size:12px;opacity:.85}
+  .verdict ul{margin:10px 0 0;padding-left:18px}
+  .verdict li{font-size:12.5px;line-height:1.65;margin-bottom:4px}
+  .v-AVOID{background:#2b1414;border-color:#7a2f2f;color:#fca5a5}
+  .v-CAUTION{background:#2b2410;border-color:#7a6222;color:#fcd34d}
+  .v-WORTH_A_LOOK{background:#122a20;border-color:#2f6b57;color:#86efac}
+  .stance{font-size:11.5px;color:var(--dim);line-height:1.6;
+        border-left:2px solid var(--line);padding-left:10px;margin:12px 0}
+  .apr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:12px 0}
+  .box{background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+  .box h4{margin:0 0 7px;font-size:11px;color:var(--dim);font-weight:600;letter-spacing:.4px}
+  .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:1.5px 0}
+  .kv span:last-child{font-family:var(--mono);text-align:right}
+  .warnbox{background:#33280f;border:1px solid #6b5322;color:var(--warn);
+        border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.6;margin:10px 0}
+  .errbox{background:#331616;border:1px solid #6b2a2a;color:var(--danger);
+        border-radius:8px;padding:11px 14px;font-size:12.5px;line-height:1.7;
+        white-space:pre-wrap;margin:10px 0}
+  .comps h3{font-size:13px;margin:16px 0 4px}
+  .comps table{font-size:11.5px}
+  .comps td.t{text-align:left;font-family:inherit;max-width:340px;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap}
+  .tier{display:inline-block;font-size:10px;padding:1px 6px;border-radius:4px;
+        border:1px solid var(--line);background:var(--panel-2);color:var(--dim);font-family:inherit}
+  .tier.t1{border-color:#2f6b57;color:var(--good)}
+  .tier.t2{border-color:#2b5b7d;color:#7dd3fc}
+  .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line);
+        border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite;
+        vertical-align:-1px;margin-right:7px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* --- 關鍵字搜尋 ---------------------------------------------------- */
+  .sr-form input[type=number]{flex:0 1 120px}
+  .funnel{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0 6px;
+        font-size:12px;color:var(--dim)}
+  .funnel b{color:var(--ink);font-family:var(--mono)}
+  .funnel .arrow{opacity:.5}
+  .srcline{font-family:var(--mono);font-size:11.5px;color:var(--dim);
+        display:flex;flex-wrap:wrap;gap:14px;margin-bottom:4px}
+  .srcline .bad{color:var(--danger)}
+  .why{font-size:11.5px;color:var(--dim);line-height:1.7;margin:4px 0 10px}
+  .why span{display:inline-block;background:var(--panel-2);border:1px solid var(--line);
+        border-radius:5px;padding:1px 7px;margin:0 5px 5px 0}
+  /* 搜尋結果與訊號清單用**同一種橫幅**：兩邊都是「一列一個標的」，
+     版面不一樣的話使用者要學兩套。 */
+  .sr-item{display:grid;gap:16px;padding:14px;border:1px solid var(--line);
+        border-radius:12px;background:var(--panel);margin-bottom:14px;align-items:start;
+        grid-template-columns:minmax(0,220px) minmax(0,1fr)}
+  @media(max-width:900px){
+    .sr-item{grid-template-columns:minmax(0,1fr)}
+    .sr-item .shot-wrap{max-width:320px}
+  }
+  .sr-item.over{opacity:.7;border-style:dashed}
+  .sr-v{border-radius:7px;padding:5px 10px;font-size:12px;line-height:1.3;border:1px solid;
+        display:inline-block;white-space:nowrap}
+  .sr-main{min-width:0;display:flex;flex-direction:column;gap:7px}
+  .sr-title{font-size:15px;margin:0;line-height:1.45}
+  .sr-nums{display:flex;flex-wrap:wrap;gap:4px 16px;font-family:var(--mono);font-size:12px;
+        color:var(--dim)}
+  .sr-nums b{color:var(--ink)}
+  .sr-tag{font-size:10.5px;padding:1px 7px;border-radius:5px;border:1px solid var(--line);
+        background:var(--panel-2);color:var(--dim);margin-left:6px;white-space:nowrap}
+  .sr-tag.over{border-color:#6b5322;color:var(--warn)}
+  .sr-tag.bid{border-color:#6b2a2a;color:var(--danger)}
+  .sr-reason{font-size:12px;color:var(--dim);line-height:1.6}
+
+  /* --- 競標視圖 -------------------------------------------------------
+     這一區的版面只有一個目的：**讓「你的出價上限」是整張卡最大的東西**。
+     使用者會照著這個數字打進 Buyee 的出價欄，它比標題、比圖、比分數都重要。
+     其餘資訊（目前出價、空間、倒數）都排在它旁邊當佐證。 */
+  .bid-ceiling{background:#12283a;border:1px solid #2b5b7d;border-radius:10px;
+        padding:10px 14px;display:flex;flex-wrap:wrap;gap:4px 18px;align-items:baseline}
+  .bid-ceiling .big{font-family:var(--mono);font-size:30px;font-weight:700;
+        letter-spacing:-.5px;color:#7dd3fc;line-height:1.15}
+  .bid-ceiling .lab{font-size:11.5px;color:var(--dim);letter-spacing:.4px}
+  .bid-ceiling.none{background:#33280f;border-color:#6b5322}
+  .bid-ceiling.none .big{font-size:15px;color:var(--warn);font-weight:600}
+  /* 證據強度必須看得出差別：一個 L1 同卡成交撐著的上限，不可以跟一個
+     「區間退化到全域分位數」的上限長得一樣。低證據 = 暗掉的框 + 小一號的數字。 */
+  .bid-ceiling.ev-moderate{background:#2b2413;border-color:#6b5322}
+  .bid-ceiling.ev-moderate .big{color:var(--warn);font-size:25px}
+  .bid-ceiling.ev-weak{background:#331a1a;border-color:#7d3b3b}
+  .bid-ceiling.ev-weak .big{color:var(--danger);font-size:22px}
+  .ev-chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;
+        padding:2px 8px;border-radius:999px;letter-spacing:.3px;white-space:nowrap}
+  .ev-chip.strong{background:#123329;color:#5eead4;border:1px solid #2f6b57}
+  .ev-chip.moderate{background:#33280f;color:#fbbf24;border:1px solid #6b5322}
+  .ev-chip.weak{background:#331a1a;color:#f87171;border:1px solid #7d3b3b}
+  .ev-line{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:5px}
+  /* --- 可行動性梯隊 ---------------------------------------------------
+     第一梯隊（有空間＋24h 內結標）是唯一「現在不看就沒了」的類別，所以它
+     必須一眼看得出來：左側亮色粗邊。第三梯隊反過來要**暗掉**——沒有上限
+     或已無空間的標的留在清單上是為了可稽核，不是為了被點進去。 */
+  .card.tier-1{border-color:#2f6b57;box-shadow:inset 4px 0 0 #34d399}
+  .card.tier-2{box-shadow:inset 4px 0 0 #6b5322}
+  .card.tier-3{opacity:.82}
+  .tier-chip{display:inline-block;font-size:11px;font-weight:700;padding:1px 8px;
+        border-radius:999px;margin-left:6px;white-space:nowrap;vertical-align:middle}
+  .tier-chip.t1{background:#123329;color:#5eead4;border:1px solid #2f6b57}
+  .tier-chip.t2{background:#33280f;color:#fbbf24;border:1px solid #6b5322}
+  .tier-chip.t3{background:var(--panel-2);color:var(--dim);border:1px solid var(--line)}
+  /* 「現價會漲」的誠實標註。**不是裝飾**：使用者看到 ¥1 → 上限 ¥5,840 會以為
+     撿到寶，而那只是競價還沒開始（見 bidding.PRICE_DYNAMICS_NOTE）。 */
+  .dyn-note{font-size:11.5px;line-height:1.6;color:var(--warn);background:#33280f;
+        border:1px solid #6b5322;border-radius:7px;padding:5px 10px}
+  .bid-row{display:flex;flex-wrap:wrap;gap:4px 16px;font-family:var(--mono);font-size:12.5px;
+        color:var(--dim)}
+  .bid-row b{color:var(--ink)}
+  .cd{font-family:var(--mono);font-weight:600}
+  .cd.soon{color:var(--warn)}
+  .cd.urgent{color:var(--danger)}
+  .cd.ended{color:var(--dim);text-decoration:line-through}
+  .bid-why{font-size:11.5px;color:var(--dim);line-height:1.65}
+
+  /* --- 篩選列（全部控制在同一列，不分兩排各自為政）--------------------
+     使用者原話：「他現在看起來很雜」。所以篩選是**一列**：分類、快捷、
+     P 門檻、旗標、清除、筆數統計依序排開，窄視窗時自然換行。
+     每一個開著的篩選都必須在「篩掉 N 筆」裡留下痕跡——安靜地隱藏東西
+     比顯示太多更糟（你不會知道自己沒看到什麼）。 */
+  .filterbar{gap:8px 10px}
+  .filterbar .sep{width:1px;height:17px;background:var(--line);flex:0 0 1px}
+  .pfilt{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--dim);
+        background:var(--panel-2);border:1px solid var(--line);border-radius:7px;
+        padding:4px 10px;cursor:pointer;white-space:nowrap}
+  .pfilt.on{border-color:var(--accent);color:var(--accent)}
+  .pfilt input[type=number]{width:46px;background:var(--bg);color:inherit;
+        border:1px solid var(--line);border-radius:5px;padding:1px 4px;
+        font:12px/1.4 var(--mono);text-align:right}
+  .pfilt input[type=checkbox]{accent-color:var(--accent);margin:0}
+  .hid{color:var(--warn)}
+  .hid b{color:var(--warn)}
+
+  /* --- 成本拆解（預設收合）------------------------------------------
+     使用者踩過的坑：看到「NT$2,074 到手」不知道其中 NT$1,034 是國際運費，
+     以為工具算錯。所以每一筆都攤得開，而且**所有路徑一起列**——
+     只給最便宜那條的數字，就看不到「集運 vs 單張直寄」差在哪。 */
+  details.brk{border:1px solid var(--line);border-radius:8px;background:var(--panel-2)}
+  details.brk>summary{cursor:pointer;padding:6px 10px;font-size:11.5px;color:var(--dim);
+        list-style:none}
+  details.brk>summary::-webkit-details-marker{display:none}
+  details.brk>summary::before{content:"▸ ";font-family:var(--mono)}
+  details.brk[open]>summary::before{content:"▾ "}
+  details.brk>summary:hover{color:var(--accent)}
+  details.brk .inner{padding:0 10px 9px}
+  /* 收合區塊標題旁的「裡面有東西」提示（A）：收合了也要看得出上次查了什麼 */
+  .sec-note{font-size:11.5px;color:var(--dim);margin-left:8px;white-space:nowrap}
+  .brk-t{font-size:11.5px}
+  .brk-t tr.best td{color:var(--ink)}
+  .brk-t td.pos{color:var(--accent)}
+  .brk-note{font-size:11px;color:var(--dim);line-height:1.65;margin-top:6px}
+  .brk-note b{color:var(--ink);font-family:var(--mono)}
+
+  /* 「若要轉賣」區塊。可行與不可行必須**長得不一樣**——不可行時給一個
+     灰色的理由清單，不給任何數字（給數字會被讀成「算過了、只是不划算」）。 */
+  .resale{margin-top:7px;border-top:1px dashed var(--line);padding-top:7px;font-size:11.5px}
+  .resale .hd{color:var(--dim);margin-bottom:4px}
+  .resale .hd b{color:var(--ink)}
+  .resale .no{color:var(--dim)}
+  .resale .no .r{margin:2px 0 0 0;line-height:1.55}
+  .resale .profit{font-family:var(--mono);font-weight:600}
+  .resale .profit.pos{color:var(--good)}
+  .resale .profit.neg{color:var(--danger)}
+  .resale table{font-size:11px;margin-top:4px}
+  .resale table td:first-child{text-align:left;color:var(--dim)}
+  .resale .tax{color:var(--warn);margin-top:5px;line-height:1.55}
+
+  /* 運費佔比告警：一眼看出「錢花在哪」。不扣分、不是壞消息，只是事實。 */
+  .ovbar{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--warn);
+        background:#33280f;border:1px solid #6b5322;border-radius:7px;padding:4px 9px}
+  .ovbar .bar{flex:0 1 170px;height:5px;border-radius:3px;background:#4a3a12;
+        overflow:hidden;min-width:40px}
+  .ovbar .bar i{display:block;height:100%;background:var(--warn)}
+  .ovbar b{font-family:var(--mono)}
+  .pw{font-family:var(--mono)}
+  .pw.lo{color:var(--danger)}
+  .pw.hi{color:var(--good)}
+
+  /* --- 賣家（Seller Alpha）------------------------------------------- */
+  /* caveat 是**判斷的一部分**，不是裝飾：「同儕全來自 1 家」「帳本只有 1.6 天」
+     這種前提，讀不到就等於整個分數在騙人。所以它是滿版的黃色警示條，
+     不是 tooltip、不是灰色小字——tooltip 要滑鼠停留才看得到，等於沒說。 */
+  .caveat{display:block;white-space:normal;margin:5px 0;padding:7px 10px;
+        border:1px solid #6b5322;border-left:3px solid var(--warn);border-radius:6px;
+        background:rgba(251,191,36,.10);color:var(--warn);font-size:12px;line-height:1.55}
+  .sv-row{cursor:pointer}
+  .sv-row:hover td{background:var(--panel-2)}
+  .sv-row.on td{background:var(--panel-2)}
+  .noscore{color:var(--warn);font-family:var(--mono)}
+  .sv-tag{font-size:11px;border-radius:5px;padding:1px 6px;border:1px solid var(--line);
+        color:var(--dim);white-space:nowrap}
+  .sv-tag.manual{border-color:var(--accent);color:var(--accent)}
+  .sv-tag.auto{border-color:var(--good);color:var(--good)}
+  .comp-bar{height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden;
+        min-width:60px;border:1px solid var(--line)}
+  .comp-bar i{display:block;height:100%;background:var(--accent)}
+  .comp-bar i.neg{background:var(--danger)}
+
+  /* --- 點圖看原圖（純 CSS + 3 行 JS，不引任何外部資源）---------------- */
+  #lightbox{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.88);
+        display:none;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}
+  #lightbox.show{display:flex}
+  #lightbox img{max-width:96vw;max-height:88vh;object-fit:contain;border-radius:8px}
+  #lightbox .tip{position:absolute;bottom:14px;left:0;right:0;text-align:center;
+        color:var(--dim);font-size:12px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="row">
+    <h1>🃏 ygo-sniper<span>1998–2004 · PSA / ARS</span></h1>
+    <span class="pill" id="stat-new">待處理 <b>–</b></span>
+    <span class="pill" id="stat-bundle">湊單籃 <b>–</b></span>
+    <span class="pill" id="stat-comps">行情 <b>–</b></span>
+    <span class="pill" id="stat-fx">匯率 <b>–</b></span>
+    <div style="margin-left:auto" class="row">
+      <span class="pill" id="scan-when" title="還沒讀到掃描狀態">最後掃描 <b>–</b></span>
+      <button id="scan-btn" onclick="scanNow()">立即掃描</button>
+      <button onclick="loadAll()">重新整理</button>
+    </div>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button class="tab on" data-state="new">待處理</button>
+    <button class="tab" data-state="asked_seller">已詢問</button>
+    <button class="tab" data-state="offer_sent">已出價</button>
+    <button class="tab" data-state="in_bundle">湊單籃</button>
+    <!-- 已購買：按下卡片的「已購買」之後，標的會離開待處理清單。沒有這個
+         頁籤的話它就此消失（使用者原話：「我就不知道他去哪邊了」），
+         而「我到底買過什麼」正是最該回查的一份清單。 -->
+    <button class="tab" data-state="bought">已購買</button>
+    <button class="tab" data-state="watching">觀察中</button>
+    <!-- 分類分頁（data-bucket）：篩的是 bucket、**不分狀態**，其餘分頁篩的是 state。
+         這兩個維度是正交的——高價卡按了「已出價」之後仍然是高價卡，
+         所以它不能是 state 的第九、第十個值（那會在按下的瞬間洗掉分類）。 -->
+    <button class="tab" data-bucket="high_value"
+            title="使用者手動指派的分類：比較貴的 PSA9/10、1999 真紅眼、SM-51……。跨狀態顯示（已詢問／已出價／已購買的也在這裡）。">💎 高價卡</button>
+    <button class="tab" data-bucket="rare"
+            title="使用者手動指派的分類：2002-2003 比賽卡、限量 1st edition——可能是普卡但版次稀有，策略是等降價再進。跨狀態顯示。">🌟 稀有卡</button>
+    <button class="tab" data-state="expired">已過期</button>
+    <button class="tab" data-state="all">全部</button>
+    <span class="sep" style="width:1px;height:18px;background:var(--line);display:inline-block;margin:0 6px"></span>
+    <!-- 賣家是**另一個視圖**（不是訊號的第九種狀態），所以用 data-view：
+         同一個 .tab 樣式，但點下去換的是整個版面而不是清單的 state。 -->
+    <button class="tab" data-view="sellers" title="Seller Alpha：誰持續比同儕便宜（同儕相對折價，不是模型公允價）">👤 賣家</button>
+  </div>
+  <div class="row filterbar" id="filterbar" style="margin-top:8px">
+    <span class="lbl">篩選</span>
+    <button class="filt on" data-filter="all">全部</button>
+    <button class="filt" data-filter="triggered">只看觸發</button>
+    <button class="filt" data-filter="plain">只看未觸發</button>
+    <button class="filt" data-filter="auction"
+            title="只看競標中的標的。預設依「可行動性」排序：⚡ 有上限＋現價低於上限＋24 小時內結標的排最前，其次是有空間但還早的，最後是沒上限／已無空間的；同一梯隊內照結標時間由近到遠。">🔨 競標</button>
+    <span class="sep"></span>
+    <button class="quick" data-quick="ceiling"
+            title="只看算得出出價上限的競標（證據夠格才有上限；其餘是「樣本不足，不給數字」）">🎯 有出價上限</button>
+    <button class="quick" data-quick="room"
+            title="只看目前出價還低於你的上限的競標——這是現在真的可以出手的那一批">✅ 有空間的競標</button>
+    <!-- 使用者原話：競標中的卡「價格很低，但是並不是真正的價格，我能做的其實
+         也就是出價而已」。所以這是一個**注意力**開關：把只能等的那一批收起來，
+         專心處理現在就能成交的。與上面的分類可疊加（「🔨 競標」＋這顆＝必然空清單，
+         那是合理的，畫面會說明為什麼空）。 -->
+    <button class="quick" data-quick="noauction"
+            title="把競標中的標的收起來。競標的現價會漲、不是能付的價格，對它唯一能做的動作就是出價等結標——先專心處理一口價的標的時把它們藏起來。">🙈 隱藏競標中</button>
+    <span class="sep"></span>
+    <label class="pfilt" id="p-filter"
+           title="P(值得買)＝P(公允價 > 到手成本)，相對於估價模型的殘差分布，不是市場真實機率。算不出 P 的標的不會被這道篩選隱藏——沒有依據不等於不好。">
+      <input type="checkbox" id="p-on">隱藏 P(值得買) &lt;
+      <input type="number" id="p-th" min="0" max="99" step="5" value="30">%
+    </label>
+    <select id="flag-filter" title="只顯示帶有這個旗標的標的">
+      <option value="">任何旗標</option>
+    </select>
+    <span class="sep"></span>
+    <select id="sort-mode"
+            title="排序只改變順序，不隱藏任何標的。P(值得買) 算不出來／沒有數字的一律排最後。&#10;「🔨 競標」視圖預設照可行動性梯隊排（24h 內＋有空間的在最前），但你明確選了排序就以你選的為準。">
+      <option value="score">排序：分數（預設）</option>
+      <option value="landed_asc">到手價 低→高</option>
+      <option value="landed_desc">到手價 高→低</option>
+      <option value="p_desc">P(值得買) 高→低</option>
+      <option value="p_asc">P(值得買) 低→高</option>
+      <option value="seen_desc">更新 新→舊</option>
+      <option value="seen_asc">更新 舊→新</option>
+    </select>
+    <button id="filter-reset" style="display:none" title="回到「全部」，不隱藏任何標的">清除篩選</button>
+    <span class="pill" id="list-count">– 筆</span>
+  </div>
+</header>
+
+<main>
+<div id="signals-view">
+  <div class="split">
+    <div class="panel">
+      <h2>湊單籃攤提</h2>
+      <div class="kpi" id="bundle-total">NT$ –</div>
+      <div class="cmp" id="bundle-detail">籃子是空的</div>
+    </div>
+    <div class="panel">
+      <h2>破口價（到手 = 鑑定費）</h2>
+      <div class="scroll-x"><table id="breakeven"><tbody><tr><td>載入中…</td></tr></tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>怎麼用</h2>
+      <div class="cmp" style="line-height:1.7">
+        🔥 白撿 = 到手成本低於鑑定費<br>
+        📉 折價 = 顯著低於近期成交中位數<br>
+        🚚 <b>運費吃掉了 N%</b> = 運費雜費佔到手成本超過門檻（不需行情就看得出來）<br>
+        <b>P(值得買)</b> = P(公允價 &gt; 到手成本)，相對於估價模型的殘差分布；
+        上方可以把低於門檻的整批藏起來（藏了幾筆會寫出來）<br>
+        點卡片上的<b>成本拆解</b>看錢花在哪：每條路徑的商品／手續費／運費<br>
+        ❓ = 需私訊問賣家寄不寄台灣<br>
+        🔨 競標中 = 目前出價會漲，判準改看<b>出價上限</b>（切到「🔨 競標」分頁）<br>
+        ⚡ <b>現在就該看</b> = 有上限、現價仍低於上限、且 24 小時內結標 —— 競標分頁把這一梯隊排最前<br>
+        ⏳ 結標還有 48 小時以上的標的，<b>現價沒有參考價值</b>：價格會漲，此刻的空間不代表最終成交價<br>
+        <b>🔥 觸發</b> = 有白撿／折價／可丟 offer／低於出價上限 之一<br>
+        <b>候選</b> = 符合年代與分數，但沒有硬理由 —— 要不要看是<b>你</b>的判斷<br>
+        丟進<b>湊單籃</b>會即時重算攤提成本
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <!-- 收合作法與「📊 平台研究」同一套（details.brk），使用者原話：
+         「使用這兩個搜尋之後，版面才不會拉得很長」。與平台研究不同的兩點：
+         1. 收合狀態存 localStorage（預設收合，要用再展開）；
+         2. **結果出現時自動展開**——收合是為了省版面，不是把剛查到的結果藏起來。 -->
+    <details class="brk" id="apr-sec" style="border:0;background:none">
+    <summary style="padding:0"><h2 style="display:inline">🔍 鑑價 — 貼一個商品網址，出一份判決報告</h2><span class="sec-note" id="apr-note"></span></summary>
+    <div style="margin-top:10px">
+    <form class="apr-form" onsubmit="runAppraise(event)">
+      <input id="apr-url" type="text" autocomplete="off" spellcheck="false"
+             placeholder="https://auctions.yahoo.co.jp/jp/auction/… / https://buyee.jp/mercari/item/… / https://tw.mercari.com/zh-hant/items/… / https://www.ebay.com/itm/…">
+      <button type="submit" id="apr-btn">鑑價</button>
+    </form>
+    <div class="hint">
+      支援 Yahoo 拍賣商品頁、Buyee 的 Yahoo／Mercari／PayPay 商品頁、<b>Mercari 台灣</b>商品頁、<b>eBay</b> 商品頁（<code>ebay.com/itm/…</code>）。
+      Buyee 的 Mercari／PayPay 要開瀏覽器解 WAF 挑戰，<b>約需 20-30 秒</b>；
+      Yahoo 拍賣、Mercari 台灣與 eBay 約 1-2 秒。
+      ⚠️ Mercari 台灣<b>標的是新台幣</b>（站內已換過匯），到手成本不會再套一次匯率。
+      ⚠️ eBay 顯示的台幣是<b>它換算的估算值</b>（實際以賣家幣別請款），到手成本會套刷卡加成；
+      eBay 競標標的顯示的是<b>目前出價</b>，不是你付得出去的價格。
+    </div>
+    <div id="apr-out"></div>
+    </div>
+    </details>
+  </div>
+
+  <div class="panel">
+    <!-- 收合作法同上（見鑑價區塊的註解）。 -->
+    <details class="brk" id="sr-sec" style="border:0;background:none">
+    <summary style="padding:0"><h2 style="display:inline">🔎 關鍵字搜尋 — 輸入卡名，回最適合入手的賣場清單</h2><span class="sec-note" id="sr-note"></span></summary>
+    <div style="margin-top:10px">
+    <form class="apr-form sr-form" onsubmit="runSearch(event)">
+      <input id="sr-kw" type="text" autocomplete="off" spellcheck="false"
+             placeholder="青眼の白龍 / 遊戯王 PSA 初期 …">
+      <input id="sr-budget" type="number" min="0" step="50" value="1200" title="預算（台幣，到手成本）">
+      <button type="button" id="sr-venue" class="on" onclick="toggleVenue()"
+              title="校正到標的自己的平台。Yahoo 是競價出清價、Mercari/PayPay 是定價零售價，兩者差 2 倍以上">平台校正：開</button>
+      <button type="submit" id="sr-btn">搜尋</button>
+    </form>
+    <div class="hint">
+      三個來源各抓第 1 頁（新着排序）：Yahoo 直抓約 1 秒、Mercari 約 4 秒、PayPay 約 1 秒；
+      <b>Buyee 冷啟動要開瀏覽器解 WAF，第一次會多約 20 秒</b>。
+      判決與可比樣本跟上面的「貼網址鑑價」<b>共用同一套判準</b>。
+      預算外的標的不會被丟掉，只是標記出來排在後面。
+    </div>
+    <div id="sr-out"></div>
+    </div>
+    </details>
+  </div>
+
+  <div class="panel" id="vs-panel">
+    <!-- 預設收合：這一區是四張表，攤開來會把訊號清單推到兩個螢幕以外。
+         內容照樣載入（唯讀、來自 db），要看的時候點開就有。 -->
+    <details class="brk" style="border:0;background:none">
+    <summary style="padding:0"><h2 style="display:inline">📊 平台研究 — PayPay 真的比較便宜買得到嗎？（唯讀）</h2></summary>
+    <div style="margin-top:10px">
+    <div id="vs-out" class="cmp">載入中…</div>
+    <div class="hint">
+      唯讀視圖：報告由 <b>ygo-sniper venue-study</b> 產生後存進 db，這裡不重算、不打外網。
+      ⚠️ Yahoo 的在架價是<b>即決価格</b>（賣家開的溢價），Mercari／PayPay 是定價；
+      競標尾盤常以低於即決價成交，所以這份比較<b>系統性有利於 PayPay</b>。
+      樣本不足的分層一律顯示「不足以判定」，不會硬給數字。
+    </div>
+    </div>
+    </details>
+  </div>
+
+  <div class="panel" id="bid-panel" style="display:none">
+    <h2>🔨 競標出價上限 — 照著上限打，超過就不要</h2>
+    <div id="bid-meta" class="cmp">載入中…</div>
+  </div>
+
+  <div class="rows" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">這個分頁沒有標的。</div>
+</div><!-- /signals-view -->
+
+<!-- ===================== 賣家視圖（Seller Alpha）===================== -->
+<div id="seller-view" style="display:none">
+  <div class="panel">
+    <h2>👤 Seller Alpha — 誰持續比同儕便宜</h2>
+    <div id="sv-cov" class="cmp">載入中…</div>
+  </div>
+  <div class="panel">
+    <h2>🎯 監控名單（輪替掃描）</h2>
+    <div id="sv-watch" class="cmp">載入中…</div>
+  </div>
+  <div class="panel">
+    <h2>排行榜</h2>
+    <div class="scroll-x"><table id="sv-rank"><tbody><tr><td>載入中…</td></tr></tbody></table></div>
+    <div class="hint">
+      主指標是<b>同儕相對折價</b>（同站 × 同卡 × 同版次 × 同分數 × 同價格基準的
+      其他賣家中位），<b>不是</b>「售價 ÷ 模型公允價」——後者會把模型的分段偏誤
+      當成賣家 alpha。⚠️ <b>不給分數</b>（證據不足）與 <b>0 分</b>是兩回事：
+      前者是「我不知道」，後者是「比同儕貴，沒有 alpha」。
+    </div>
+  </div>
+  <div class="panel" id="sv-detail-panel" style="display:none">
+    <h2 id="sv-detail-title">賣家細節</h2>
+    <div id="sv-detail">載入中…</div>
+  </div>
+  <div class="panel">
+    <h2>未達評分門檻（證據不足）</h2>
+    <div class="scroll-x"><table id="sv-rejected"><tbody><tr><td>載入中…</td></tr></tbody></table></div>
+  </div>
+</div>
+</main>
+
+<div id="toast"></div>
+<div id="lightbox"><img id="lightbox-img" alt=""><div class="tip">點任意處關閉（Esc 也可以）</div></div>
+
+<script>
+const FLAG_META = {
+  free_card:        ["🔥 白撿", "free"],
+  discount:         ["📉 折價", "disc"],
+  shipping_kills_it:["🚚 運費吃掉（比行情）", "warn"],
+  high_overhead:    ["🚚 運費佔比超標", "warn"],
+  needs_shipping_ask:["❓ 需問寄送", "warn"],
+  needs_bundle_ask: ["💬 可問合併", "warn"],
+  offer_chance:     ["🎯 可丟 offer", "disc"],
+  thin_comps:       ["⚠️ 樣本少", "warn"],
+  suspicious_cheap: ["🚨 可疑", "bad"],
+  live_auction:     ["🔨 競標中", "warn"],
+  bid_worth:        ["✅ 低於出價上限", "free"],
+  bid_no_ceiling:   ["🚫 樣本不足·無上限", "bad"],
+  /* eBay 賣家不寄台灣、但可寄使用者的美國地址（buying.us_ship_zip）。
+     只是資訊：這種標的不進出價上限、不進推播（美→台轉運成本未建模）。 */
+  us_ship_option:   ["🇺🇸 可寄美國地址", "warn"],
+};
+
+/* ==== SIGNAL-FILTER-LOGIC:BEGIN ===================================== *
+ * 「哪些標的會被隱藏」的純函式。不碰 DOM、不讀全域狀態，開關由參數傳進來
+ * ——因為它被 tests/test_signal_filters.py 抽出來丟進 node 直接跑。
+ *
+ * 為什麼這種東西非要有測試：**篩選錯誤的症狀是「東西不見了」**，而畫面上
+ * 「被藏起來」與「本來就沒有」長得一模一樣（CLAUDE.md 第一節：誤殺是靜默的）。
+ * 這裡沒有紅字、沒有例外，只有一筆該看的卡片沒出現。
+ * ------------------------------------------------------------------- */
+
+/* 「這是不是競標標的」只有一份定義，來自後端的旗標（scoring 寫、db 存）。
+   前端不自己看價格語意去猜——猜錯的方向是把會漲的價格當成能付的價格。 */
+const isAuction = it => (it.flags || []).includes("live_auction");
+
+/** 「🙈 隱藏競標中」開關的判斷。true = 這一筆要被這道篩選擋下來。
+    判準只有 `live_auction` 旗標一個，與 isAuction 同源——這裡再看一次
+    price_kind 就是第二份定義，後端改了判準前端會安靜地分岔。 */
+function hiddenByAuctionFilter(it, hideAuction){
+  return !!hideAuction && isAuction(it);
+}
+
+/** 「🔨 只看競標」與「🙈 隱藏競標」同時開著＝取空集合。這是使用者自己選的
+    合理結果，但**畫面必須說得出為什麼是空的**，否則看起來就跟壞掉一樣。 */
+function auctionFiltersConflict(filterMode, hideAuction){
+  return filterMode === "auction" && !!hideAuction;
+}
+/* ==== SIGNAL-FILTER-LOGIC:END ======================================= */
+
+/* ==== AUCTION-VIEW-LOGIC:BEGIN ====================================== *
+ * 競標視圖的可行動性排序。這一段是**純函式**，不碰 DOM、不讀全域狀態，
+ * 時間與門檻一律由參數傳進來——因為它被 tests/test_auction_view.py 抽出來
+ * 丟進 node 直接跑。競標排錯順序的症狀是「你錯過了唯一能出手的那一筆」，
+ * 那不是眼睛看得出來的 bug，所以它必須有測試。
+ *
+ * 梯隊的定義與門檻**全部來自後端**（bidding.auction_view_config，隨 /api/signals
+ * 一起送）：cfg 是 null 時退回純結標時間序，絕不自己猜一個 24 小時。
+ * ------------------------------------------------------------------- */
+const bidOf     = it => (it.payload || {}).bid || null;
+const endOf     = it => ((it.payload || {}).listing || {}).end_time || null;
+
+/** 結標時間（epoch ms）。解析不到一律 null——**不猜**。 */
+function auctionEndMs(it){
+  const t = new Date(endOf(it) || "").getTime();
+  return isNaN(t) ? null : t;
+}
+
+/** 現價與上限的距離（**與 listing 同幣別**：Yahoo=日圓、eBay=台幣）。
+    上限取 max_bid_listing（eBay，與現價同基準）、退回 max_bid_jpy（Yahoo）——
+    與後端 bidding.ceiling_value_of 同一個規則，不可各自發明。
+    沒有上限、沒有現價一律 null，不退化成 0。 */
+function auctionRoom(it){
+  const b = bidOf(it), cur = it.price_native;
+  if(!b || !b.ok || cur == null) return null;
+  const ceiling = b.max_bid_listing != null ? b.max_bid_listing : b.max_bid_jpy;
+  if(ceiling == null) return null;
+  return ceiling - cur;
+}
+
+/** 梯隊：1 = 現在就該看（有空間＋快結標）、2 = 有空間但還早、3 = 其餘。 */
+function auctionTier(it, nowMs, cfg){
+  if(!cfg) return 3;
+  const room = auctionRoom(it);
+  if(room == null || room <= 0) return 3;      // 沒上限／已無空間
+  const end = auctionEndMs(it);
+  const win = cfg.actionable_window_hours * 3600000;
+  // 結標時間未知的不進第一梯隊：把一個不知道何時結標的標的排在最前面，
+  // 等於用一個猜測擠掉一個真的在倒數的標的。
+  if(end != null && end > nowMs && end - nowMs <= win) return 1;
+  return 2;
+}
+
+/** 梯隊排序：梯隊優先，同梯隊內結標近的在前；結標時間未知的沉底。 */
+function sortAuctions(list, nowMs, cfg){
+  return list.slice().sort((a, b) => {
+    const ta = auctionTier(a, nowMs, cfg), tb = auctionTier(b, nowMs, cfg);
+    if(ta !== tb) return ta - tb;
+    const ea = auctionEndMs(a), eb = auctionEndMs(b);
+    return (ea == null ? Infinity : ea) - (eb == null ? Infinity : eb);
+  });
+}
+
+/** >48h 的誠實標註：現價會漲。文案來自後端，這裡只決定「要不要顯示」。 */
+function priceDynamicsNote(it, nowMs, cfg){
+  if(!cfg) return "";
+  const end = auctionEndMs(it);
+  if(end == null || end <= nowMs) return "";
+  return end - nowMs > cfg.price_dynamics_hours * 3600000
+    ? (cfg.price_dynamics_note || "") : "";
+}
+/* ==== AUCTION-VIEW-LOGIC:END ======================================== */
+
+/** 後端給的競標視圖門檻與文案（/api/signals 的 auction_view）。
+    拿不到就是 null，此時競標視圖退回純結標時間序、不畫梯隊、不標註。 */
+let aucView = null;
+
+let currentState = "new";
+/** 分類分頁（CardBucket）。空字串 = 現在看的是 state 分頁。
+    有值時 currentState 一律送 "all"：分類**跨狀態**，這是它與 state 正交的意思。 */
+let currentBucket = "";
+/** 分類的顯示字串只有這一份（後端存的是 high_value / rare）。
+    按鈕、徽章、分頁三處共用它——各寫各的話改文案一定會漏掉一處。 */
+const BUCKETS = {high_value: "💎 高價卡", rare: "🌟 稀有卡"};
+let filterMode  = "all";     // all | triggered | plain | auction
+let flagFilter  = "";        // 空字串 = 任何旗標
+//: 可疊加的開關（不是分類）。noauction＝隱藏競標中，見 hiddenByAuctionFilter。
+let quick       = {ceiling:false, room:false, noauction:false};
+let pHide       = false;     // 開啟「隱藏 P(值得買) < 門檻」
+let pThreshold  = 0.30;      // 門檻本身。預設值由後端給（scoring.p_worth_hide_default）
+let pDefaultApplied = false; // 後端預設只在「使用者沒存過門檻」時套用一次
+let sortMode    = "score";   // 排序（C）。score = 後端既有排序（score DESC, last_seen DESC）
+const SORT_MODES = ["score","landed_asc","landed_desc","p_asc","p_desc","seen_desc","seen_asc"];
+let items       = [];        // 這一分頁的完整清單（篩選只在前端做，不重打 API）
+let fxInfo      = null;      // /api/breakeven 的匯率參數，成本拆解要用
+let overheadTh  = 0.40;      // 運費佔比告警門檻，後端給（scoring.overhead_ratio_alert）
+
+const nt = n => n == null ? "–" : "NT$" + Math.round(n).toLocaleString();
+/* 成本拆解要對得起來，所以那裡用到分。清單上的大數字仍然用整數版 nt()。 */
+const nt2 = n => n == null ? "–" : "NT$" + n.toLocaleString(undefined,
+  {minimumFractionDigits:2, maximumFractionDigits:2});
+const pct = r => r == null ? "–" : (r*100).toFixed(0) + "%";
+
+/* ---------------------------------------------------------------- 篩選狀態
+   存 localStorage 的理由：使用者按了「只看有空間的競標」＋「隱藏 P<30%」之後
+   重新整理，看到的必須還是同一批東西——否則他會以為標的消失了。
+   讀寫都包在 try 裡：無痕視窗會讓 localStorage 直接丟例外，
+   而篩選壞掉不該讓整個 dashboard 開不起來。 */
+const LS_KEY = "ygo-sniper.filters.v1";
+
+function saveFilters(){
+  try{
+    localStorage.setItem(LS_KEY, JSON.stringify(
+      {filterMode, flagFilter, quick, pHide, pThreshold, sortMode}));
+  }catch(e){ /* 存不了就算了，功能不依賴它 */ }
+}
+
+function loadFilters(){
+  let s = null;
+  try{ s = JSON.parse(localStorage.getItem(LS_KEY) || "null"); }catch(e){ s = null; }
+  if(!s) return;
+  if(["all","triggered","plain","auction"].includes(s.filterMode)) filterMode = s.filterMode;
+  if(typeof s.flagFilter === "string") flagFilter = s.flagFilter;
+  if(s.quick) quick = {ceiling: !!s.quick.ceiling, room: !!s.quick.room,
+                       noauction: !!s.quick.noauction};
+  if(SORT_MODES.includes(s.sortMode)) sortMode = s.sortMode;
+  pHide = !!s.pHide;
+  if(typeof s.pThreshold === "number" && s.pThreshold >= 0 && s.pThreshold < 1){
+    pThreshold = s.pThreshold;
+    pDefaultApplied = true;   // 使用者自己調過，後端預設不再覆蓋
+  }
+}
+
+/** 把目前的篩選狀態寫回控制項（開場載入與「清除篩選」都用這一支）。 */
+function syncFilterUI(){
+  document.querySelectorAll(".filt").forEach(b =>
+    b.classList.toggle("on", b.dataset.filter === filterMode));
+  document.querySelectorAll(".quick").forEach(b =>
+    b.classList.toggle("on", !!quick[b.dataset.quick]));
+  document.getElementById("p-on").checked = pHide;
+  document.getElementById("p-th").value = Math.round(pThreshold * 100);
+  document.getElementById("p-filter").classList.toggle("on", pHide);
+  document.getElementById("flag-filter").value = flagFilter;
+  document.getElementById("sort-mode").value = sortMode;
+}
+
+/* 相對時間。給 tooltip 的絕對時間另外算——**兩個都要有**：
+   相對時間回答「新不新」（你一眼要的），絕對時間回答「到底是幾點」
+   （你要跟排程紀錄對帳時要的）。只給其中一個都會在某個時刻不夠用。 */
+function ago(iso){
+  if(!iso) return null;
+  const t = new Date(iso);
+  if(isNaN(t)) return null;
+  const s = (Date.now() - t.getTime()) / 1000;
+  if(s < 0)    return "剛剛";
+  if(s < 60)   return Math.floor(s) + " 秒前";
+  if(s < 3600) return Math.floor(s/60) + " 分鐘前";
+  if(s < 86400)return Math.floor(s/3600) + " 小時前";
+  return Math.floor(s/86400) + " 天前";
+}
+const abs = iso => {
+  if(!iso) return "";
+  const t = new Date(iso);
+  return isNaN(t) ? String(iso) : t.toLocaleString();
+};
+function mmss(sec){
+  if(sec == null) return "";
+  const s = Math.max(0, Math.floor(sec));
+  return `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+}
+
+/* ---------------------------------------------------------------- 區塊收合（A）
+   鑑價與關鍵字搜尋預設收合（要用再展開），收合狀態存 localStorage
+   （與篩選同一個理由：重新整理後看到的必須跟離開時一樣）。
+   紅線：**結果出現時自動展開**——收合的目的是省版面，不是把剛查到的結果
+   藏起來（使用者可能在等 30 秒的 WAF 挑戰時把區塊收起來）。 */
+const SEC_KEY = "ygo-sniper.sections.v1";
+const SEC_IDS = ["apr-sec", "sr-sec"];
+
+function initSections(){
+  let s = null;
+  try{ s = JSON.parse(localStorage.getItem(SEC_KEY) || "null"); }catch(e){ s = null; }
+  for(const id of SEC_IDS){
+    const el = document.getElementById(id);
+    el.open = !!(s && s[id]);                     // 沒存過 → 預設收合
+    el.addEventListener("toggle", saveSections);  // 點開／收合／自動展開都記下來
+  }
+}
+function saveSections(){
+  try{
+    localStorage.setItem(SEC_KEY, JSON.stringify(
+      Object.fromEntries(SEC_IDS.map(id => [id, document.getElementById(id).open]))));
+  }catch(e){ /* 無痕視窗存不了就算了，功能不依賴它 */ }
+}
+function openSection(id){
+  const el = document.getElementById(id);
+  if(el && !el.open) el.open = true;              // 觸發 toggle → saveSections
+}
+
+function toast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function card(it){
+  const hot = it.flags.includes("free_card");
+  // triggered 由後端算（scoring.TRIGGER_FLAGS 是唯一定義）。舊回應沒有這個欄位
+  // 時退回前端判斷，不讓整張卡片壞掉。
+  const trig = it.triggered != null
+    ? it.triggered
+    : it.flags.some(f => ["free_card","discount","offer_chance"].includes(f));
+  // high_overhead 的旗標晶片由下面的告警橫條取代（那裡有真正的百分比），
+  // 這裡不再重複畫一次同一件事。
+  const flags = it.flags.filter(f => f !== "high_overhead").map(f => {
+    const [label, cls] = FLAG_META[f] || [f, ""];
+    return `<span class="flag ${cls}">${label}</span>`;
+  }).join("");
+
+  const disc = it.discount_pct != null
+    ? ` · 低 ${(it.discount_pct*100).toFixed(0)}%` : "";
+  const comps = it.comps_median
+    ? `行情 ${nt(it.comps_median)} (n=${it.comps_n})${disc}`
+    : `行情樣本不足 (n=${it.comps_n})`;
+
+  const badge = trig
+    ? `<span class="badge on">🔥 觸發</span>`
+    : `<span class="badge">候選</span>`;
+
+  return `
+  <article class="card ${hot?'hot':''} ${trig?'trig':''}">
+    ${shot(it.image_url, it.title)}
+    <div class="body">
+      <h3 class="title"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>${badge}${bucketChip(it)}</h3>
+      <div class="money">${nt(it.landed_twd)}<small>到手 · ${escapeHtml(it.route || "")}</small></div>
+      <div class="cmp">${comps} · ${pWorth(it)}</div>
+      <div class="cmp">${escapeHtml(it.grader || "")} ${it.grade ?? ""} ${escapeHtml(it.set_code || "")}</div>
+      ${overheadBar(it)}
+      <div class="flags">${flags}</div>
+      <div class="reason">${escapeHtml(it.reason || "")}</div>
+      ${costBreakdown(it)}
+      <div class="acts">
+        <!-- 觀察中放最前：它是最輕量的動作（先盯著，不承諾任何行動）。
+             競標卡片（auctionCard）本來就有這顆，這裡補齊讓兩種卡片一致。 -->
+        <button onclick="setState('${it.key}','watching')">觀察中</button>
+        <button onclick="setState('${it.key}','in_bundle')">加入湊單</button>
+        <button onclick="setState('${it.key}','asked_seller')">已詢問</button>
+        <button onclick="setState('${it.key}','offer_sent')">已出價</button>
+        <!-- 用詞與上方頁籤一致：「已購買」。競標卡片那顆是「已標到」
+             （得標 ≠ 已付款出貨），語意不同，不要跟著改。 -->
+        <button onclick="setState('${it.key}','bought')">已購買</button>
+        <button onclick="setState('${it.key}','skipped')">略過</button>
+        <span class="sep" style="width:1px;height:16px;background:var(--line);display:inline-block"></span>
+        <!-- 分類與上面的狀態是兩件事，所以用分隔線隔開：按了分類不會動狀態
+             （只有 new 會被順手升成 watching），按了狀態也不會動分類。 -->
+        ${bucketActs(it)}
+        <span class="score">${it.score?.toFixed(0) ?? "–"}</span>
+      </div>
+    </div>
+  </article>`;
+}
+
+/* P(值得買)。**後端算的**（valuation.estimate_signal_row，與 CLI 的
+   `ygo-sniper value` 同一支），前端只負責上色與把「這是什麼」說清楚：
+   它是「相對於本模型殘差分布」的機率，不是市場真實機率。 */
+function pWorth(it){
+  const p = it.p_worth_buying;
+  if(p == null)
+    return `<span class="pw" title="這一筆估不出公允價（沒有可比成交或校準集不足）。&#10;沒有依據不等於不好——它不會被 P 篩選隱藏。">P(值得買) –</span>`;
+  // 顏色的界線刻意跟篩選門檻無關：門檻是使用者當下的視線設定，
+  // 顏色描述的是這個數字本身的量級（appraise.P_WORTH_AVOID=0.35 的量級）。
+  const tone = p < 0.3 ? "lo" : (p >= 0.6 ? "hi" : "");
+  const tip = `P(公允價 > 到手成本)＝${(p*100).toFixed(0)}%，相對於估價模型的殘差分布，不是市場真實機率\n`
+    + `公允價 ${nt(it.fair_twd)}｜到手 ${nt(it.landed_twd)}｜層級 ${it.est_level_label || "–"}`;
+  return `<span class="pw ${tone}" title="${escapeHtml(tip)}">P(值得買) <b>${(p*100).toFixed(0)}%</b></span>`;
+}
+
+/* 運費佔比告警。門檻與百分比都是後端給的（scoring.overhead_alert），
+   前端不自己拿 (fee+ship)/landed 再算一次——那會變成第二份定義。 */
+function overheadBar(it){
+  const a = it.shipping_alert;
+  if(!a) return "";
+  const w = Math.min(100, Math.round(a.ratio * 100));
+  return `<div class="ovbar" title="運費 ${nt2(a.overhead_twd)}／到手 ${nt2(a.landed_twd)}，門檻 ${pct(a.threshold)}（settings.yaml: scoring.overhead_ratio_alert）">
+    🚚 運費吃掉了 <b>${pct(a.ratio)}</b>
+    <span class="bar"><i style="width:${w}%"></i></span>
+    <span>卡本身只佔 ${nt2(a.item_twd)}</span></div>`;
+}
+
+/* 成本拆解（預設收合）。使用者踩過的坑：看到「NT$2,074 到手」不知道其中
+   NT$1,034 是國際運費，以為工具算錯。所以三件事必須同時看得到：
+   1. 商品／手續費／運費三項**加起來等於**到手成本（分位對得起來）；
+   2. **每一條可行路徑**都列出來（集運 vs 單張直寄差在哪，只給最便宜那條看不出來）；
+   3. 匯率與刷卡加成——「¥1,500 怎麼變成 NT$328」的答案就在這一行。 */
+function costBreakdown(it){
+  const p = it.payload || {};
+  const routes = (p.all_routes && p.all_routes.length)
+    ? p.all_routes : (p.best_route ? [p.best_route] : []);
+  if(!routes.length) return "";
+  const bestKey = (p.best_route || {}).route;
+  const lst = p.listing || {};
+  let rounding = false;
+
+  const rows = routes.map(r => {
+    if(Math.abs(r.item_twd + r.fee_twd + r.shipping_twd - r.landed_twd) >= 0.005) rounding = true;
+    const over = r.overhead_ratio != null && r.overhead_ratio >= overheadTh;
+    const amort = r.bundle_size > 1
+      ? `<span style="color:var(--dim)">（湊 ${r.bundle_size} 張攤提）</span>` : "";
+    return `<tr class="${r.route === bestKey ? "best" : ""}">
+      <td style="text-align:left">${r.route === bestKey ? "★ " : ""}${escapeHtml(r.label)}${amort}</td>
+      <td>${nt2(r.item_twd)}</td><td>${nt2(r.fee_twd)}</td><td>${nt2(r.shipping_twd)}</td>
+      <td>${nt2(r.landed_twd)}</td>
+      <td class="${over ? "" : "pos"}">${pct(r.overhead_ratio)}</td></tr>`;
+  }).join("");
+
+  const note = rounding
+    ? `<br>各項四捨五入到分，與到手成本可能差 NT$0.01（到手成本是先加總再進位的）。` : "";
+  const ebayNote = (lst.site === "ebay" && lst.shipping_cost == null)
+    ? `<br>⚠️ 賣家沒有列出寄台灣的運費，這條路徑用一個保守估計佔位——實際運費要私訊問（見「需問寄送」旗標）。`
+    : "";
+  // 競標標的：拆解攤開之後「到手成本」會顯得像是一個可以付的價格，
+  // 但它是用**會漲的目前出價**算的。判準在出價上限那一格，不在這裡。
+  const auctionNote = isAuction(it)
+    ? `<br>⚠️ 這是<b>競標中</b>的標的：上面的成本是用<b>目前出價</b>算的，價格還會漲——能照著做的是「🔨 競標」分頁裡的<b>出價上限</b>，不是這個到手成本。`
+    : "";
+
+  return `<details class="brk">
+    <summary>成本拆解 — 到手 ${nt(it.landed_twd)}，其中運費雜費 ${nt((p.best_route||{}).overhead_twd)}（${routes.length} 條可行路徑）</summary>
+    <div class="inner">
+      <div class="brk-note" style="margin:0 0 6px">
+        商品標價 <b>${money2(lst.price, lst.currency)}</b> → 換算 <b>${nt2((p.best_route||{}).item_twd)}</b>
+        （同一張卡在每條路徑的商品價都一樣，差別在手續費與運費）
+      </div>
+      <div class="scroll-x"><table class="brk-t">
+        <thead><tr><th>路徑</th><th>商品</th><th>代購/手續費</th><th>運費</th>
+                   <th>到手成本</th><th>運費佔比</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="brk-note">${fxNote(lst, p.best_route || {})}${note}${ebayNote}${auctionNote}</div>
+      ${resaleBlock(it)}
+    </div>
+  </details>`;
+}
+
+/* 「若要轉賣」。整個工具原本只算「買進到手成本」，這一段是另一半：
+   賣掉實拿多少、扣完之後還剩幾塊。
+
+   三條規則，錯了的方向都是「看起來有錢賺」：
+   1. **不可行就明確寫不可行**，一個數字都不給。給一個負數會被讀成
+      「算過了、只是不划算」，而它其實是「做不到」（例如貨在台灣、
+      要在 Mercari JP 賣，中間那段回送日本根本沒有方案）。
+   2. 收入用估價的 **80% 區間下緣**，不是點估計——與出價上限同一個哲學。
+   3. 稅、賣得掉率、持有時間**都沒算**，所以要寫在畫面上，不是藏在文件裡。 */
+function resaleBlock(it){
+  const rs = it.resale;
+  if(!rs) return "";
+  if(!rs.ok){
+    const rows = (rs.blocked || []).map(b =>
+      `<div class="r">· <b>${escapeHtml(b.venue_label || "")}</b>：${escapeHtml(b.reason || "")}</div>`
+    ).join("");
+    return `<div class="resale"><div class="hd">💱 <b>若要轉賣</b> —
+        <span style="color:var(--danger)">目前沒有可行的轉賣路徑</span></div>
+      <div class="no">${rows || escapeHtml(rs.reason || "")}</div></div>`;
+  }
+  const b = rs.best;
+  const cls = (b.net_profit_twd || 0) > 0 ? "pos" : "neg";
+  const lines = ((b.sell || {}).lines || []).map(l => {
+    const nat = l.amount_native == null ? "—"
+      : `${(l.sign < 0 ? "−" : "")}${money2(l.amount_native, (b.sell||{}).currency)}`;
+    return `<tr><td>${escapeHtml(l.label)}</td><td>${nat}</td>
+      <td>${(l.sign < 0 ? "−" : "")}${nt2(l.amount_twd)}</td></tr>`;
+  }).join("");
+  const transfer = b.transfer_twd
+    ? `<tr><td>送到賣場（${escapeHtml(b.holding_label || "")} → 賣場）</td><td>—</td>
+         <td>−${nt2(b.transfer_twd)}</td></tr>` : "";
+  return `<div class="resale">
+    <div class="hd">💱 <b>若要轉賣</b> — 最佳賣場 <b>${escapeHtml(b.sell_venue_label)}</b>，
+      預估實拿 <b>${nt(b.net_proceeds_twd)}</b>，
+      淨利 <span class="profit ${cls}">${nt(b.net_profit_twd)}</span>
+      （報酬率 ${b.roi == null ? "–" : pct(b.roi)}）</div>
+    <div class="scroll-x"><table class="brk-t">
+      <thead><tr><th>項目</th><th>${escapeHtml((b.sell||{}).currency || "")}</th><th>NT$</th></tr></thead>
+      <tbody>${lines}${transfer}
+        <tr class="best"><td>買進到手成本（${escapeHtml(b.buy_route_label)}）</td><td>—</td>
+            <td>−${nt2(b.landed_twd)}</td></tr>
+        <tr class="best"><td><b>淨利</b></td><td>—</td>
+            <td class="profit ${cls}">${nt2(b.net_profit_twd)}</td></tr>
+      </tbody></table></div>
+    <div class="tax">⚠️ ${escapeHtml(rs.tax_note || "")}
+      　賣得掉率與持有時間**完全沒有模型**：以上假設「賣得掉、而且立刻賣掉」。
+      　賣出價用估價 80% 區間下緣（保守）。</div>
+  </div>`;
+}
+
+/* 匯率那一行。兩個原則：
+   1. 參數全部來自 /api/breakeven（fx.py 的實際值），前端不寫死 1.5%／2%。
+   2. **實際套用的倍率用後端自己的兩個數字相除算出來**（item_twd ÷ 標價），
+      不由前端去猜「這一筆有沒有套刷卡加成」。猜是會錯的：Mercari 台灣的
+      台幣標價不套加成（costs.quote_route），但 eBay 走另一條路
+      （costs._quote_ebay）即使標價是台幣也照套——前端寫一份規則就會有一邊說錯話。 */
+function fxNote(lst, best){
+  if(!fxInfo) return "匯率參數載入中…";
+  const cur = lst.currency || "JPY";
+  const rates = fxInfo.rates || {};
+  const mk = fxInfo.card_markup || 0, sb = fxInfo.safety_buffer || 0;
+  const r = rates[cur];
+  const chain = r == null ? null : r * (1 + mk) * (1 + sb);
+  const eff = (lst.price && best.item_twd != null) ? best.item_twd / lst.price : null;
+
+  const params = r == null
+    ? `${escapeHtml(cur)} 匯率未知`
+    : `匯率 ${escapeHtml(cur)}→TWD <b>${r.toFixed(4)}</b>（來源 ${escapeHtml(fxInfo.fx_source || "?")}）`
+      + ` · 刷卡海外手續費 <b>${(mk*100).toFixed(1)}%</b> · 匯率緩衝 <b>${(sb*100).toFixed(1)}%</b>`
+      + `　→ 三者相乘 <b>${chain.toFixed(4)}</b>`;
+  if(eff == null) return params;
+
+  const applied = `<br>這一筆實際套用的換算倍率：<b>${eff.toFixed(4)}</b>`
+    + `（${money2(lst.price, cur)} × ${eff.toFixed(4)} ＝ ${nt2(best.item_twd)}）`;
+  // 比的是**台幣金額**不是倍率：倍率的誤差會被小額標的放大
+  // （¥21 的卡，item_twd 四捨五入到分就足以讓倍率差 0.0002），
+  // 用金額比才不會對一筆 ¥1 起標的競標喊出「沒有套加成」這種假警報。
+  const gap = (chain != null && lst.price
+               && Math.abs(best.item_twd - lst.price * chain) > 0.02)
+    ? `　⚠️ 與上面的三者相乘不同：這條路徑對商品價沒有套完整的加成`
+      + `（台幣標價在台灣付款就沒有海外刷卡費）。手續費與運費仍以日圓計價換算。`
+    : "";
+  return params + applied + gap;
+}
+
+/* 預覽圖區塊。三件事一次做完，兩個清單共用同一份：
+   1. 圖大而完整（contain，不裁卡角）；2. 失敗有優雅佔位（不留破圖 icon）；
+   3. 點圖看原圖。src 一律經過 escapeHtml——它是抓來的字串，不是我們的常數。 */
+function shot(url, title){
+  if(!url) return `<div class="shot-wrap noimg"><span class="shot-ph">無預覽圖</span></div>`;
+  const u = escapeHtml(url);
+  return `<div class="shot-wrap">
+    <img class="shot" src="${u}" data-full="${u}" loading="lazy" decoding="async"
+         alt="${escapeHtml(title || "")}" onerror="imgFailed(this)">
+    <span class="shot-ph">預覽圖載入失敗</span></div>`;
+}
+
+function imgFailed(img){
+  // 破圖 icon 比沒有圖更醜，也讓人以為是我們壞了——換成說明文字
+  const wrap = img.closest(".shot-wrap");
+  if(wrap) wrap.classList.add("noimg");
+}
+
+/* lightbox：事件委派（不是每張圖一個 inline handler），所以重新 render
+   清單之後不必重綁。 */
+document.addEventListener("click", ev => {
+  const img = ev.target.closest?.(".shot[data-full]");
+  const box = document.getElementById("lightbox");
+  if(img){
+    document.getElementById("lightbox-img").src = img.dataset.full;
+    box.classList.add("show");
+  }else if(ev.target.closest?.("#lightbox")){
+    box.classList.remove("show");
+  }
+});
+document.addEventListener("keydown", ev => {
+  if(ev.key === "Escape") document.getElementById("lightbox").classList.remove("show");
+});
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+/* ------------------------------------------------------------ 卡片分類
+   分類（bucket）與流程狀態（state）是兩個維度：一張高價卡按了「已出價」
+   之後**還是**高價卡。所以徽章與按鈕都跟 state 那一列分開畫，
+   而且一般卡與競標卡兩種版面都要有——使用者要分類的正是競標中的那些貴卡。 */
+
+/** 已指派的分類徽章（未指派回空字串）。 */
+function bucketChip(it){
+  const label = BUCKETS[it.bucket];
+  return label
+    ? `<span class="bkt" title="你指派的分類（手動，不是系統判的）">${label}</span>`
+    : "";
+}
+
+/** 分類指派按鈕。點已經亮著的那顆＝取消分類（同一顆按鈕就是開關，
+    不必再多一顆「清除」擠在本來就很滿的按鈕列裡）。 */
+function bucketActs(it){
+  return Object.entries(BUCKETS).map(([k, label]) => {
+    const on = it.bucket === k;
+    const next = on ? "" : k;
+    const tip = on ? `取消「${label}」分類` : `標記為「${label}」（分類與狀態互不覆寫）`;
+    return `<button class="${on ? "on" : ""}" title="${escapeHtml(tip)}"`
+      + ` onclick="setBucket('${it.key}','${next}')">${label}</button>`;
+  }).join("");
+}
+
+/** 指派／清除分類。`bucket` 是空字串就送 null（清除）。
+    回應帶著 db 讀回來的 state：new 會被連動升成 watching，要照實告訴使用者
+    ——狀態被改掉卻沒說，下次他在「待處理」找不到這張卡會以為它消失了。 */
+async function setBucket(key, bucket){
+  try{
+    const r = await api(`/api/signals/${encodeURIComponent(key)}/bucket`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({bucket: bucket || null}),
+    });
+    toast(!bucket ? "已清除分類"
+      : `已標記 ${BUCKETS[bucket] || bucket}`
+        + (r && r.state === "watching" ? "，並移入觀察中" : ""));
+    loadAll();
+  }catch(e){ toast("失敗：" + e.message); }
+}
+
+async function setState(key, state){
+  try{
+    await api(`/api/signals/${encodeURIComponent(key)}/state`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({state}),
+    });
+    toast("已更新");
+    loadAll();
+  }catch(e){ toast("失敗：" + e.message); }
+}
+
+let lastRes = null;    // 最近一次 /api/signals 的回應（truncated / 估價錯誤要用）
+
+async function loadSignals(){
+  // limit 給大：keep_all 打開之後每輪落庫上百筆，而使用者要的正是「全部列出來」。
+  // 篩選在前端做，切換視角是瞬間的，不必為了看一個旗標重打一次 API。
+  // 分類是後端過濾（跟 state 同一支查詢，多一個 WHERE），不是前端 chip：
+  // 分類分頁要的是**整顆 db 裡**的高價卡，不是「這一個狀態分頁裡」的高價卡。
+  const bq = currentBucket ? `&bucket=${encodeURIComponent(currentBucket)}` : "";
+  const res = await api(`/api/signals?state=${currentState}&limit=1000${bq}`);
+  lastRes = res;
+  // 梯隊門檻與文案全部來自後端；拿不到就維持 null（退回純結標時間序）。
+  aucView = res.auction_view || null;
+  const f = res.filters || {};
+  if(f.overhead_threshold != null) overheadTh = f.overhead_threshold;
+  // 後端的預設門檻只在使用者從沒調過的時候套用：settings.yaml 改了就跟著改，
+  // 但不可以把使用者自己設的門檻洗掉。
+  if(!pDefaultApplied && f.p_worth_hide_default != null){
+    pThreshold = f.p_worth_hide_default;
+    pDefaultApplied = true;
+    document.getElementById("p-th").value = Math.round(pThreshold * 100);
+  }
+  // 「這一筆運費佔比超標」在畫面上是一個告警橫條（後端 shipping_alert 算的），
+  // 旗標下拉也該找得到它——舊資料落庫時還沒有 high_overhead 這個旗標，
+  // 只補進**畫面用**的旗標清單，不動後端回來的 flags（那是 db 的事實）。
+  items = res.items.map(it => {
+    const ui = (it.flags || []).slice();
+    if(it.shipping_alert && !ui.includes("high_overhead")) ui.push("high_overhead");
+    return Object.assign(it, {ui_flags: ui});
+  });
+  syncFlagOptions();
+  renderSignals(res);
+}
+
+const hasCeiling = it => { const b = bidOf(it); return !!(b && b.ok); };
+/* 「還有空間」用後端的旗標，不在前端拿 max_bid − 目前出價再判一次：
+   is_actionable 的定義（嚴格小於、最小加價幅度的考量）只有 bidding.py 一份。 */
+const hasRoom = it => (it.flags || []).includes("bid_worth");
+
+/* ---------------------------------------------------------------- 排序（C）
+   只改順序、不隱藏任何標的（隱藏是篩選的事，兩者疊加：先篩後排）。
+   鍵值全部是 /api/signals 既有欄位（landed_twd / p_worth_buying / last_seen），
+   前端不重算任何數字。null（估不出 P、沒有到手價、沒有時間戳）**一律沉底**，
+   不管升冪降冪——沒有數字的東西不該混在有數字的中間。 */
+const SORT_KEYS = {
+  landed: it => it.landed_twd,
+  p:      it => it.p_worth_buying,
+  seen:   it => { const t = new Date(it.last_seen || "").getTime(); return isNaN(t) ? null : t; },
+};
+function sortItems(list){
+  if(sortMode === "score") return list;          // 後端已依 score DESC, last_seen DESC 排好
+  const m = sortMode.match(/^(landed|p|seen)_(asc|desc)$/);
+  if(!m) return list;
+  const key = SORT_KEYS[m[1]], sign = m[2] === "asc" ? 1 : -1;
+  return list.slice().sort((a, b) => {           // slice：不改 items 的原始順序
+    const va = key(a), vb = key(b);
+    if(va == null && vb == null) return 0;
+    if(va == null) return 1;                     // null 永遠沉底
+    if(vb == null) return -1;
+    return (va - vb) * sign;                     // 同值時穩定排序保留 score 序
+  });
+}
+
+/** 通過回 null；被擋下來回**哪一道篩選擋的**——「篩掉了幾筆、為什麼」
+    要能講得出來，安靜地隱藏東西比顯示太多更糟。 */
+function rejectReason(it){
+  if(filterMode === "triggered" && !it.triggered) return "分類";
+  if(filterMode === "plain"     &&  it.triggered) return "分類";
+  if(filterMode === "auction"   && !isAuction(it)) return "分類";
+  if(hiddenByAuctionFilter(it, quick.noauction)) return "競標中";
+  if(quick.ceiling && !hasCeiling(it)) return "無出價上限";
+  if(quick.room    && !hasRoom(it))    return "無競標空間";
+  if(flagFilter && !(it.ui_flags || []).includes(flagFilter)) return "旗標";
+  // P 值算不出來的**永遠不隱藏**：沒有依據不等於不好（與出價上限同一個立場）。
+  if(pHide && it.p_worth_buying != null && it.p_worth_buying < pThreshold) return "P 太低";
+  return null;
+}
+
+function renderSignals(res){
+  res = res || lastRes;
+  // 兩個快捷都只對競標有意義（定價標的沒有出價上限），所以它們也切到競標版面
+  const auctionView = filterMode === "auction" || quick.ceiling || quick.room;
+  document.getElementById("bid-panel").style.display = auctionView ? "" : "none";
+
+  const hidden = {};
+  let shown = [];
+  for(const it of items){                       // 後端已依 score 排序
+    const why = rejectReason(it);
+    if(why) hidden[why] = (hidden[why] || 0) + 1;
+    else shown.push(it);
+  }
+  let endedNote = "";
+  if(auctionView){
+    // 已結標的自動移出：一個結標時間已過的競標，上限與空間都是歷史資料，
+    // 留在清單上只會讓人去點一個買不到的東西。移出但把筆數講出來，
+    // 「不見了」與「本來就沒有」必須分得出來。
+    const now = Date.now();
+    const ended = shown.filter(i => {
+      const t = new Date(endOf(i) || 0).getTime();
+      return t && t <= now;
+    });
+    shown = shown.filter(i => !ended.includes(i));
+    // 競標視圖的預設順序是**可行動性**，不只是時間：
+    //   第一梯隊＝有上限、現價仍低於上限、且 24 小時內結標（現在不看就沒了）
+    //   第二梯隊＝有上限、有空間、但還早（價格一定會漲，現在的空間不算數）
+    //   第三梯隊＝其餘（沒上限或已無空間）
+    // 同一梯隊內仍照結標時間近→遠。門檻由後端給（aucView）；拿不到就退回
+    // 純時間序——不猜一個 24 小時出來（分數在這個視圖一律不參與排序）。
+    shown = aucView
+      ? sortAuctions(shown, now, aucView)
+      : shown.slice().sort((a, b) => {
+          const ta = auctionEndMs(a), tb = auctionEndMs(b);
+          return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
+        });
+    endedNote = ended.length ? ` · 已結標 <b>${ended.length}</b> 筆已移出` : "";
+  }
+  // 排序在篩選之後套用。競標視圖預設（score）維持上面的結標時間序——
+  // 那是時間敏感的刻意設計；但使用者**明確選了排序**時，以使用者選的為準。
+  shown = sortItems(shown);
+
+  document.getElementById("grid").innerHTML =
+    shown.map(auctionView ? auctionCard : card).join("");
+  // 空清單必須說得出「為什麼空」。三種原因的處置完全不同：設定互斥（自己關掉一個）、
+  // 被篩選擋掉（放寬篩選）、真的沒貨（沒事做）。長得一樣的話使用者只會以為壞了。
+  const emptyEl = document.getElementById("empty");
+  emptyEl.style.display = shown.length ? "none" : "block";
+  if(!shown.length){
+    const hidN = Object.values(hidden).reduce((a, b) => a + b, 0);
+    emptyEl.innerHTML = auctionFiltersConflict(filterMode, quick.noauction)
+      ? "「🔨 競標」與「🙈 隱藏競標中」同時開著——這兩個互斥，所以清單必然是空的。<br>這不是壞掉：關掉其中一個就會回來。"
+      : hidN
+        ? `這個分頁的 ${hidN} 筆全部被目前的篩選擋下來了（明細見上方「篩掉」）。<br>按「清除篩選」就會全部回來。`
+        : "這個分頁沒有標的。";
+  }
+  tickCountdowns();
+
+  const nTrig = items.filter(i => i.triggered).length;
+  const nAuc  = items.filter(isAuction).length;
+  const trunc = res && res.truncated ? "（已達上限，可能還有更多）" : "";
+
+  // 篩掉了幾筆、被哪一道擋的——使用者必須知道自己現在看不到什麼
+  const hidTotal = Object.values(hidden).reduce((a, b) => a + b, 0);
+  const hidDetail = Object.entries(hidden).map(([k, n]) => `${k} ${n}`).join("·");
+  const hidNote = hidTotal
+    ? ` · <span class="hid">篩掉 <b>${hidTotal}</b> 筆（${escapeHtml(hidDetail)}）</span>` : "";
+  // P 值這一輪算不出來時要說出病名，不能讓所有標的的 P 都顯示成「–」了事
+  const pErr = res && res.valuation_error
+    ? ` · <span class="hid">⚠️ P 值算不出來：${escapeHtml(res.valuation_error)}</span>` : "";
+  const noP = res && res.p_worth_known != null && res.p_worth_known < items.length
+    ? ` · <span class="hid">${items.length - res.p_worth_known} 筆無 P 值（不受 P 篩選影響）</span>` : "";
+
+  document.getElementById("list-count").innerHTML =
+    `顯示 <b>${shown.length}</b> / ${items.length} 筆 · 觸發 <b>${nTrig}</b>`
+    + ` · 競標 <b>${nAuc}</b>${endedNote}${hidNote}${pErr}${noP}${trunc}`;
+
+  const active = filterMode !== "all" || flagFilter || pHide
+    || quick.ceiling || quick.room || quick.noauction;
+  document.getElementById("filter-reset").style.display = active ? "" : "none";
+}
+
+/* ------------------------------------------------------------ 競標視圖
+
+   結標倒數是這個視圖唯一「自己會動」的東西：每秒重算一次文字，不重繪整張卡
+   （重繪會把捲動位置與圖片載入狀態一起洗掉）。時間全部走 ISO 8601 帶時區的
+   字串（後端 Signal.to_dict 保證），瀏覽器自己轉本地時間——前端不做任何
+   時區加減，那是這種欄位最容易錯 9 小時的地方。 */
+function countdownText(ms){
+  if(ms <= 0) return ["已結標", "ended"];
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600);
+  const m = Math.floor(s % 3600 / 60), sec = s % 60;
+  if(d > 0) return [`${d} 天 ${h} 小時後結標`, ""];
+  if(h > 0) return [`${h} 小時 ${m} 分後結標`, h < 3 ? "soon" : ""];
+  if(m > 0) return [`${m} 分 ${String(sec).padStart(2,"0")} 秒後結標`, "urgent"];
+  return [`${sec} 秒後結標`, "urgent"];
+}
+
+function tickCountdowns(){
+  const now = Date.now();
+  document.querySelectorAll("[data-end]").forEach(el => {
+    const t = new Date(el.dataset.end).getTime();
+    if(isNaN(t)){ el.textContent = "結標時間未知"; return; }
+    const [txt, cls] = countdownText(t - now);
+    el.textContent = txt;
+    el.className = "cd " + cls;
+  });
+}
+setInterval(tickCountdowns, 1000);
+
+// 證據強度的小徽章。**分級與文案全部來自後端**（bidding.evidence_tier）——
+// 前端自己判一份的話，實測依據改了、顏色不會跟著改，那比沒有徽章更糟。
+// 舊 payload（這個欄位出現之前落庫的）沒有 evidence_tier：**不畫徽章、也不套顏色**，
+// 而不是預設成某一級——猜一個等級跟猜一個價格一樣，都是無中生有。
+// 那些列跑一次 `ygo-sniper recalc-bids --apply` 就會補上。
+function evChip(b){
+  if(!b || !b.evidence_tier) return "";
+  const tier = b.evidence_tier;
+  const icon = tier === "strong" ? "●●●" : tier === "moderate" ? "●●○" : "●○○";
+  return `<span class="ev-chip ${escapeHtml(tier)}" title="${escapeHtml(b.evidence_label || "")}"
+      >${icon} ${escapeHtml(b.evidence_tier_label || "")}</span>`;
+}
+
+/** 梯隊徽章。文案來自後端（bidding.AUCTION_TIERS），前端只負責上色。 */
+function tierChip(tier){
+  const meta = ((aucView && aucView.tiers) || []).find(t => t.tier === tier);
+  if(!meta) return "";
+  return `<span class="tier-chip t${tier}" title="${escapeHtml(meta.hint || "")}"
+      >${escapeHtml(meta.label || "")}</span>`;
+}
+
+/* 上限的大數字：Yahoo 顯示日圓；eBay 顯示**原幣**（使用者要填進出價欄的
+   數字，保留兩位小數）＋台幣等值——欄名寫死幣別而值不是那個幣別，
+   是這個專案最貴的一種 bug，前端也一樣。 */
+function bidCeilingText(b){
+  if(!b || !b.ok) return "–";
+  if(b.max_bid_native != null && b.native_currency){
+    const n = b.max_bid_native.toLocaleString(undefined,
+      {minimumFractionDigits:2, maximumFractionDigits:2});
+    const sym = {USD:"US$", GBP:"£", EUR:"€", TWD:"NT$"}[b.native_currency]
+      || (b.native_currency + " ");
+    const tw = b.max_bid_listing != null && b.listing_currency === "TWD"
+      ? `（≈NT$${Math.round(b.max_bid_listing).toLocaleString()}）` : "";
+    return sym + n + tw;
+  }
+  return jpy(b.max_bid_jpy);
+}
+
+function auctionCard(it){
+  const b = bidOf(it);
+  const end = endOf(it);
+  const cur = it.price_native;
+  const room = auctionRoom(it);
+  const canBid = room != null && room > 0;
+  const now = Date.now();
+  const tier = auctionTier(it, now, aucView);
+  const isEbay = it.site === "ebay";
+  const cash = n => money(n, it.currency);   // 現價／空間跟著 listing 幣別
+  // 結標還很久的標的，現價**沒有參考價值**：¥1 → 上限 ¥5,840 看起來像撿到寶，
+  // 實際上只是競價還沒開始。這句話是判斷的一部分，文案來自後端。
+  const dynNote = priceDynamicsNote(it, now, aucView);
+
+  // 上限那一格是整張卡的主角。算不出來時**不給任何數字**——這是紅線：
+  // 使用者會照著它下真錢的單，一個沒有依據的數字比沒有數字危險得多。
+  const ceilingBox = b && b.ok
+    ? `<div class="bid-ceiling ${b.evidence_tier ? "ev-" + escapeHtml(b.evidence_tier) : ""}">
+         <div><div class="lab">你的出價上限（可直接填進 ${isEbay ? "eBay" : "Buyee"} 出價欄）${evChip(b)}</div>
+              <div class="big">${bidCeilingText(b)}</div>
+              <div class="ev-line">${escapeHtml(b.evidence_label || "")}</div></div>
+         <div><div class="lab">還有多少空間</div>
+              <div class="big" style="font-size:20px;color:${canBid ? "var(--good)" : "var(--danger)"}">
+                ${canBid ? cash(room) : "已無空間"}</div></div>
+         <div><div class="lab">成交後到手成本</div>
+              <div class="big" style="font-size:20px;color:var(--ink)">${nt(b.landed_at_ceiling_twd)}</div></div>
+       </div>`
+    : `<div class="bid-ceiling none">
+         <div><div class="lab">出價上限</div>
+              <div class="big">不提供 — ${escapeHtml((b && b.reason) || "沒有估價")}</div></div>
+       </div>`;
+
+  const range = b && b.conservative_fair_twd
+    ? `${nt(b.conservative_fair_twd)} – ${nt(b.interval_hi_twd)}` : "不提供";
+
+  return `
+  <article class="card ${canBid ? "hot" : ""} tier-${tier}">
+    ${shot(it.image_url, it.title)}
+    <div class="body">
+      <h3 class="title">
+        <a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
+        <span class="badge">🔨 競標中</span>${tierChip(tier)}${bucketChip(it)}</h3>
+      <div class="bid-row">
+        <span>目前出價 <b>${cash(cur)}</b>${
+          it.payload?.listing?.bids != null ? `（${it.payload.listing.bids} 次出價）` : ""}</span>
+        <span>現價 vs 上限 <b>${cash(cur)}</b> / <b>${
+          b && b.ok ? bidCeilingText(b) : "無上限"}</b>${
+          canBid ? `（還差 <b>${cash(room)}</b>）`
+                 : room != null ? "（<b>已越過上限</b>）" : ""}</span>
+        <span data-end="${escapeHtml(end || "")}" class="cd">…</span>
+        <span title="${escapeHtml(abs(end))}">${end ? escapeHtml(abs(end)) : "結標時間未知"}</span>
+      </div>
+      ${dynNote ? `<div class="dyn-note">${fmt(dynNote)}</div>` : ""}
+      ${ceilingBox}
+      <div class="bid-row">
+        <span>保守公允價 <b>${nt(b && b.conservative_fair_twd)}</b>（80% 區間下緣）</span>
+        <span>80% 區間 ${range}</span>
+        <span>層級 ${escapeHtml((b && b.level_label) || "–")}</span>
+        <span>有效樣本 <b>${(b && b.n_effective) ?? "–"}</b></span>
+        <span title="這個區間寬度是哪一群校準出來的、那一群有幾筆殘差">校準群 <b>${
+          escapeHtml((b && b.calibration_group) || "–")}</b>${
+          b && b.calibration_group_n ? `／${b.calibration_group_n} 筆` : ""}${
+          b && b.calibration_degraded ? "（退化）" : ""}</span>
+        <span>行情樣本 <b>${it.comps_n ?? "–"}</b></span>
+        <span>${escapeHtml(it.grader || "")} ${it.grade ?? ""}</span>
+      </div>
+      <div class="bid-why">${b && b.notes && b.notes.length
+        ? b.notes.map(fmt).join("<br>")
+        : "上限是「保守公允價（80% 區間下緣）× (1 − 目標利潤) − 代購費／運費／刷卡手續費」反解回日圓的結果。"}</div>
+      <div class="acts">
+        <button onclick="setState('${it.key}','watching')">觀察中</button>
+        <button onclick="setState('${it.key}','offer_sent')">已出價</button>
+        <button onclick="setState('${it.key}','bought')">已標到</button>
+        <button onclick="setState('${it.key}','skipped')">略過</button>
+        <span class="sep" style="width:1px;height:16px;background:var(--line);display:inline-block"></span>
+        <!-- 競標卡也要有分類：使用者要標的「比較貴的 PSA9/10」有一大半正在競標中。
+             這一組漏掉的話，他最想分類的那一批恰好分不了類。 -->
+        ${bucketActs(it)}
+        <span class="score">${it.score?.toFixed(0) ?? "–"}</span>
+      </div>
+    </div>
+  </article>`;
+}
+
+async function loadBidding(){
+  const out = document.getElementById("bid-meta");
+  let d;
+  try{ d = await api("/api/bidding"); }
+  catch(e){ out.innerHTML = `<span style="color:var(--danger)">載入失敗：${escapeHtml(e.message)}</span>`; return; }
+
+  const p = d.proxy_bid || {};
+  const proxy = p.supported === true
+    ? `<div class="warnbox" style="background:#122a20;border-color:#2f6b57;color:#86efac">
+         <b>代理出價：支援</b>（${escapeHtml(p.checked_at || "")} 實地查證）<br>${fmt(p.summary || "")}
+         <div style="margin-top:6px;color:var(--dim)">${(p.details||[]).map(fmt).join("<br>")}</div>
+         <div style="margin-top:6px;color:var(--dim)">${fmt(p.caveat || "")}</div>
+         <div style="margin-top:6px">${(p.sources||[]).map(u =>
+            `<a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a>`).join("　")}</div>
+       </div>`
+    : `<div class="warnbox"><b>代理出價：查不到</b>——不要假設可以設完上限就走人，
+         第一次請自己在結標前確認。</div>`;
+
+  out.innerHTML = `
+    <div class="funnel">
+      <span>目標利潤率 <b>${(d.target_margin*100).toFixed(0)}%</b></span>
+      <span class="arrow">·</span>
+      <span>上限基準 <b>${escapeHtml(d.basis_label || "")}</b></span>
+    </div>
+    <div class="why">${(d.honesty_notes||[]).map(n =>
+      `<span style="white-space:normal">${fmt(n)}</span>`).join("")}</div>
+    ${proxy}`;
+}
+
+/** 旗標下拉只列「這一分頁真的出現過的旗標」——列出永遠 0 筆的選項只會浪費點擊。 */
+function syncFlagOptions(){
+  const sel = document.getElementById("flag-filter");
+  const present = [...new Set(items.flatMap(i => i.ui_flags || i.flags || []))];
+  const opts = [`<option value="">任何旗標</option>`].concat(
+    present.map(f => {
+      const [label] = FLAG_META[f] || [f];
+      const n = items.filter(i => (i.ui_flags||[]).includes(f)).length;
+      return `<option value="${escapeHtml(f)}">${escapeHtml(label)}（${n}）</option>`;
+    }));
+  sel.innerHTML = opts.join("");
+  // 目前選的旗標在新清單裡不存在就退回「任何旗標」，避免顯示空白且無從察覺
+  if(flagFilter && !present.includes(flagFilter)){ flagFilter = ""; saveFilters(); }
+  sel.value = flagFilter;
+}
+
+async function loadBundle(){
+  const b = await api("/api/bundle");
+  const el = document.getElementById("bundle-total");
+  const detail = document.getElementById("bundle-detail");
+  if(!b.bundle_size){
+    el.textContent = "NT$ –";
+    detail.textContent = "籃子是空的";
+    return;
+  }
+  el.textContent = nt(b.total_landed);
+  el.className = "kpi" + (b.saving > 0 ? " good" : "");
+  const under = b.items.filter(i => i.under_grading_fee).length;
+  detail.innerHTML =
+    `${b.bundle_size} 張 · 分開寄要 ${nt(b.total_if_separate)} · ` +
+    `<b style="color:var(--good)">省 ${nt(b.saving)}</b><br>` +
+    `其中 ${under} 張到手低於鑑定費 ${nt(b.grading_fee_twd)}`;
+}
+
+async function loadBreakeven(){
+  const b = await api("/api/breakeven");
+  fxInfo = b;                       // 成本拆解的匯率行要用（見 fxNote）
+  document.getElementById("breakeven").innerHTML =
+    `<thead><tr><th>路徑</th><th>固定成本</th><th>卡價上限</th></tr></thead><tbody>` +
+    b.rows.map(r => `<tr><td>${r.label}</td><td>${nt(r.overhead_twd)}</td>
+      <td style="color:var(--accent)">¥${Math.round(r.max_item_jpy).toLocaleString()}</td></tr>`).join("") +
+    `</tbody>`;
+  document.getElementById("stat-fx").innerHTML = `匯率 <b>${b.fx_source}</b>`;
+}
+
+async function loadStats(){
+  const s = await api("/api/stats");
+  document.getElementById("stat-new").innerHTML = `待處理 <b>${s.by_state.new || 0}</b>`;
+  document.getElementById("stat-bundle").innerHTML = `湊單籃 <b>${s.by_state.in_bundle || 0}</b>`;
+  document.getElementById("stat-comps").innerHTML = `行情 <b>${s.comps}</b>`;
+}
+
+/* ------------------------------------------------------------ 掃描狀態
+
+   使用者的話：「這樣我才不會一直按」。所以三件事必須同時成立——
+   1. 按下去馬上看得出「在跑」（按鈕 disabled ＋ 文字換掉），
+   2. 跑完自動恢復並刷新清單（不必自己猜什麼時候好了），
+   3. **卡住時要能自己解開**：狀態來源已經有逾時（scan.timeout_seconds），
+      前端只是照它回報的 running 走，不自己維護一份「我按過了」的永久旗標。
+   狀態是後端的（db meta，跨行程），所以 CLI／排程在掃的時候這裡一樣會顯示。 */
+let scanPollTimer = null;
+let wasRunning = false;
+
+function renderScanStatus(st){
+  const pill = document.getElementById("scan-when");
+  const btn  = document.getElementById("scan-btn");
+  const last = st.last_run || {};
+  const lastAt = last.finished_at || null;
+
+  const doneNote = lastAt
+    ? `${abs(lastAt)}\n掃 ${last.scanned ?? "?"} 筆 → 符合年代 ${last.candidates ?? "?"}`
+      + ` → 訊號 ${last.signals ?? "?"}`
+    : "還沒有任何完成的掃描紀錄";
+
+  if(st.running){
+    pill.className = "pill live";
+    pill.innerHTML = `<span class="spin"></span>掃描中… <b>${mmss(st.elapsed_seconds)}</b>`;
+    pill.title = `開始於 ${abs(st.started_at)}（${st.trigger === "dashboard" ? "你按的" : st.trigger || "?"}）\n`
+               + `上一次完成：${doneNote}`;
+    btn.disabled = true;
+    btn.textContent = "掃描中…";
+  }else{
+    pill.className = "pill" + (st.stale ? " stale" : "");
+    const rel = ago(lastAt);
+    pill.innerHTML = st.stale
+      ? `⚠️ 上次掃描未回報完成 <b>${rel || "–"}</b>`
+      : `最後掃描 <b>${rel || "從未"}</b>`;
+    pill.title = st.stale
+      ? `有一輪掃描開始於 ${abs(st.started_at)} 但超過 ${st.timeout_seconds} 秒沒回報完成`
+        + `（多半是中途被中斷）。按鈕已放行。\n上一次完成：${doneNote}`
+      : doneNote + (st.error ? `\n最近一次錯誤：${st.error}` : "");
+    btn.disabled = false;
+    btn.textContent = "立即掃描";
+  }
+}
+
+async function pollScanStatus(){
+  let st;
+  try{
+    st = await api("/api/scan/status");
+  }catch(e){
+    return;  // 後端暫時連不上不該把按鈕鎖死，下一輪再試
+  }
+  renderScanStatus(st);
+
+  if(st.running){
+    wasRunning = true;
+  }else if(wasRunning){
+    // 剛剛還在跑、現在跑完了 → 這是唯一該自動刷新的時機
+    wasRunning = false;
+    const r = st.last_result || {};
+    toast(st.stale ? "上一輪掃描沒有回報完成" :
+      `掃描完成：訊號 ${r.signals ?? "?"} 筆（新 ${r.new ?? 0}）`);
+    loadAll();
+  }
+  // 跑的時候問密一點（要看到跑完），閒著就放慢（純粹是更新相對時間）
+  clearTimeout(scanPollTimer);
+  scanPollTimer = setTimeout(pollScanStatus, st.running ? 2000 : 15000);
+}
+
+async function scanNow(){
+  const btn = document.getElementById("scan-btn");
+  btn.disabled = true;                     // 先鎖，不等 API 回來——雙擊就是在這半秒發生
+  btn.textContent = "掃描中…";
+  try{
+    const r = await api("/api/scan", {method:"POST"});
+    toast(r.started ? "背景掃描已啟動…" : (r.message || "已經有一輪在跑"));
+    wasRunning = true;                     // 讓下一次輪詢的「跑完了」判斷成立
+  }catch(e){
+    toast("啟動失敗：" + e.message);
+    btn.disabled = false;
+    btn.textContent = "立即掃描";
+    return;
+  }
+  clearTimeout(scanPollTimer);
+  scanPollTimer = setTimeout(pollScanStatus, 700);
+}
+
+/* ---------------------------------------------------------------- 鑑價 */
+const VERDICT_META = {
+  AVOID:        ["🛑 不要買",     "證據夠硬才會出現這一格"],
+  CAUTION:      ["🤔 無法判斷",   "不是「還好」——是資料不足以下結論"],
+  WORTH_A_LOOK: ["👀 值得看一眼", "模型判斷，信心有限；請自己看可比成交"],
+};
+
+// 後端的理由用 **粗體** 標重點。先跳脫再換標籤，順序反了就是 XSS。
+function fmt(s){
+  return escapeHtml(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+}
+const jpy = n => n == null ? "–" : "¥" + Math.round(n).toLocaleString();
+
+/* 幣別**跟著金額一起顯示**，不是預設日圓：Mercari 台灣標新台幣，
+   顯示成 ¥5,751 會讓人以為便宜 4.7 倍（後端的 item.currency 是唯一來源）。 */
+function money(amount, currency){
+  if(amount == null) return "–";
+  const n = Math.round(amount).toLocaleString();
+  return currency === "TWD" ? "NT$" + n : (currency === "USD" ? "US$" + n : "¥" + n);
+}
+
+/* 成本拆解專用：**保留小數**。那裡的每個數字都要能被加起來對帳，
+   四捨五入到整數會讓「商品＋手續費＋運費 ＝ 到手」看起來對不上。 */
+function money2(amount, currency){
+  if(amount == null) return "–";
+  const n = amount.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  return currency === "TWD" ? "NT$" + n : (currency === "USD" ? "US$" + n : "¥" + n);
+}
+
+function priceBlock(it){
+  // 價格語意是這個工具的紅線：即決與現在価格必須分開標示，不可混為一談
+  const rows = [];
+  if(it.buyout_jpy != null)
+    rows.push(`<div class="kv"><span>即決価格（可成交）</span><span>${jpy(it.buyout_jpy)}</span></div>`);
+  if(it.current_bid_jpy != null)
+    rows.push(`<div class="kv"><span>現在価格（目前出價）</span><span>${jpy(it.current_bid_jpy)}</span></div>`);
+  if(!rows.length){
+    /* 非日圓來源（eBay／Mercari 台灣）：標籤要跟著 price_kind 走。
+       把 eBay 的「目前出價」寫成「定價」就是這個工具最貴的那個錯——
+       使用者會拿一個會漲的數字當成付得出去的價格。 */
+    const label = it.price_kind === "current_bid"
+      ? "目前出價（<b>會漲，不是可成交價</b>）"
+      : (it.price_kind === "buyout" ? "可立即成交價（定價／Buy It Now）" : "定價");
+    rows.push(`<div class="kv"><span>${label}</span><span>${money(it.price, it.currency)}</span></div>`);
+    if(it.current_bid != null && it.price_kind !== "current_bid")
+      rows.push(`<div class="kv"><span>目前出價（同時在競標）</span><span>${money(it.current_bid, it.currency)}</span></div>`);
+  }
+  if(it.bids != null || it.end_time)
+    rows.push(`<div class="kv"><span>出價數 / 結標</span><span>${it.bids ?? "–"} 次 · ${escapeHtml((it.end_time || "–").replace("T", " ").slice(0, 16))}</span></div>`);
+  /* 運費：**未知不是零**。eBay 常有賣家不報運費，而成本模型會用保守佔位值。 */
+  if(it.shipping_cost != null)
+    rows.push(`<div class="kv"><span>平台列出的運費</span><span>${money(it.shipping_cost, it.currency)}</span></div>`);
+  else if(it.shipping_note)
+    rows.push(`<div class="kv"><span>平台列出的運費</span><span><b>未知</b> — ${escapeHtml(it.shipping_note)}</span></div>`);
+  if(it.ships_to_tw === false)
+    rows.push(`<div class="kv"><span>寄台灣</span><span><b>賣家未列出台灣</b></span></div>`);
+  rows.push(`<div class="kv"><span><b>成本以此價計算</b></span>
+    <span><b>${money(it.price, it.currency)}</b> <small>${escapeHtml(it.currency || "")}</small></span></div>`);
+  return rows.join("");
+}
+
+function compsTable(rows, stats){
+  if(!rows.length)
+    return `<div class="cmp">沒有任何可比成交樣本——這正是判決說「無法判斷」的原因。</div>`;
+  const mix = stats.venue_mix || {};
+  // 平台差 2 倍以上，混合平台的中位數不標出來就會被當成單一市場的行情
+  const venueNote = Object.keys(mix).length > 1
+    ? `　⚠️ 橫跨多個平台（${Object.entries(mix).map(([k,v]) => `${escapeHtml(k)} ${v}`).join("、")}）`
+      + (stats.same_venue_n ? `，其中 ${escapeHtml(stats.target_venue_label || "")} ${stats.same_venue_n} 筆、中位 NT$${(stats.same_venue_median_twd||0).toLocaleString()}` : "")
+    : "";
+  const head = stats.n
+    ? `最可比的一層是「${escapeHtml(stats.tier_label)}」，共 ${stats.n} 筆，
+       NT$${stats.min_twd.toLocaleString()}–NT$${stats.max_twd.toLocaleString()}
+       （中位 NT$${stats.median_twd.toLocaleString()}）${venueNote}` : "";
+  return `
+    <div class="comps">
+      <h3>可比成交（${rows.length} 筆，價格為卡本身成交價，未含代購費與運費）</h3>
+      <div class="cmp" style="margin-bottom:6px">${head}</div>
+      <div class="scroll-x"><table>
+        <thead><tr><th>可比程度</th><th>成交價</th><th>平台</th><th>稀有度</th><th>分數</th>
+                   <th>成交日</th><th style="text-align:left">標題</th></tr></thead>
+        <tbody>${rows.map(c => `
+          <tr>
+            <td style="text-align:left"><span class="tier t${c.tier}">${escapeHtml(c.tier_label)}</span></td>
+            <td>${nt(c.price_twd)}</td>
+            <td>${escapeHtml(c.site_label || c.site || "–")}${c.same_venue === false ? " ⚠️" : ""}</td>
+            <td>${escapeHtml(c.rarity || "–")}</td>
+            <td>${c.grade ?? "–"}</td>
+            <td>${escapeHtml((c.sold_at || "").slice(0,10) || "–")}</td>
+            <td class="t">${c.url
+              ? `<a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.title)}</a>`
+              : escapeHtml(c.title)}</td>
+          </tr>`).join("")}</tbody>
+      </table></div>
+    </div>`;
+}
+
+function renderReport(r){
+  const [label, sub] = VERDICT_META[r.verdict] || [r.verdict, ""];
+  const n = r.verdict_numbers || {};
+  const est = r.estimate || {};
+  const it = r.item || {};
+
+  const routes = r.routes.map(q =>
+    `<div class="kv ${q.route === r.best_route.route ? "" : ""}">
+       <span>${escapeHtml(q.label)}${q.route === r.best_route.route ? " ★" : ""}</span>
+       <span>${nt(q.landed_twd)}</span></div>`).join("")
+    /* 最便宜那條的拆解：一個孤零零的總數看不出「這一單有四成在付運費」。
+       數字全部來自 best_route（與判決引用的同一份），前端不自己再算一次比例。 */
+    + `<div class="cmp" style="margin-top:6px">★ 拆解：商品 ${money2(r.best_route.item_twd, "TWD")}
+        ＋ 手續費 ${money2(r.best_route.fee_twd, "TWD")}
+        ＋ 運費 ${money2(r.best_route.shipping_twd, "TWD")}
+        ＝ <b>${money2(r.best_route.landed_twd, "TWD")}</b>
+        （運費雜費佔 <b>${((r.best_route.overhead_ratio || 0) * 100).toFixed(0)}%</b>）</div>`;
+
+  return `
+  <div class="verdict v-${escapeHtml(r.verdict)}">
+    <h3>${label}</h3>
+    <div class="sub">${escapeHtml(r.verdict)} · ${sub}</div>
+    <ul>${r.verdict_reasons.map(x => `<li>${fmt(x)}</li>`).join("")}</ul>
+  </div>
+
+  ${r.warnings.length ? `<div class="warnbox">${r.warnings.map(w => "⚠️ " + fmt(w)).join("<br>")}</div>` : ""}
+
+  <div class="card" style="padding:0;border:0;background:none">
+    ${shot(it.image_url, it.title)}
+    <div class="body">
+      <h3 class="title">
+        <a href="${escapeHtml(r.buy_url)}" target="_blank" rel="noopener">${escapeHtml(it.title || "")}</a></h3>
+      <div class="cmp">${escapeHtml(r.site)} · ${escapeHtml(r.external_id)} · 抓取來源 ${escapeHtml(r.fetched_via)}
+        ${r.origin_url ? `· <a href="${escapeHtml(r.origin_url)}" target="_blank" rel="noopener">原生頁</a>` : ""}</div>
+      <div class="cmp">${fmt(it.price_note || "")}</div>
+    </div>
+  </div>
+
+  <div class="apr-grid">
+    <div class="box"><h4>價格語意</h4>${priceBlock(it)}</div>
+    <div class="box"><h4>到手成本（★ = 最便宜）</h4>${routes}</div>
+    <div class="box"><h4>卡片屬性</h4>
+      <div class="kv"><span>機構 / 分數</span><span>${escapeHtml(r.card.grader)} ${r.card.grade ?? "–"}</span></div>
+      <div class="kv"><span>稀有度</span><span>${escapeHtml(r.card.rarity || "抽不到")}</span></div>
+      <div class="kv"><span>卡名</span><span>${escapeHtml(r.card.matched_name || "比對不到")}</span></div>
+      <div class="kv"><span>1998-2004</span><span>${r.card.in_era ? "有年代證據" : "無"}</span></div>
+      <div class="kv"><span>年代依據</span><span>${escapeHtml((r.card.era_evidence||[]).join(", ") || "–")}</span></div>
+    </div>
+    <div class="box"><h4>估價</h4>
+      <div class="kv"><span>公允價</span><span>${nt(est.fair_twd)}</span></div>
+      <div class="kv"><span>80% 區間</span><span>${est.lo_twd ? nt(est.lo_twd)+" – "+nt(est.hi_twd) : "不提供"}</span></div>
+      <div class="kv"><span>使用層級</span><span>${escapeHtml(est.level_label || "–")}</span></div>
+      <div class="kv"><span>有效樣本</span><span>${est.n_effective ?? "–"}</span></div>
+      <div class="kv"><span>P(值得買)</span><span>${est.p_worth_buying == null ? "–" : (est.p_worth_buying*100).toFixed(0)+"%"}</span></div>
+      <div class="kv"><span>校準集</span><span>${n.calibration_n ?? "–"} 筆</span></div>
+    </div>
+  </div>
+
+  ${compsTable(r.comparables, r.comparable_stats || {})}
+
+  <div class="stance">${escapeHtml(r.stance)}</div>`;
+}
+
+async function runAppraise(ev){
+  ev.preventDefault();
+  const url = document.getElementById("apr-url").value.trim();
+  const out = document.getElementById("apr-out");
+  const btn = document.getElementById("apr-btn");
+  if(!url){ out.innerHTML = ""; return; }
+
+  const slow = /buyee\.jp\/(mercari|paypayfleamarket)\//.test(url);
+  btn.disabled = true;
+  out.innerHTML = `<div class="warnbox"><span class="spin"></span>抓取中…` +
+    (slow ? "這個網址要開瀏覽器解 WAF 挑戰，約 20-30 秒，別關掉頁面。"
+          : "通常 1-3 秒。") + `</div>`;
+
+  const t0 = Date.now();
+  try{
+    const res = await fetch("/api/appraise", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({url}),
+    });
+    const data = await res.json();
+    if(!res.ok || !data.ok){
+      const e = data.error || {kind:"unknown", message:"未知錯誤"};
+      out.innerHTML = `<div class="errbox"><b>抓取失敗（${escapeHtml(e.kind)}）</b>\n` +
+        `${escapeHtml(e.message)}` +
+        (e.retryable ? "\n\n這是暫時性失敗，等一下再試一次。" : "") + `</div>`;
+      return;
+    }
+    out.innerHTML = renderReport(data.report);
+    const [vLabel] = VERDICT_META[data.report.verdict] || [data.report.verdict, ""];
+    document.getElementById("apr-note").textContent = `（上次：${vLabel}）`;
+    toast(`鑑價完成（${((Date.now()-t0)/1000).toFixed(1)}s）`);
+  }catch(err){
+    out.innerHTML = `<div class="errbox">連線失敗：${escapeHtml(err.message)}</div>`;
+  }finally{
+    btn.disabled = false;
+    openSection("apr-sec");   // 結果（成功或失敗）出現時自動展開，不把它藏在收合裡
+  }
+}
+
+/* ------------------------------------------------------------ 關鍵字搜尋
+
+   「平台校正」切換**不重抓**：後端一次把兩份估價（有／無校正）都算好回來，
+   前端切的是「看哪一份」。為什麼不能只在前端重排——校正改變的是公允價本身
+   （Yahoo 競價出清價 vs Mercari/PayPay 定價零售價差 2 倍以上），連帶改變區間、
+   P(值得買) 與判決，前端沒有那個模型。排序也由後端算好（order.venue /
+   order.mixed 兩份 key 清單），前端只照著排——排序規則只有一份定義。 */
+let srData = null;
+let srView = "venue";        // venue = 有平台校正 | mixed = 不校正（混合平台）
+
+function toggleVenue(){
+  srView = srView === "venue" ? "mixed" : "venue";
+  const btn = document.getElementById("sr-venue");
+  btn.textContent = "平台校正：" + (srView === "venue" ? "開" : "關");
+  btn.classList.toggle("on", srView === "venue");
+  if(srData) renderSearch();   // 不重抓，只換視角
+}
+
+function srSourceLine(s){
+  const cls = s.ok ? "" : "bad";
+  const detail = s.detail ? `　${escapeHtml(s.detail)}` : "";
+  return `<span class="${cls}">${escapeHtml(s.source)}：${escapeHtml(s.health_label)}
+    　解析 ${s.parsed_count} → 可買 ${s.listings} 筆　${s.elapsed_seconds}s${detail}</span>`;
+}
+
+function srItem(it){
+  const v = it.views[srView] || {};
+  const [label] = VERDICT_META[v.verdict] || [v.verdict, ""];
+  const est = v.estimate || {};
+  const range = est.lo_twd ? `${nt(est.lo_twd)} – ${nt(est.hi_twd)}` : "不提供";
+  const p = v.p_worth_buying == null ? "–" : (v.p_worth_buying*100).toFixed(0) + "%";
+  const bid = it.price_kind === "current_bid"
+    ? `<span class="sr-tag bid">競標中·非成交價</span>` : "";
+  // 競標標的的「到手成本」是拿會漲的價格算的，判決本身沒有決策價值——
+  // 能照著做的只有出價上限，所以它必須排在同一張卡最顯眼的位置。
+  const c = it.bid_ceiling;
+  const ceilLine = it.price_kind !== "current_bid" ? "" : (c && c.ok
+    ? `<div class="bid-ceiling ${c.evidence_tier ? "ev-" + escapeHtml(c.evidence_tier) : ""}" style="padding:7px 11px">
+         <div><div class="lab">你的出價上限 ${evChip(c)}</div>
+              <div class="big" style="font-size:22px">${jpy(c.max_bid_jpy)}</div>
+              <div class="ev-line">${escapeHtml(c.evidence_label || "")}</div></div>
+         <div><div class="lab">還有空間</div><div class="big" style="font-size:16px;color:${
+            it.bid_headroom_jpy > 0 ? "var(--good)" : "var(--danger)"}">${
+            it.bid_headroom_jpy > 0 ? jpy(it.bid_headroom_jpy) : "已無空間"}</div></div>
+         <div><div class="lab">成交後到手</div><div class="big" style="font-size:16px;color:var(--ink)">${nt(c.landed_at_ceiling_twd)}</div></div>
+       </div>`
+    : `<div class="bid-ceiling none" style="padding:7px 11px"><div>
+         <div class="lab">出價上限</div>
+         <div class="big">不提供 — ${escapeHtml((c && c.reason) || "沒有估價")}</div></div></div>`);
+  const over = it.over_budget ? `<span class="sr-tag over">超預算</span>` : "";
+  const origin = it.origin_url
+    ? ` · <a href="${escapeHtml(it.origin_url)}" target="_blank" rel="noopener">原生頁</a>` : "";
+  return `
+  <div class="sr-item ${it.over_budget ? "over" : ""}">
+    ${shot(it.image_url, it.title)}
+    <div class="sr-main">
+      <div><span class="sr-v v-${escapeHtml(v.verdict || "CAUTION")}">${label}</span></div>
+      <h3 class="sr-title">
+        <a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
+        <span class="sr-tag">${escapeHtml(it.site_label)}</span>${bid}${over}</h3>
+      ${ceilLine}
+      <div class="sr-nums">
+        <span>到手 <b>${nt(it.landed_twd)}</b>（${escapeHtml(it.route_label)}）</span>
+        <span>在架 <b>${jpy(it.price)}</b> ${escapeHtml(it.price_kind_label)}</span>
+        <span>公允 <b>${nt(v.fair_twd)}</b></span>
+        <span>80% 區間 ${range}</span>
+        <span>P(值得買) <b>${p}</b></span>
+        <span>可比 ${v.comparable_n} 筆${v.comparable_tier_label
+          ? "（" + escapeHtml(v.comparable_tier_label) + "）" : ""}</span>
+        <span>${escapeHtml(it.card.grader || "")} ${it.card.grade ?? ""}
+              ${escapeHtml(it.card.rarity || "")}</span>
+      </div>
+      <div class="sr-reason">${fmt((v.verdict_reasons || [])[0] || "")}${origin}</div>
+    </div>
+  </div>`;
+}
+
+function renderSearch(){
+  const r = srData;
+  const out = document.getElementById("sr-out");
+  const byKey = Object.fromEntries(r.items.map(i => [i.key, i]));
+  const order = (r.order || {})[srView] || r.items.map(i => i.key);
+  const f = r.funnel;
+  const why = Object.entries(f.rejected || {})
+    .map(([k, n]) => `<span>${escapeHtml(k)} ${n}</span>`).join("");
+
+  const viewNote = srView === "venue"
+    ? "公允價已校正到<b>標的自己的平台</b>（Yahoo 競價出清價 vs Mercari/PayPay 定價零售價差 2 倍以上）。"
+    : "⚠️ 公允價<b>沒有做平台校正</b>，是混合平台的價格水準——切回「校正：開」看排序差多少。";
+
+  out.innerHTML = `
+    <div class="funnel">
+      <span>${r.sources.length} 個來源共抓 <b>${f.fetched}</b> 筆</span><span class="arrow">→</span>
+      <span>符合年代／機構／分數 <b>${f.candidates}</b> 筆</span><span class="arrow">→</span>
+      <span>列出 <b>${f.listed}</b> 筆</span>
+      <span class="pill">${r.elapsed_seconds}s</span>
+      <span class="pill">行情 ${r.comps_n} 筆／校準 ${r.calibration_n}</span>
+      <span class="pill">預算 ${nt(r.budget_twd)}</span>
+    </div>
+    <div class="srcline">${r.sources.map(srSourceLine).join("")}</div>
+    ${why ? `<div class="why">丟掉的原因：${why}</div>` : ""}
+    <div class="hint" style="margin:0 0 10px">${viewNote}</div>
+    ${order.length
+      ? order.map(k => srItem(byKey[k])).join("")
+      : `<div class="cmp">沒有任何標的通過年代／機構／分數篩選——上面的漏斗就是原因。</div>`}`;
+}
+
+async function runSearch(ev){
+  ev.preventDefault();
+  const kw = document.getElementById("sr-kw").value.trim();
+  const budget = parseFloat(document.getElementById("sr-budget").value) || 0;
+  const out = document.getElementById("sr-out");
+  const btn = document.getElementById("sr-btn");
+  if(!kw){ out.innerHTML = ""; return; }
+
+  btn.disabled = true;                       // 先鎖，不等 API 回來
+  btn.textContent = "搜尋中…";
+  out.innerHTML = `<div class="warnbox"><span class="spin"></span>` +
+    `三個來源各抓第 1 頁中…通常 6-10 秒；Buyee 冷啟動要開瀏覽器解 WAF，可能到 30 秒。別關掉頁面。</div>`;
+
+  const t0 = Date.now();
+  try{
+    const res = await fetch("/api/search", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({keyword: kw, budget_twd: budget, venue_adjust: srView === "venue"}),
+    });
+    const data = await res.json();
+    if(!res.ok || !data.ok){
+      const e = data.error || {kind:"unknown", message:"未知錯誤"};
+      out.innerHTML = `<div class="errbox"><b>搜尋失敗（${escapeHtml(e.kind)}）</b>\n` +
+        `${escapeHtml(e.message)}` +
+        (e.retryable ? "\n\n這是暫時性失敗，等一下再試一次。" : "") + `</div>`;
+      return;
+    }
+    srData = data.result;
+    renderSearch();
+    document.getElementById("sr-note").textContent = `（上次：${srData.funnel.listed} 筆）`;
+    toast(`搜尋完成（${((Date.now()-t0)/1000).toFixed(1)}s，列出 ${srData.funnel.listed} 筆）`);
+  }catch(err){
+    out.innerHTML = `<div class="errbox">連線失敗：${escapeHtml(err.message)}</div>`;
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "搜尋";
+    openSection("sr-sec");    // 結果（成功或失敗）出現時自動展開，不把它藏在收合裡
+  }
+}
+
+/* ------------------------------------------------------------ 平台研究（唯讀）
+
+   這一段**只顯示 venue_study.py 已經下好的判定**，不在前端做任何門檻比較。
+   「幾倍算便宜」「幾個分層才夠」的判準若在這裡再寫一次，CLI 與 dashboard
+   遲早會對同一份資料講出兩種結論（工程原則 1）。所以 verdict / headline /
+   reading / caveats 全部照抄後端字串，前端只負責排版與跳脫。 */
+function vsRatio(res){
+  if(!res || res.verdict !== "ok" || res.ratio == null){
+    return `<span style="color:var(--warn)">不足以判定</span>`;
+  }
+  const col = res.ratio < 0.9 ? "var(--good)" : (res.ratio > 1.1 ? "var(--danger)" : "var(--ink)");
+  return `<b style="color:${col}">×${res.ratio.toFixed(2)}</b>`;
+}
+
+async function loadVenueStudy(){
+  const out = document.getElementById("vs-out");
+  let d;
+  try{ d = await api("/api/venue-study"); }
+  catch(e){ out.innerHTML = `<span style="color:var(--danger)">載入失敗：${escapeHtml(e.message)}</span>`; return; }
+
+  const obs = d.listing_obs || {by_site: [], total: 0};
+  const L = k => escapeHtml((d.labels || {})[k] || k);
+  // 賣得掉率只顯示後端算出來的值；後端說不足以判定就照實印它的理由，
+  // 前端不自己拿 disappeared/total 湊一個數字出來（那會變成第二套判準）。
+  const rate = Object.fromEntries(((d.report || {}).q3 || {rows: []}).rows
+    .map(r => [r.venue, r.sell_through != null
+      ? (r.sell_through * 100).toFixed(0) + "%"
+      : `<span style="color:var(--warn)">不足以判定</span>`]));
+  const obsRows = (obs.by_site || []).map(s =>
+    `<tr><td>${L(s.site)}</td><td>${s.total}</td><td>${s.still_open || 0}</td>
+     <td>${s.disappeared || 0}</td><td>${s.window_exit || 0}</td><td>${s.revived || 0}</td>
+     <td>${rate[s.site] || "–"}</td></tr>`).join("");
+  const obsTable = `
+    <h3 style="font-size:12px;color:var(--dim);margin:14px 0 6px">Q3 在架觀測帳（listing_obs，每輪掃描累積）</h3>
+    <div class="scroll-x"><table><thead><tr>
+      <th>平台</th><th>觀測列</th><th>仍在架</th><th>判定消失</th><th>擠出觀測窗</th>
+      <th>復活(誤判)</th><th>賣得掉率</th>
+    </tr></thead><tbody>${obsRows || `<tr><td colspan="7">還沒有觀測資料（跑一次 scan 就會開始累積）</td></tr>`}</tbody></table></div>`;
+
+  const r = d.report;
+  if(!r){
+    out.innerHTML = `<div style="color:var(--warn)">${escapeHtml(d.hint || "尚無報告")}</div>${obsTable}`;
+    return;
+  }
+
+  const q1 = r.q1, q2 = r.q2, q3 = r.q3;
+  const ratioRows = Object.entries(q1.ratios || {}).map(([k, res]) => {
+    const base = k.endsWith("vs_mercari") ? "Mercari 定價" : "Yahoo 即決";
+    const who = L(k.replace("_vs_mercari", ""));
+    return `<tr><td>${who} ÷ ${base}</td><td>${vsRatio(res)}</td>
+      <td>${res.n_strata}</td>
+      <td>${res.verdict === "ok" ? res.n_other_cheaper + "/" + res.n_strata : "—"}</td></tr>`;
+  }).join("");
+
+  const q1Rows = (q1.table || []).filter(t => t.comparable).slice(0, 8).map(t => {
+    const cell = v => {
+      const c = (t.cells || {})[v] || {n: 0};
+      return c.n ? `${nt(c.median)} <span style="color:var(--dim)">/${c.n}${c.enough ? "★" : ""}</span>` : "—";
+    };
+    return `<tr><td>${escapeHtml(t.stratum)}</td><td>${cell("buyee_yahoo")}</td>
+      <td>${cell("buyee_mercari")}</td><td>${cell("buyee_paypay")}</td></tr>`;
+  }).join("");
+
+  const q2Rows = Object.entries(q2.by_venue || {}).map(([v, res]) =>
+    `<tr><td>${L(v)}</td><td>${res.listing_n}</td><td>${res.sold_n}</td>
+     <td>${res.n_strata}</td><td>${vsRatio(res)}</td>
+     <td style="white-space:normal">${escapeHtml(res.reading)}</td></tr>`).join("");
+
+  const q3Note = q3.verdict === "ok" ? "" :
+    `<div style="color:var(--warn);margin-top:6px">Q3 不足以判定：${escapeHtml(q3.detail)}</div>`;
+
+  out.innerHTML = `
+    <div class="kpi" style="font-size:15px;line-height:1.5">${escapeHtml(q1.headline || "")}</div>
+    <div style="margin:4px 0 10px">
+      <span class="pill">產生於 ${escapeHtml(String(r.generated_at).slice(0, 16).replace("T", " "))}</span>
+      <span class="pill">在架樣本 <b>${r.listing_n}</b></span>
+      <span class="pill">成交樣本 <b>${r.sold_n}</b></span>
+      <span class="pill">請求 <b>${(r.survey || {}).requests ?? "–"}</b></span>
+      <span class="pill">每層每平台 ≥${(r.params || {}).min_per_cell} 筆</span>
+    </div>
+
+    <h3 style="font-size:12px;color:var(--dim);margin:14px 0 6px">Q1 可立即成交的在架價（同分層配對比值的中位）</h3>
+    <div class="scroll-x"><table><thead><tr>
+      <th>比較</th><th>倍率</th><th>可比分層</th><th>對方較便宜</th>
+    </tr></thead><tbody>${ratioRows || `<tr><td colspan="4">無</td></tr>`}</tbody></table></div>
+
+    <div class="scroll-x" style="margin-top:8px"><table><thead><tr>
+      <th>分層（稀有度 × 機構分數）</th><th>${L("buyee_yahoo")}</th>
+      <th>${L("buyee_mercari")}</th><th>${L("buyee_paypay")}</th>
+    </tr></thead><tbody>${q1Rows || `<tr><td colspan="4">沒有任何分層達到樣本門檻 → 不足以判定</td></tr>`}</tbody></table></div>
+
+    <h3 style="font-size:12px;color:var(--dim);margin:14px 0 6px">Q2 選擇偏差檢定（同平台：近期成交 ÷ 目前在架）</h3>
+    <div class="scroll-x"><table><thead><tr>
+      <th>平台</th><th>在架</th><th>成交</th><th>可比分層</th><th>成交/在架</th><th>判讀</th>
+    </tr></thead><tbody>${q2Rows || `<tr><td colspan="6">無</td></tr>`}</tbody></table></div>
+
+    ${obsTable}${q3Note}
+    <div class="why" style="margin-top:10px">${
+      [...(q1.caveats || []), ...(q2.caveats || []), ...(q3.caveats || [])]
+        .map(c => `<span style="white-space:normal">⚠️ ${escapeHtml(c)}</span>`).join("")}</div>`;
+}
+
+/* ============================================================ 賣家視圖
+
+   這一段**只顯示 seller_alpha 已經下好的判定**：分數、逐項貢獻、caveat、
+   「不給分數」的理由全部照抄後端字串。門檻與折價算式若在前端再寫一次，
+   CLI 的 `ygo-sniper sellers --rank` 與這一頁遲早會對同一份資料講兩種話
+   （工程原則 1）——與平台研究那一段同一個立場。
+
+   ⚠️ 顯示規則兩條紅線：
+   1. `ok=false` 的賣家 total 是 null → 印「不給分數」，**不准印 0**。
+      0 分的意思是「比同儕貴、沒有 alpha」，那是另一件事。
+   2. caveat 用滿版黃條（.caveat），不是 tooltip。 */
+let svData = null;
+let svCurrent = null;
+
+function setView(view){
+  const sellers = view === "sellers";
+  document.getElementById("signals-view").style.display = sellers ? "none" : "";
+  document.getElementById("seller-view").style.display  = sellers ? "" : "none";
+  document.getElementById("filterbar").style.display    = sellers ? "none" : "";
+  if(sellers && !svData) loadSellers();
+}
+
+const svScore = r => r.ok
+  ? `<b style="color:${r.total >= 25 ? "var(--good)" : "var(--ink)"}">${r.total.toFixed(1)}</b>`
+  : `<span class="noscore" title="${escapeHtml(r.reason)}">不給分數</span>`;
+
+function svWatchTag(w){
+  if(!w) return `<span class="sv-tag">未監控</span>`;
+  const cls = w.source === "manual" ? "manual" : "auto";
+  return `<span class="sv-tag ${cls}">${w.source === "manual" ? "手動" : "自動"}·批 ${w.batch}</span>`;
+}
+
+function svCaveats(list){
+  return (list || []).map(c => `<span class="caveat">${escapeHtml(c)}</span>`).join("");
+}
+
+async function loadSellers(){
+  let d;
+  try{ d = await api("/api/sellers"); }
+  catch(e){
+    document.getElementById("sv-cov").innerHTML =
+      `<span style="color:var(--danger)">載入失敗：${escapeHtml(e.message)}</span>`;
+    return;
+  }
+  svData = d;
+  const c = d.coverage || {};
+  // ⚠️ 這裡看的是**在架觀測帳**的跨度（listing_obs），不是 coverage 裡那個
+  //    含 comps 成交時間的最大值——後者混了「別人什麼時候賣掉的」，
+  //    而「持續性」問的是「我們盯了這個賣家多久」（工程原則 1：同源）。
+  const span = c.listing_obs_span_days != null ? c.listing_obs_span_days
+                                               : (c.observation_span_days || 0);
+  document.getElementById("sv-cov").innerHTML = `
+    <div class="row" style="gap:8px">
+      <span class="pill">有觀測賣家 <b>${c.sellers_total}</b></span>
+      <span class="pill">達門檻 <b style="color:var(--good)">${c.sellers_scored}</b></span>
+      <span class="pill">證據不足 <b style="color:var(--warn)">${c.sellers_insufficient}</b></span>
+      <span class="pill">可比筆數 <b>${c.comparable_items}</b>／${c.rows_scoring_basis}
+        （${((c.comparable_rate||0)*100).toFixed(1)}%）</span>
+      <span class="pill">競標中出價排除 <b>${c.rows_bid_excluded}</b></span>
+    </div>
+    ${span < 14 ? `<span class="caveat">⚠️ 在架帳本最長觀測跨度只有 ${span.toFixed(1)} 天
+      —— 分數裡的「持續性」對所有賣家都近乎 0 分，現在量到的是<b>橫斷面</b>的便宜，
+      不是「持續」便宜。要判定持續性得等帳本累積（約 4 週）。</span>` : ""}
+    <div class="hint">同儕層級 ${escapeHtml(JSON.stringify(c.tier_counts || {}))}
+      ｜價格基準 ${escapeHtml(JSON.stringify(c.basis_counts || {}))}
+      ｜另有 ${c.stratum_only_items} 筆只比得到「同稀有度×同分數」層級（卡種混合，一律不計分）</div>`;
+
+  const p = d.params || {};
+  const rot = d.rotation || {};
+  const wrows = (d.watch || []).filter(w => w.active).map(w => `
+    <tr>
+      <td><a href="#" onclick="openSeller('${escapeHtml(w.seller_key)}');return false">${escapeHtml(w.seller_key)}</a></td>
+      <td>${svWatchTag(w)}</td>
+      <td>${w.score == null ? `<span class="noscore" title="手動加入的賣家沒有分數——不假裝它有">—</span>` : w.score.toFixed(1)}</td>
+      <td>${w.batch}</td>
+      <td>${w.last_scanned_at ? escapeHtml(String(w.last_scanned_at).slice(0,16).replace("T"," ")) : "還沒掃過"}</td>
+      <td style="white-space:normal">${escapeHtml(w.last_result || "—")}</td>
+      <td><button onclick="toggleWatch('${escapeHtml(w.seller_key)}','remove')">移出</button></td>
+    </tr>`).join("");
+  document.getElementById("sv-watch").innerHTML = `
+    <div class="row" style="gap:8px">
+      <span class="pill">名單 <b>${d.watch_active}</b>/${p.max_sellers}</span>
+      <span class="pill">${p.batches} 批輪替 · 每批 ${Math.round(p.batch_interval_minutes)} 分
+        → 每賣家 ${Math.round(p.per_seller_interval_minutes)} 分一次</span>
+      <span class="pill">自動入選門檻 <b>${p.auto_min_score}</b> 分</span>
+      ${rot.batch != null ? `<span class="pill">上次輪替 第 <b>${rot.batch}</b> 批 ·
+        ${escapeHtml(String(rot.claimed_at||"").slice(0,16).replace("T"," "))}</span>` : ""}
+      ${p.enabled ? "" : `<span class="pill" style="color:var(--danger)">監控掃描已關閉</span>`}
+    </div>
+    <div class="scroll-x" style="margin-top:8px"><table><thead><tr>
+      <th>賣家</th><th>來源</th><th>分數</th><th>批次</th><th>上次掃描</th><th>上次結果</th><th></th>
+    </tr></thead><tbody>${wrows || `<tr><td colspan="7">名單是空的
+      —— 在下面的排行榜按「加入監控」，或用 <code>ygo-sniper watch-seller add &lt;key&gt;</code>。
+      自動門檻目前只選得出 1 個賣家，所以手動加入是常態不是例外。</td></tr>`}</tbody></table></div>`;
+
+  document.getElementById("sv-rank").innerHTML = svTable(d.ranked, true);
+  document.getElementById("sv-rejected").innerHTML = svTable(d.rejected, false);
+}
+
+function svTable(rows, ranked){
+  const head = ranked
+    ? `<thead><tr><th>賣家</th><th>分數</th><th>同儕比</th><th>可比/卡</th>
+       <th>逐項貢獻</th><th>監控</th><th></th></tr></thead>`
+    : `<thead><tr><th>賣家</th><th>觀測列</th><th>可比/卡</th><th>還缺什麼</th><th>監控</th><th></th></tr></thead>`;
+  const body = (rows || []).map(r => {
+    const m = r.metrics || {};
+    const watched = !!r.watch;
+    const btn = `<button onclick="toggleWatch('${escapeHtml(r.seller_key)}','${watched ? "remove" : "add"}')">
+        ${watched ? "移出監控" : "加入監控"}</button>`;
+    if(!ranked){
+      return `<tr class="sv-row" onclick="openSeller('${escapeHtml(r.seller_key)}')">
+        <td>${escapeHtml(r.seller_key)}</td><td>${m.n_rows}</td>
+        <td>${m.n_comparable}/${m.n_distinct_cards}</td>
+        <td style="white-space:normal">${escapeHtml((r.missing||[])[0] || r.reason)}</td>
+        <td>${svWatchTag(r.watch)}</td>
+        <td onclick="event.stopPropagation()">${btn}</td></tr>`;
+    }
+    const d = m.discount_ratio_median;
+    const cheaper = d != null && d < 1;
+    const w = d == null ? 0 : Math.min(100, Math.abs(1 - d) * 100);
+    return `<tr class="sv-row" onclick="openSeller('${escapeHtml(r.seller_key)}')">
+      <td>${escapeHtml(r.seller_key)}</td>
+      <td>${svScore(r)}</td>
+      <td><div class="row" style="gap:6px">
+        <span class="pw">${d == null ? "–" : d.toFixed(3) + "×"}</span>
+        <span class="comp-bar" style="flex:1"><i class="${cheaper ? "" : "neg"}" style="width:${w}%"></i></span>
+        <span style="color:${cheaper ? "var(--good)" : "var(--danger)"};font-size:11.5px">
+          ${d == null ? "" : (cheaper ? "便宜" : "貴") + " " + Math.abs(1-d).toLocaleString(undefined,{style:"percent",maximumFractionDigits:0})}</span>
+      </div></td>
+      <td>${m.n_comparable}/${m.n_distinct_cards}</td>
+      <td style="white-space:normal;font-size:11.5px">${(r.components||[]).map(c =>
+          `${escapeHtml(c.label.slice(0,2))}${c.points >= 0 ? "+" : ""}${c.points.toFixed(1)}`).join(" ")}</td>
+      <td>${svWatchTag(r.watch)}</td>
+      <td onclick="event.stopPropagation()">${btn}</td></tr>
+      ${(r.caveats || []).length ? `<tr><td colspan="7" style="padding-top:0">
+        ${svCaveats(r.caveats)}</td></tr>` : ""}`;
+  }).join("");
+  return head + `<tbody>${body || `<tr><td colspan="7">目前沒有——這是誠實的答案，不是壞掉。</td></tr>`}</tbody>`;
+}
+
+async function toggleWatch(key, action){
+  try{
+    const r = await api(`/api/sellers/${encodeURIComponent(key)}/watch`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action}),
+    });
+    // 後端拒絕（名單滿了、manual 不淘汰任何人）也是正常回答，不是錯誤——
+    // 但**理由一定要顯示**，不能只是「沒有反應」。
+    toast(r.message || (r.ok ? "已更新" : "沒有變更"));
+    svData = null;
+    await loadSellers();
+    if(svCurrent === key) openSeller(key);
+  }catch(e){ toast("失敗：" + e.message); }
+}
+
+async function openSeller(key){
+  svCurrent = key;
+  const panel = document.getElementById("sv-detail-panel");
+  const out = document.getElementById("sv-detail");
+  panel.style.display = "";
+  document.getElementById("sv-detail-title").textContent = "賣家細節 — " + key;
+  out.innerHTML = "載入中…";
+  let d;
+  try{ d = await api(`/api/sellers/${encodeURIComponent(key)}`); }
+  catch(e){ out.innerHTML = `<span style="color:var(--danger)">載入失敗：${escapeHtml(e.message)}</span>`; return; }
+
+  const sc = d.score, m = d.metrics, w = d.watch;
+  const comp = (sc.components || []).map(c => `
+    <tr><td>${escapeHtml(c.label)}</td>
+        <td style="color:${c.points < 0 ? "var(--danger)" : "var(--ink)"}">${c.points >= 0 ? "+" : ""}${c.points.toFixed(1)}</td>
+        <td>${c.max_points}</td>
+        <td style="white-space:normal">${escapeHtml(c.detail)}</td></tr>`).join("");
+
+  const items = (d.items || []).map(i => {
+    const pr = i.peer;
+    return `<tr>
+      <td style="white-space:normal">${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml((i.title||"").slice(0,60))}</a>` : escapeHtml((i.title||"").slice(0,60))}</td>
+      <td>${escapeHtml(i.basis_label)}</td>
+      <td>${nt(i.price_twd)}</td>
+      <td>${pr ? nt(pr.median_twd) : "–"}</td>
+      <td style="color:${i.discount_pct == null ? "var(--dim)" : (i.discount_pct > 0 ? "var(--good)" : "var(--danger)")}">
+        ${i.discount_pct == null ? "–" : (i.discount_pct > 0 ? "+" : "") + i.discount_pct.toFixed(0) + "%"}</td>
+      <td>${pr ? escapeHtml(pr.tier) + (pr.scoring ? "" : "（不計分）") : "–"}</td>
+      <td>${pr ? pr.n + " 筆/" + pr.sellers + " 家" : "0"}</td>
+      <td style="white-space:normal;color:var(--dim);font-size:11px">${pr ? (pr.sources||[]).map(sx =>
+          `${nt(sx.price_twd)} ${escapeHtml((sx.title||"").slice(0,26))} [${escapeHtml(sx.seller_key || "賣家未知")}／${escapeHtml(sx.basis_label)}]`).join("<br>") : ""}</td>
+    </tr>`;
+  }).join("");
+
+  out.innerHTML = `
+    <div class="row" style="gap:8px;margin-bottom:6px">
+      <span class="pill">${sc.ok ? `Seller Alpha <b>${sc.total.toFixed(1)}</b>/100` : `<b style="color:var(--warn)">不給分數（證據不足）</b>`}</span>
+      <span class="pill">可比 <b>${sc.n_comparable}</b> 筆／<b>${sc.n_distinct_cards}</b> 張相異卡</span>
+      <span class="pill">觀測列 <b>${m.n_rows}</b>（定價 ${m.n_ask}·成交 ${m.n_sold}·競標中出價 ${m.n_bid_excluded} 不入指標）</span>
+      <span class="pill">同儕來源賣家 <b>${m.peer_seller_pool}</b></span>
+      ${w ? `<span class="pill">監控中 ${svWatchTag(w)}</span>` : ""}
+      <button onclick="toggleWatch('${escapeHtml(key)}','${w && w.active ? "remove" : "add"}')">
+        ${w && w.active ? "移出監控" : "加入監控"}</button>
+    </div>
+    <div style="white-space:normal;margin-bottom:6px">${escapeHtml(sc.reason)}</div>
+    ${svCaveats(sc.caveats)}
+    ${svCaveats(sc.ok ? [] : sc.missing)}
+    ${m.risk_known ? "" : svCaveats(m.risk_notes)}
+    <span class="caveat">${escapeHtml(m.persistence_note)}</span>
+    <span class="caveat">${escapeHtml(m.sold_through_note)}</span>
+    <div class="scroll-x" style="margin-top:10px"><table><thead><tr>
+      <th>分數項目</th><th>得分</th><th>上限</th><th>依據（絕不輸出裸數字）</th>
+    </tr></thead><tbody>${comp || `<tr><td colspan="4">—</td></tr>`}</tbody></table></div>
+    <h3 style="font-size:12px;color:var(--dim);margin:14px 0 6px">
+      逐筆標的（${(d.items||[]).length}/${d.items_total}）· 同儕折價與同儕來源</h3>
+    <div class="scroll-x"><table><thead><tr>
+      <th>標題</th><th>基準</th><th>價</th><th>同儕中位</th><th>折價</th><th>層級</th><th>同儕</th><th>你跟誰比</th>
+    </tr></thead><tbody>${items || `<tr><td colspan="8">沒有標的</td></tr>`}</tbody></table></div>
+    ${m.model_ratio_median != null ? `<div class="hint">[輔助・不進分數] 模型絕對法中位
+      ${m.model_ratio_median.toFixed(3)}× —— 承受模型分段偏誤（實測 L3×Mercari 高估 5.9 倍、
+      comps 表沒有任何 eBay 成交所以 eBay 平台係數估不出來），只供對照。</div>` : ""}`;
+  panel.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+async function loadAll(){
+  try{
+    // 匯率參數要先到：成本拆解那一行需要它，而清單一回來就會被畫出來。
+    await loadBreakeven();
+    await Promise.all([loadSignals(), loadBundle(), loadStats(),
+                       loadVenueStudy(), loadBidding()]);
+  }catch(e){ toast("載入失敗：" + e.message); }
+}
+
+document.querySelectorAll(".tab").forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll(".tab").forEach(b => b.classList.remove("on"));
+    btn.classList.add("on");
+    if(btn.dataset.view){        // 賣家視圖：換版面，不動 currentState
+      setView(btn.dataset.view);
+      return;
+    }
+    setView("signals");
+    if(btn.dataset.bucket){
+      // 分類分頁：篩 bucket、**不分狀態**（高價卡按了「已購買」之後還在這裡）。
+      currentBucket = btn.dataset.bucket;
+      currentState  = "all";
+    }else{
+      currentBucket = "";
+      currentState  = btn.dataset.state;
+    }
+    loadSignals();
+  };
+});
+
+document.querySelectorAll(".filt").forEach(btn => {
+  btn.onclick = () => {
+    filterMode = btn.dataset.filter;
+    syncFilterUI(); saveFilters(); renderSignals();
+  };
+});
+
+/* 快捷是**可疊加的開關**（不是第四個分類）：「有出價上限」與「有空間」
+   可以跟上面的分類同時成立，兩個都開就是取交集。 */
+document.querySelectorAll(".quick").forEach(btn => {
+  btn.onclick = () => {
+    const k = btn.dataset.quick;
+    quick[k] = !quick[k];
+    syncFilterUI(); saveFilters(); renderSignals();
+  };
+});
+
+document.getElementById("p-on").onchange = ev => {
+  pHide = ev.target.checked;
+  document.getElementById("p-filter").classList.toggle("on", pHide);
+  saveFilters(); renderSignals();
+};
+
+document.getElementById("p-th").oninput = ev => {
+  const v = parseFloat(ev.target.value);
+  if(isNaN(v)) return;                    // 清空輸入框的中間狀態，不要當成 0%
+  pThreshold = Math.min(0.99, Math.max(0, v / 100));
+  pDefaultApplied = true;                 // 使用者自己調過，後端預設不再覆蓋
+  saveFilters(); renderSignals();
+};
+document.getElementById("flag-filter").onchange = ev => {
+  flagFilter = ev.target.value;
+  saveFilters(); renderSignals();
+};
+document.getElementById("sort-mode").onchange = ev => {
+  sortMode = ev.target.value;
+  saveFilters(); renderSignals();
+};
+
+document.getElementById("filter-reset").onclick = () => {
+  filterMode = "all"; flagFilter = ""; pHide = false;
+  quick = {ceiling:false, room:false, noauction:false};
+  syncFilterUI(); saveFilters(); renderSignals();
+};
+
+loadFilters();
+syncFilterUI();
+initSections();
+loadAll();
+pollScanStatus();
+</script>
+</body>
+</html>

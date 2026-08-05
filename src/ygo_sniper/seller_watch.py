@@ -1,0 +1,496 @@
+"""賣家監控名單 ＋ 輪替掃描（Seller Alpha 第三棒）。
+
+前兩棒把「誰比同儕便宜」算出來了（`seller_alpha`），但那是**被動**的：
+只看得到掃描關鍵字剛好撈到的那幾筆。這一棒讓它會動——挑出值得盯的賣家，
+用**賣家頁列舉**定期把他們的全部在架抓回來走同一條管線。
+
+---------------------------------------------------------------------------
+## 三個刻意的設計決定
+
+### 1. 名單存 db，不存 config
+名單會被兩邊寫：排程（分數過門檻自動入選）與使用者（手動加入）。兩邊都改同一個
+yaml 遲早互相覆蓋；而且「上次掃描時間」本來就是狀態不是設定（見 `store.seller_watch`）。
+
+### 2. 手動加入不受分數門檻限制，而且**不假裝它有分數**
+2026-08-04 全量實測：95 個有觀測的賣家裡只有 5 個過得了 `seller_alpha` 的證據門檻，
+其中 4 個是「比同儕**貴**」——自動名單實際上只有 `ebay:psa` 一個。這個現況下若
+只允許自動入選，整個監控功能等於只監控一個賣家。所以手動加入是第一等公民，
+但它的 `score` 永遠是 NULL：畫面上必須看得出「這是使用者的直覺」而不是「這是
+59.2 分的賣家」。給手動加入的賣家補一個 0 分或假分數，就是把兩種完全不同的
+證據狀態壓成同一個數字。
+
+### 3. 分批在**加入當下**算一次，之後不動
+`batch = sha1(seller_key) % N`。用 sha1 不用內建 `hash()`：後者每個行程都有不同的
+隨機種子（PYTHONHASHSEED），每次排程跑起來分批表都會重洗，「每 240 分鐘掃一次」
+的保證直接消失，而且完全看不出來。用名單索引（第 i 個賣家 → i % 4）也不行：
+名單一增刪，後面每個人的批次都會位移。
+
+---------------------------------------------------------------------------
+## 輪替與請求預算
+
+使用者已定：名單上限 **30 個賣家**、每賣家每 **240 分鐘**掃一次，實作形式是
+**拆 4 批、每小時輪一批**（30÷4≈8 個賣家／小時 × 每人 1 頁 = 每小時約 8 個請求，
+與既有掃描的約 11 個同一量級）。
+
+節流帳落 `meta`（跨行程冪等，做法與 `comps.claim_sold_run` 同一套）：計時器是
+**時間**不是輪數——`scan` 可能被 dashboard 手動多按幾次，用輪數計時會讓一個
+手動掃描把整輪輪替往前推掉一小時。
+
+## 誠實邊界（2026-08-04）
+
+- 賣家頁列舉目前有 **eBay**、**PayPay（Yahoo!フリマ）**、**Yahoo 拍賣** 三站。
+  Yahoo 拍賣是 2026-08-04 補上的（`yahoo.YahooAuctionSource.search_seller`）
+  ——在那之前名單上 16 個賣家有 6 個是 `buyee_yahoo`（含分數最高的三個
+  79.8／67.5／66.3）全部掃不到，是當時最大的覆蓋缺口。
+  仍然沒有列舉實作的站台會被**明確記成「來源尚未支援」**，不是安靜地跳過
+  （安靜跳過與「這個賣家最近沒上架」外顯一模一樣）。
+- **Yahoo 拍賣的賣家頁沒有已售出清單**（實測），所以那一站的成交歷史仍然
+  只能走 `yahoo_closed`；`search_seller(sold=True)` 會告警並回空清單。
+- 監控掃描抓回來的標的**走既有的完整管線**（`parse_card` → `is_candidate` →
+  估價 → `listing_obs` → scoring），這裡不另開一條評估路徑：判準只有一份。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
+
+#: 輪替節流帳的 meta 鍵（跨行程）。
+WATCH_ROTATION_META_KEY = "seller_watch_rotation"
+
+SOURCE_AUTO = "auto"
+SOURCE_MANUAL = "manual"
+
+#: site → 具備「賣家頁列舉」能力的 source 名稱。實測依據見
+#: reports/seller-page-feasibility.md（eBay `filter=sellers:`、PayPay `/user/{id}`）。
+SELLER_PAGE_SOURCE: dict[str, str] = {
+    "ebay": "ebay",
+    "buyee_paypay": "paypay_direct",
+    # 2026-08-04 補上（名單上分數最高的三個賣家都是這一站）。賣家頁的
+    # `__NEXT_DATA__` 與 closedsearch 同一條路徑，見 yahoo.py `_SELLER_LISTING_PATH`。
+    "buyee_yahoo": "yahoo_direct",
+}
+
+#: 還沒有列舉實作的站台 → 一句話說明。**要說得出「為什麼沒掃」**。
+UNSUPPORTED_SITE_NOTE: dict[str, str] = {
+    "buyee_mercari": "Mercari 賣家頁尚未實測（走 Buyee 鏡像需要 WAF 挑戰）",
+    "mercari_tw": "Mercari 台灣賣家頁尚未實測",
+    "ruten": "露天賣家頁尚未實測（這條管道目前只跑 canary）",
+}
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def _age_minutes(value: Any, now: datetime) -> float | None:
+    ts = _parse_ts(value)
+    if ts is None:
+        return None
+    return (now - ts).total_seconds() / 60.0
+
+
+# ---------------------------------------------------------------------------
+@dataclass(slots=True, frozen=True)
+class WatchParams:
+    """監控名單與輪替的參數。全部來自 `settings.yaml` 的 `seller_alpha:`。
+
+    非法值一律印警告並退回預設（不靜默）：一個打錯的上限會讓監控在使用者
+    不知情的狀況下停擺或暴衝，兩種都比報錯難發現。
+    """
+
+    #: 整個功能的開關。false ＝ 不列舉、不推播規則 3（名單與 CLI 仍可用）。
+    enabled: bool = True
+    #: 名單上限（使用者已定 30）。
+    max_sellers: int = 30
+    #: 每個賣家的掃描間隔（使用者已定 240 分鐘）。
+    per_seller_interval_minutes: float = 240.0
+    #: 拆幾批輪替（4 批 × 每小時一批 ＝ 每賣家 4 小時一次）。
+    batches: int = 4
+    #: 自動入選的分數門檻。依據見 settings.yaml 的註解。
+    auto_min_score: float = 25.0
+    #: 每個賣家每次抓幾頁。1 頁：eBay 一頁 200 筆、PayPay 一頁 100 筆，
+    #: 遠大於任何一個賣家的遊戲王在架量（實測 38 筆／人）。
+    pages: int = 1
+
+    @property
+    def batch_interval_minutes(self) -> float:
+        """兩批之間該隔多久 ＝ 每賣家間隔 ÷ 批數（240/4 = 60 分）。"""
+        return self.per_seller_interval_minutes / max(1, self.batches)
+
+    @classmethod
+    def from_config(cls, cfg: Any) -> WatchParams:
+        block = dict(getattr(cfg, "seller_alpha", None) or {})
+        out = cls()
+        kw: dict[str, Any] = {}
+        if "watch_enabled" in block:
+            kw["enabled"] = bool(block["watch_enabled"])
+        for field_name, key, caster, lo in (
+            ("max_sellers", "watch_max_sellers", int, 1),
+            ("per_seller_interval_minutes", "per_seller_interval_minutes", float, 1.0),
+            ("batches", "watch_batches", int, 1),
+            ("auto_min_score", "watch_auto_min_score", float, 0.0),
+            ("pages", "watch_pages", int, 1),
+        ):
+            if key not in block:
+                continue
+            try:
+                value = caster(block[key])
+            except (TypeError, ValueError):
+                print(f"[warn] seller_alpha.{key}={block[key]!r} 不是數字，"
+                      f"改用 {getattr(out, field_name)}")
+                continue
+            if value < lo:
+                print(f"[warn] seller_alpha.{key}={value} 小於 {lo}，"
+                      f"改用 {getattr(out, field_name)}")
+                continue
+            kw[field_name] = value
+        return cls(**kw) if kw else out
+
+
+# ---------------------------------------------------------------------------
+def batch_of(seller_key: str, batches: int) -> int:
+    """賣家鍵 → 輪替批次。**穩定**：同一個鍵在任何行程、任何時候都是同一批。
+
+    用 sha1 而不是內建 `hash()`：後者每個行程的隨機種子不同（PYTHONHASHSEED），
+    每次排程跑起來分批表都會重洗，而且外顯只是「這個賣家好像沒有每 4 小時掃到」
+    ——沒有錯誤訊息的那種壞法。
+    """
+    n = max(1, int(batches))
+    digest = hashlib.sha1(seller_key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % n
+
+
+# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class WatchAddResult:
+    """一次加入的結果。**拒絕時必須說得出為什麼、以及使用者能做什麼。**"""
+
+    ok: bool
+    seller_key: str
+    reason: str
+    batch: int | None = None
+    #: 為了讓位而被淘汰的 auto 賣家（manual 永不被自動淘汰）。
+    evicted: str | None = None
+    #: 已經在名單上（不是錯誤，但也不是新增）。
+    already: bool = False
+
+
+def add_watch(
+    store: Any,
+    seller_key: str,
+    *,
+    source: str,
+    reason: str,
+    params: WatchParams,
+    score: float | None = None,
+    now: str | None = None,
+) -> WatchAddResult:
+    """加一個賣家進監控名單，**名單上限與淘汰規則都在這裡**（只有這一份）。
+
+    規則：
+    - 已經在名單上 → 不動它，回 `already=True`（重複加入不是錯誤）。
+    - 名單未滿 → 直接加。
+    - 名單已滿：
+        * **manual 永不被自動淘汰**（那是使用者明講要追蹤的人）。
+        * auto 候選人可以擠掉「分數比它低的 auto」——一個位子給更有證據的那個。
+        * 擠不動（沒有更低分的 auto，或候選人是 manual）→ **拒絕並說明要移除誰**。
+          自動幫使用者砍掉一個他手動加的賣家，比拒絕更糟。
+    `score` 只有 auto 帶（manual 一律 None，見模組頂註第 2 點）。
+    """
+    seller_key = (seller_key or "").strip()
+    if ":" not in seller_key:
+        return WatchAddResult(
+            False, seller_key,
+            f"賣家鍵格式應為 `{{site}}:{{seller_id}}`（例：ebay:psa），收到 {seller_key!r}",
+        )
+    if source == SOURCE_MANUAL:
+        score = None
+
+    existing = store.get_seller_watch(seller_key)
+    if existing and existing.get("active"):
+        return WatchAddResult(
+            True, seller_key,
+            f"已經在監控名單上（{existing.get('source')}，批次 {existing.get('batch')}）",
+            batch=existing.get("batch"), already=True,
+        )
+
+    active = store.list_seller_watch(active_only=True)
+    evicted: str | None = None
+    if len(active) >= params.max_sellers:
+        victim = _evictable(active, source=source, score=score)
+        if victim is None:
+            return WatchAddResult(
+                False, seller_key,
+                f"監控名單已滿（{len(active)}/{params.max_sellers}）且沒有可淘汰的對象："
+                + _full_hint(active, source=source, score=score),
+            )
+        store.deactivate_seller_watch(
+            victim["seller_key"],
+            reason=(
+                f"名單已滿（上限 {params.max_sellers}），自身 "
+                f"{float(victim['score']):.1f} 分，被分數更高的 {seller_key}"
+                f"（{float(score):.1f} 分）擠下"
+            ),
+            now=now,
+        )
+        evicted = victim["seller_key"]
+
+    batch = batch_of(seller_key, params.batches)
+    store.upsert_seller_watch(
+        seller_key, source=source, reason=reason, batch=batch, score=score, now=now
+    )
+    detail = f"已加入監控（{source}，批次 {batch}/{params.batches}）"
+    if source == SOURCE_MANUAL:
+        detail += "；**手動加入不受分數門檻限制，也不假裝它有分數**"
+    if evicted:
+        detail += f"；淘汰 {evicted}"
+    return WatchAddResult(True, seller_key, detail, batch=batch, evicted=evicted)
+
+
+def _evictable(
+    active: list[dict[str, Any]], *, source: str, score: float | None
+) -> dict[str, Any] | None:
+    """滿了要淘汰誰。找不到就回 None（＝拒絕新增，不硬擠）。"""
+    if source != SOURCE_AUTO or score is None:
+        return None  # manual 候選人不淘汰任何人
+    autos = [
+        r for r in active
+        if r.get("source") == SOURCE_AUTO and r.get("score") is not None
+        and float(r["score"]) < float(score)
+    ]
+    if not autos:
+        return None
+    return min(autos, key=lambda r: float(r["score"]))
+
+
+def _full_hint(active: list[dict[str, Any]], *, source: str, score: float | None) -> str:
+    n_manual = sum(1 for r in active if r.get("source") == SOURCE_MANUAL)
+    autos = [r for r in active if r.get("source") == SOURCE_AUTO and r.get("score") is not None]
+    lowest = min(autos, key=lambda r: float(r["score"])) if autos else None
+    if source == SOURCE_MANUAL:
+        head = "手動加入不淘汰任何人（manual 永不自動淘汰、auto 也不由手動加入來砍）"
+    elif score is None:
+        head = "候選人沒有分數，無從比較"
+    else:
+        head = f"名單上沒有任何分數低於 {score:.1f} 的 auto 賣家"
+    tail = (
+        f"；名單組成：manual {n_manual} 個、auto {len(active) - n_manual} 個"
+        + (f"，最低分的 auto 是 {lowest['seller_key']}（{float(lowest['score']):.1f} 分）"
+           if lowest else "")
+        + "。要空出位子請先 `ygo-sniper watch-seller remove <key>`"
+    )
+    return head + tail
+
+
+def remove_watch(
+    store: Any, seller_key: str, *, reason: str = "手動移出名單", now: str | None = None
+) -> bool:
+    return bool(store.deactivate_seller_watch(seller_key, reason=reason, now=now))
+
+
+def sync_auto_watch(
+    store: Any, report: Any, params: WatchParams, *, now: str | None = None
+) -> dict[str, Any]:
+    """把分數過門檻的賣家自動加進名單。回傳報告（加了誰、擋在哪裡）。
+
+    只加不刪：分數會隨每一輪的樣本上下跳，掉到門檻以下就自動移除的話，
+    一個賣家會在名單上進進出出，而 `last_scanned_at` 每次重加都會清空
+    （見 `store.upsert_seller_watch`）——輪替節奏會被自己的分數雜訊打亂。
+    要移除請人工決定（`watch-seller remove`）。
+    """
+    out: dict[str, Any] = {"added": [], "already": 0, "rejected": [], "threshold": params.auto_min_score}
+    ranked = report.ranked() if hasattr(report, "ranked") else []
+    for score_obj, _metrics in ranked:
+        total = score_obj.total
+        if total is None or total < params.auto_min_score:
+            continue
+        res = add_watch(
+            store, score_obj.seller_key, source=SOURCE_AUTO,
+            reason=f"自動入選：Seller Alpha {total:.1f} 分 ≥ 門檻 {params.auto_min_score:g}"
+                   f"（{score_obj.reason}）",
+            params=params, score=float(total), now=now,
+        )
+        if res.already:
+            out["already"] += 1
+        elif res.ok:
+            out["added"].append({"seller_key": res.seller_key, "score": total,
+                                 "batch": res.batch, "evicted": res.evicted})
+        else:
+            out["rejected"].append({"seller_key": res.seller_key, "reason": res.reason})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 輪替
+# ---------------------------------------------------------------------------
+def _read_rotation(store: Any) -> dict[str, Any]:
+    raw = store.get_meta(WATCH_ROTATION_META_KEY)
+    if not raw:
+        return {}
+    try:
+        val = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return val if isinstance(val, dict) else {}
+
+
+def rotation_state(store: Any) -> dict[str, Any]:
+    """目前的輪替狀態（dashboard／CLI 顯示用）。"""
+    return _read_rotation(store)
+
+
+def claim_batch(
+    store: Any, params: WatchParams, *, now: datetime | None = None, force: bool = False
+) -> tuple[int | None, str]:
+    """這一輪要掃哪一批？**有副作用：認領成功會把狀態寫進 meta。**
+
+    跨行程冪等的關鍵在「時間」而不是「輪數」：`scan` 除了每小時的排程，還可能
+    被 dashboard 手動按。用輪數計時的話，手動按兩次就把輪替往前推兩小時，
+    而每個賣家的「4 小時一次」保證會安靜地變成別的數字。
+
+    回傳 `(批次或 None, 說明)`。說明一定要印得出來——「這輪為什麼沒掃賣家」
+    必須永遠有一句話交代，安靜地跳過與安靜地壞掉外顯是一樣的。
+    """
+    if not params.enabled:
+        return None, "監控掃描已關閉（seller_alpha.watch_enabled=false）"
+    now = now or datetime.now(UTC)
+    state = _read_rotation(store)
+    last_at = state.get("claimed_at")
+    age = _age_minutes(last_at, now)
+    interval = params.batch_interval_minutes
+    if age is not None and age < interval and not force:
+        return None, (
+            f"節流：距上次輪替 {age:.0f} 分（需 {interval:.0f} 分）"
+            f"，上次掃的是第 {state.get('batch')} 批"
+        )
+    last_batch = state.get("batch")
+    try:
+        nxt = (int(last_batch) + 1) % params.batches if last_batch is not None else 0
+    except (TypeError, ValueError):
+        nxt = 0
+    store.set_meta(
+        WATCH_ROTATION_META_KEY,
+        json.dumps({"batch": nxt, "claimed_at": now.isoformat()}, ensure_ascii=False),
+    )
+    note = f"第 {nxt} 批（共 {params.batches} 批，每 {interval:.0f} 分一批）"
+    if force and age is not None and age < interval:
+        note += f"；距上次只有 {age:.0f} 分，被 force 蓋過"
+    return nxt, note
+
+
+def due_sellers(
+    store: Any, params: WatchParams, batch: int, *, now: datetime | None = None
+) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], str]]]:
+    """這一批裡真的該掃的賣家 ＋ 被跳過的（含原因）。
+
+    per-seller 的護欄只擋「同一個輪替時段內重複掃到同一個人」（例如 force 連按），
+    門檻用 `batch_interval_minutes` 而不是 `per_seller_interval_minutes`：
+    後者剛好等於輪替週期，兩個門檻貼在一起時，排程早跑幾秒就會整批被自己擋掉。
+    """
+    now = now or datetime.now(UTC)
+    rows = store.list_seller_watch(active_only=True, batch=batch)
+    due: list[dict[str, Any]] = []
+    skipped: list[tuple[dict[str, Any], str]] = []
+    for r in rows:
+        age = _age_minutes(r.get("last_scanned_at"), now)
+        if age is not None and age < params.batch_interval_minutes:
+            skipped.append((r, f"{age:.0f} 分鐘前才掃過（同一輪替時段內不重複掃）"))
+            continue
+        site = str(r.get("site") or "")
+        if site not in SELLER_PAGE_SOURCE:
+            skipped.append((
+                r,
+                UNSUPPORTED_SITE_NOTE.get(site, f"{site} 沒有賣家頁列舉實作"),
+            ))
+            continue
+        due.append(r)
+    return due, skipped
+
+
+# ---------------------------------------------------------------------------
+# 推播規則 3 的資料脈絡
+# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class SellerNotifyContext:
+    """規則 3（監控名單賣家的新上架）判定所需的全部事實。
+
+    **同儕折價直接沿用 `seller_alpha.analyze` 的逐筆結果**，不在推播端另算一份：
+    第二棒證明「模型絕對值折價」會製造假 alpha，而防止那件事重演的唯一結構性
+    做法就是讓折價只有一個算式、一個入口（工程原則 1）。
+    """
+
+    #: seller_key → seller_watch 列（只含 active）
+    watch: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: seller_key → SellerScore（沒過門檻的賣家不會有）
+    scores: dict[str, Any] = field(default_factory=dict)
+    #: listing key → SellerItem（只含監控名單賣家的標的）
+    items: dict[str, Any] = field(default_factory=dict)
+    #: listing key → listing_obs 列（`seen_count` 決定「是不是新標的」）
+    obs: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def seller_of(self, site: str | None, seller_id: str | None) -> str | None:
+        if not site or not seller_id:
+            return None
+        key = f"{site}:{seller_id}"
+        return key if key in self.watch else None
+
+
+def build_notify_context(
+    store: Any, cfg: Any = None, *, index: Any = None, report: Any = None
+) -> SellerNotifyContext:
+    """跑一次 `seller_alpha.analyze`（不帶模型）並收成規則 3 要的形狀。
+
+    不帶 `valuator` 是刻意的：模型絕對值在這條路徑上**完全用不到**
+    （規則 3 的折價判準是同儕相對），少建一顆模型也少一次失敗點。
+    """
+    from .seller_alpha import analyze
+
+    ctx = SellerNotifyContext()
+    watch_rows = store.list_seller_watch(active_only=True)
+    if not watch_rows:
+        return ctx
+    ctx.watch = {r["seller_key"]: r for r in watch_rows}
+    rep = report if report is not None else analyze(store, cfg=cfg, index=index)
+    ctx.scores = {k: s for k, s in rep.scores.items() if k in ctx.watch}
+    for key in ctx.watch:
+        metrics = rep.metrics.get(key)
+        if metrics is None:
+            continue
+        for item in metrics.items:
+            ctx.items[item.row.key] = item
+    ctx.obs = {r["key"]: r for r in store.listing_obs(limit=50000)}
+    return ctx
+
+
+__all__ = [
+    "SELLER_PAGE_SOURCE",
+    "SOURCE_AUTO",
+    "SOURCE_MANUAL",
+    "UNSUPPORTED_SITE_NOTE",
+    "WATCH_ROTATION_META_KEY",
+    "SellerNotifyContext",
+    "WatchAddResult",
+    "WatchParams",
+    "add_watch",
+    "batch_of",
+    "build_notify_context",
+    "claim_batch",
+    "due_sellers",
+    "remove_watch",
+    "rotation_state",
+    "sync_auto_watch",
+]

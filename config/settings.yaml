@@ -1,0 +1,838 @@
+# ---------------------------------------------------------------------------
+# ygo-sniper 主設定檔
+# 所有「會變的數字」都在這裡，程式碼裡不該出現任何硬編碼費率。
+# 改完不用重啟，下次 scan 就生效。
+# ---------------------------------------------------------------------------
+
+# 你的判斷基準：一張卡的鑑定費用（台幣）。
+# 到手成本低於這個數字 = 等於卡免費送你 + 鑑定也免費。
+grading_fee_twd: 1000
+
+fx:
+  # 手動匯率。fx.py 會嘗試線上更新，失敗就用這裡的值。
+  jpy_twd: 0.21
+  usd_twd: 31.5
+  # 信用卡海外交易手續費（Buyee / Mercari TW 刷卡都會被收）
+  card_markup: 0.015
+  # 匯率緩衝：估成本時往上抓一點，避免樂觀偏誤
+  safety_buffer: 0.02
+
+# ---------------------------------------------------------------------------
+# 運送路徑（route）。每張卡都會用所有可用 route 各算一次，取最便宜的。
+# 數字來源：Buyee 官方費用頁 + Mercari TW 實測回報（2026-08）。
+# 這些是「估計值」，收到第一批帳單後請回來校正。
+# ---------------------------------------------------------------------------
+routes:
+  buyee_consolidated:
+    label: "Buyee 集運（湊單）"
+    # 走完之後**貨在哪裡**（domain.HoldingLocation）。轉賣模型靠這一欄決定
+    # 「送到賣場還要多少錢」——三條路徑全部把貨運到台灣，所以日本境內賣場
+    # （Mercari JP / ヤフオク / Yahoo!フリマ）都不是它們的下游。
+    destination: tw_home
+    sites: [buyee_mercari, buyee_yahoo, buyee_paypay]
+    # 以下三項是「每筆訂單」都要付，不能靠湊單攤提
+    purchase_fee_jpy: 500        # Buyee 代購手續費，每個賣場一筆
+    plan_fee_jpy: 0              # Lite 方案 0 / 檢品 300 / 標準 500
+    domestic_ship_jpy: 300       # 賣家 → Buyee 倉庫，實務 150~1500
+    # 以下兩項可以被 bundle_size 攤提
+    consolidation_fee_jpy: 700   # 集中包裝手續費 500~1000
+    intl_ship_jpy: 2200          # 一箱寄台灣（多張 slab 重量差不多）
+    bundle_size: 5               # 你預期一次湊幾張才出貨
+
+  buyee_single:
+    destination: tw_home
+    label: "Buyee 單張直寄"
+    sites: [buyee_mercari, buyee_yahoo, buyee_paypay]
+    purchase_fee_jpy: 500
+    plan_fee_jpy: 0
+    domestic_ship_jpy: 300
+    consolidation_fee_jpy: 0
+    intl_ship_jpy: 1400
+    bundle_size: 1
+
+  mercari_tw:
+    destination: tw_home
+    label: "Mercari 台灣（7-11 取貨）"
+    # 只有 Mercari 系標的走得通。mercari_tw 是官方 TW 站自己的標的
+    # （tw.mercari.com，標價新台幣），buyee_mercari 是同一批貨的日圓標價。
+    sites: [buyee_mercari, mercari_tw]
+    purchase_fee_jpy: 500        # Mercari TW 服務費，實測 500~1500
+    plan_fee_jpy: 0
+    domestic_ship_jpy: 0         # 已含在服務費 / 賣家送料込み
+    consolidation_fee_jpy: 0
+    intl_ship_jpy: 900           # Mercari Global Shipping + 7-11 取貨
+    bundle_size: 1               # 【重要】Mercari TW 一件一件直送，無法合併
+
+  ruten_local:
+    destination: tw_home
+    label: "露天（台灣境內取貨）"
+    # 唯一一條買賣雙方都在台灣的路徑，成本結構與上面三條**完全不同**：
+    #   無代購費（自己就是買家）、無國際運費（貨已在台灣）、
+    #   無海外刷卡加成（台幣付款，costs.quote_route 對 Currency.TWD 不套 markup）。
+    # 照抄日本路徑的費率會憑空多算 NT$500+ 的成本，方向是「看起來不划算」。
+    sites: [ruten]
+    purchase_fee_jpy: 0
+    plan_fee_jpy: 0
+    # ⚠️ 單位是日圓（RouteConfig 的欄位名就是這個 schema），但這筆錢是**台幣**：
+    # 露天島內掛號實測 NT$60（詳情 API 的 ShippingCost 欄位），
+    # 換算 60 / 0.21 ≈ 300 日圓。fx.jpy_twd 改動時這個等價會漂移——
+    # 真的要精確就得改 RouteConfig 支援原幣別，那是另一個決定。
+    domestic_ship_jpy: 300
+    consolidation_fee_jpy: 0
+    intl_ship_jpy: 0
+    # 露天每個賣家各自出貨，湊單不會省運費（與 Buyee 集運的差別就在這裡）
+    bundle_size: 1
+
+  ebay_direct:
+    destination: tw_home
+    label: "eBay 直寄"
+    sites: [ebay]
+    purchase_fee_jpy: 0
+    plan_fee_jpy: 0
+    domestic_ship_jpy: 0
+    consolidation_fee_jpy: 0
+    intl_ship_jpy: 0             # eBay 用 listing 上的實際運費，這裡不估
+    bundle_size: 1
+
+# ---------------------------------------------------------------------------
+# 訊號判定門檻
+# ---------------------------------------------------------------------------
+scoring:
+  # Trigger B：到手成本比 comps 中位數便宜幾成才算折價
+  discount_threshold: 0.25
+  # comps 至少要幾筆才敢下判斷，低於此數只給「資料不足」標籤
+  min_comps: 4
+  # comps 取樣天數
+  comps_window_days: 90
+  # 運費吃掉折扣：卡價在 P25 以下、但到手成本落到 P40 以上
+  shipping_kill_low_pct: 25
+  shipping_kill_high_pct: 40
+
+  # 運費＋雜費佔到手成本超過這個比例 → 標「運費吃掉了 N%」（Flag.HIGH_OVERHEAD）。
+  # 與上面那組的差別：**這條不需要任何行情樣本**。實例：eBay 單張直寄台灣，
+  # 商品 US$30、國際運費 US$32 → 運費佔到手成本 50%，這種標的在結構上就
+  # 不可能划算，但只要行情中位數夠高，shipping_kill 那組完全不會標它。
+  # ⚠️ 這個旗標**不扣分**：佔比高不等於不划算（到手 NT$294 的卡有 98% 是雜費，
+  # 但它低於鑑定費，那是白撿）。它只負責讓你看見錢花在哪。
+  overhead_ratio_alert: 0.40
+
+  # dashboard「隱藏 P(值得買) 低於 X」的**預設**門檻（前端可即時調整並記住）。
+  # 對齊 appraise.P_WORTH_AVOID=0.35 的量級但刻意更鬆一點：那是「不要買」的
+  # 否決線，這裡只是「先不要看」的視線過濾。P 值算不出來的標的**永遠不被這道
+  # 篩選隱藏**——沒有依據不等於不好（與出價上限那條紅線同一個立場）。
+  p_worth_hide_default: 0.30
+  # eBay offer 機會：上架超過幾天
+  offer_stale_days: 30
+  # 留下「符合年代但沒觸發任何 trigger 旗標」的候選。
+  #
+  # 這道閘門原本是為 Telegram 存在的：推播是主動打擾，沒有明確理由就不該出聲。
+  # 實測 1096 筆掃描 → 125 筆符合年代 → 只有 7 筆過得了閘門。
+  # 改走 dashboard 之後洗版的成本消失（清單是你自己去看的），所以預設打開，
+  # 把 125 筆全部列出來讓你自己決定要不要略過。
+  #
+  # ⚠️ 這個開關只改「留不留」，**完全不改 score 與 flags 的算法**——
+  # 沒觸發的候選一樣是它原本的分數，不會因為被留下來就變得比較值錢。
+  # 要回到只看撿漏的舊行為：改成 false。
+  keep_all_candidates: true
+
+# ---------------------------------------------------------------------------
+# 出價上限引擎（bidding.py）。競標管道唯一的數字出口。
+# ---------------------------------------------------------------------------
+bidding:
+  # 目標利潤率。上限 = 保守公允價（80% 區間下緣）×(1 − target_margin) 再扣掉
+  # 所有雜費反解回日圓。0.30 = 「贏的時候至少留三成空間」，不是剛好打平。
+  #
+  # ⚠️ 調高 = 更少贏、每次贏更划算；調低 = 更常贏、安全邊際更薄。
+  # 這個數字**直接決定使用者會填進出價欄的金額**，改之前先想清楚。
+  target_margin: 0.30
+
+  # --- 證據閘門：不夠格就不給上限（bidding.py 的 EvidenceGate）-------------
+  # 「lo_twd 是 None 就不給上限」那條紅線的延伸。低於任何一道門檻時
+  # 回報「證據不足，不提供上限」＋還缺什麼，**絕不給一個沒依據的數字**。
+
+  # 標題抽不到鑑定分數就不給上限。
+  # 模型對未知分數的處理是「當成基準分數 9，不猜」（valuation.ValuationModel.g），
+  # 那在估價時合理，但出價不能建立在一個沒說出口的假設上：分數溢價從 7 分的
+  # ×0.35 到 10 分的 ×3.95 橫跨 11 倍，猜錯的方向正好是「公允價被高估」。
+  # 2026-08-02 實測（venue-aware 出貨路徑）：分數未知的估計中位誤差 ×7.50、
+  # 區間覆蓋率只有 25%、下尾違反率 15%；分數已知是 ×1.96 / 85% / 5%。
+  # ⚠️ 分數未知的測試樣本只有 20 筆，數字本身不精確，但方向與機制吻合，
+  # 而且 appraise 早就把 grade=None 當成「無法判斷」的缺口。
+  require_known_grade: true
+
+  # 估價層級必須是 L1/L2，也就是至少有一筆「這張卡」自己的成交撐著。
+  # L3/L0 = 模型沒比對到卡名，公允價其實是「這種稀有度＋分數的典型價」。
+  # 2026-08-02 實測（出貨路徑、1006 筆測試樣本）：L3 點估計中位誤差 ×2.25、
+  # 下尾違反率（真實成交低於區間下緣＝上限開太高）13%；L1/L2 是 ×1.77/×1.99、
+  # 下尾 5%/2%。名目下尾只有 10%——L3 是唯一一個把名目值吃滿的層級。
+  require_card_specific_level: true
+
+  # 撐著這個區間的**那一群**校準殘差筆數下限（不是全庫的筆數）。
+  # 估價層自己的門檻是 valuation.min_group_calibration=30（低於就退化合併），
+  # 出價這一側刻意更嚴：區間可以當量級參考，不代表足以拿去下真錢的單。
+  min_calibration_samples: 50
+
+  # 所用層級至少要有幾筆成交。
+  # ⚠️ 這道閘門**刻意很鬆（1）**，而且調高會讓工具變危險，不是變安全：
+  # n_effective 是「所用層級的池大小」，實測與誤差**反向**相關——
+  # n=1 多半是 L1（找到同一張卡），n=325 是 L3（退到整個稀有度的池）。
+  # 調成 3 會砍掉最好的估計、留下最差的。真的要調之前先跑
+  # `ygo-sniper coverage-groups` 重新量一次各群的條件覆蓋率。
+  min_effective_samples: 1
+
+  # 校準已知壞掉的 n 分桶 → **直接不給上限**（與 require_known_grade 同一個哲學：
+  # 修不好就不要輸出）。合法值是 valuation.N_BUCKETS 的標籤：n<3 / 3-9 / 10-49 / n>=50。
+  #
+  # 2026-08-02 診斷（時間切分、平台內切早晚、3 個 test_fraction 合計 1104 筆測試）：
+  #   分桶     測試筆數   Mondrian 覆蓋   Mondrian 下尾（名目 10%）
+  #   n<3        443          91%              2%
+  #   3-9        222          82%              3%
+  #   10-49       69          54%             29%   ← 破口
+  #   n>=50      370          75%             11%
+  # 10-49 這一桶的組成（實測）：50/69 是 L3、52/69 是分數 10、44/69 是 normal／rare。
+  # 最壞的一角是 L3 × Mercari（19 筆，下尾違反 100%、覆蓋 0%、點估計高估 ×5.9）——
+  # 平台係數是在高價卡上估出來的，套到便宜的 normal／rare 卡完全不成立。
+  # 試過六種分群鍵（層級×平台 25%、層級×稀有度層 30%、層級×n桶×稀有度層 29%、
+  # 層級×n桶×平台 29%、10-49 併入 n>=50 29%、只用層級 29%）全部修不好，
+  # 因為校準集裡根本沒有這個失敗切片——那是點估計的段狀偏誤，不是分位數選錯群。
+  # 實測影響：37 筆競標標的中，有上限的從 27 筆降到 25 筆（撤銷 2 筆）。
+  #
+  # ⚠️ 設成 [] 等於「我知道風險、我要關掉這道閘門」。桶名打錯會印警告並忽略
+  # （不會靜默變成空門）。改之前先跑 `ygo-sniper coverage-groups --diagnose`。
+  reject_n_buckets: ["10-49"]
+
+# ---------------------------------------------------------------------------
+# Seller Alpha（seller_alpha.py）：哪些賣家「持續」比同儕便宜。
+#
+# ⚠️ 主指標是**同儕相對**（同站×同卡×同版次×同分數×同價格基準的其他賣家中位），
+# 不是「售價 ÷ 模型公允價」。用模型當基準會把模型的分段偏誤誤判成賣家 alpha
+# ——2026-08-04 實測：模型絕對法對 eBay 全站給出 0.24-0.60 的比值
+# （comps 表一筆 eBay 成交都沒有，平台係數根本估不出來），
+# 其中 `ebay:collectiblemore` 模型說 0.57（像 alpha）、同儕說 1.54（比同儕貴）。
+# 模型值仍會算，但只當輔助欄位顯示，永遠不進分數。
+# ---------------------------------------------------------------------------
+seller_alpha:
+  # 低於門檻**不給分數**（回「證據不足」＋缺什麼），不是給 0 分。
+  # 2026-08-04 全量實測：88 個有觀測的賣家裡只有 5 個過門檻——這是誠實的現況。
+  min_comparable: 3
+  # 相異卡門檻。同一張卡刊三次不算三個證據（賣家重上架會讓計數看起來很活躍）。
+  min_distinct_cards: 3
+  # 每筆標的至少幾個同儕才採計。1 就夠（賣家層級會再取一次中位），
+  # 但同儕筆數會一路帶到畫面上。
+  min_peers: 1
+  # 收縮強度 w = n/(n+k)，往「零 alpha」的先驗拉。與 valuation.shrink_k 同值。
+  shrink_k: 4
+  # 配分。深度刻意低於「一致性＋廣度」：一次大折價不該勝過八次穩定小折價。
+  max_depth: 40
+  max_consistency: 30
+  max_breadth: 30
+  max_risk_penalty: 30
+  breadth_full_cards: 8
+  # 觀測跨度滿分天數。⚠️ 在架帳本 2026-08-01 才開始累積，
+  # 目前所有賣家的時間維度都近乎 0 分——「持續性」還無法判定。
+  breadth_full_days: 30
+
+  # --- 監控名單與輪替掃描（seller_watch.py，第三棒）------------------------
+  # 監控名單存 **db**（seller_watch 表）不是存這裡：它會被排程（自動入選）與
+  # 使用者（手動加入）雙向寫入，而且「上次掃描時間」是狀態不是設定。
+  # 這裡只有參數。名單用 `ygo-sniper watch-seller add/remove/list` 管。
+
+  # 整個監控功能的總開關。false = 不做賣家頁列舉、規則 3 不判定
+  # （名單與 CLI 仍可用），掃描其餘部分完全不受影響。
+  watch_enabled: true
+  # 名單上限（使用者已定）。滿了的淘汰規則：auto 可以被**分數更高的 auto**擠掉；
+  # **manual 永不自動淘汰**，名單滿時新加入一律拒絕並說明要先移除誰
+  # （自動幫使用者砍掉他手動加的賣家，比拒絕更糟）。
+  watch_max_sellers: 30
+  # 每個賣家的掃描間隔（使用者已定）。
+  per_seller_interval_minutes: 240
+  # 拆幾批輪替。4 批 × 每 60 分一批 = 每賣家 240 分鐘一次，請求量平滑
+  # （30÷4≈8 個賣家/小時 × 每人 1 頁 ≈ 8 個請求/小時，與既有掃描的 11 個同量級）。
+  # ⚠️ 批次在**加入名單當下**用 sha1(seller_key)%N 算一次就固定；改這個數字
+  #    不會重算既有列，名單上的人會落在舊的批號上（要重算就移除再加入）。
+  watch_batches: 4
+  # 每個賣家每次抓幾頁。1 頁：eBay 一頁 200 筆、PayPay 一頁 100 筆，
+  # 遠大於單一賣家的遊戲王在架量（實測 38 筆/人）。
+  watch_pages: 1
+  # 自動入選的分數門檻。
+  #
+  # 25 分的依據（2026-08-04 實測）：`score_seller` 對「沒有折價」的賣家一律
+  # 給 0 分（三個加分項都以 has_alpha 為前提），所以門檻要擋的是「折價很小
+  # 或樣本很薄」的那一段。深度單項要拿到 25 分需要收縮後折價 ≈16.5%，
+  # 而 n=3 張相異卡的收縮權重只有 3/7=0.43 → 原始折價要 ≈35%。
+  # 也就是 25 分 ≈「至少三張相異卡、而且明顯便宜」。
+  # 實測現況：95 個有觀測的賣家裡只有 ebay:psa 過得了（59.2 分），
+  # 其餘 4 個達證據門檻的都是「比同儕貴」＝0 分。
+  # ⚠️ 這正是為什麼手動加入必須存在——自動名單目前只有 1 個人。
+  watch_auto_min_score: 25
+
+# ---------------------------------------------------------------------------
+# 估價模型（valuation.py）。
+# 核心困境：過濾後只有約 170 筆成交、159 個桶，平均每桶 1.07 筆。
+# 「同卡同稀有度同分數取中位數」幾乎永遠湊不到樣本，所以改成
+# 「三層退化階梯 + 部分池化收縮」，並用 split conformal 給區間。
+# ---------------------------------------------------------------------------
+valuation:
+  # 名目信心水準。實際覆蓋率會低於這個數字（見 valuation.py 的誠實聲明）。
+  confidence: 0.80
+  # 收縮參數 k：w = n/(n+k)，本層權重。k=4 代表「本層要有 4 筆才跟上層平手」。
+  shrink_k: 4
+  # 校準集低於這個筆數就**不給區間**（寧可說不知道，也不要給一個沒校準過的數字）
+  min_calibration: 50
+  # split conformal 的 hold-out 比例。0.4 × 170 ≈ 68 筆校準集。
+  calibration_fraction: 0.4
+  # 估溢價曲線時，一個 (稀有度, 分數) 格至少要幾筆才採信；不足就用先驗
+  min_cell: 3
+  # Mondrian（群組條件）conformal：校準集依「估計層級 × 有效樣本數分桶」分群，
+  # 各群自己算殘差分位數，區間寬度才會隨證據品質變化（vanilla 是全庫同一個寬度）。
+  # 每群至少要這麼多筆才採用，不足就沿 `L?/n桶 → L? → 全域` 退化並標記
+  # `Estimate.calibration_degraded`（不靜默）。
+  # 2026-08-02 時間切分實測（1006 筆測試樣本、venue-aware 路徑）：
+  #   總覆蓋率 80% → 83%（名目 80%）；下尾違反率（＝上限開太高）7% → 5%
+  #   3-9 桶 84%→88%；n>=50 桶下尾 9%→6%；10-49 桶無改善（已知破口，見頂註）
+  min_group_calibration: 30
+  # false = 關掉分群，退回 vanilla split conformal。留這個開關是為了讓
+  # 「分群到底有沒有用」可以在同一份資料上直接對照，不必改程式。
+  group_conformal: true
+  # 分數溢價先驗（相對 PSA/ARS 9 = 1.0）。
+  # ⚠️ 只有 10 vs 9 = 3.95 是本庫實測（同稀有度分層），8 與 7 是**推測**
+  # （沒有足夠樣本），估價回報會標明哪些係數是先驗而非估計。
+  grade_premium_prior:
+    10: 3.95
+    9: 1.0
+    8: 0.55
+    7: 0.35
+  # 稀有度溢價先驗（相對 normal = 1.0）。
+  # ⚠️ 只有 ultimate(レリーフ) 4.7 是實測，其餘為推測階梯。
+  # 平台價格水準先驗（任選一個平台當 1.0，程式只用比值）。
+  # ⚠️ 這**不是**手續費差異，是市場結構差異：
+  #   buyee_yahoo   競價拍賣 → 成交價 = 市場出清價
+  #   buyee_mercari 定價出售 → 成交價 = 賣家開的零售價
+  #   buyee_paypay  定價出售，同上
+  # 2026-08-01 實測（控制稀有度×機構×分數的分層比較）：
+  #   Mercari/Yahoo = 1.99x（模型對數空間）／2.11x（價格空間）／2.17x（主對話獨立量測）
+  #   PayPay/Yahoo  = 2.54x
+  # 這裡刻意寫保守的整數 2.0：三個平台的樣本都有數百筆，收縮權重 w≈0.98，
+  # 先驗幾乎不影響結果——它真正的用途是「新平台上線、分層還不夠」的那一段。
+  venue_premium_prior:
+    buyee_yahoo: 1.0
+    buyee_mercari: 2.0
+    buyee_paypay: 2.0
+    # Mercari 台灣賣的就是 Mercari 的貨，市場結構相同（定價零售），先驗沿用
+    # 2.0。庫裡目前沒有 mercari_tw 的成交樣本，所以這條**完全靠先驗**——
+    # 估價回報會標成「係數是先驗、不是估計值」。
+    mercari_tw: 2.0
+  rarity_premium_prior:
+    ultimate: 4.7
+    secret: 3.5
+    ultra: 2.2
+    parallel: 2.0
+    super: 1.5
+    rare: 1.2
+    normal_rare: 1.2
+    normal: 1.0
+
+# ---------------------------------------------------------------------------
+# 抓取行為。請不要調快，我們是每小時看一次，不是壓測人家。
+# ---------------------------------------------------------------------------
+fetch:
+  delay_seconds: 2.0
+  timeout_seconds: 30
+  # 新着排序下第 1 頁（Yahoo 50 筆／Mercari 100 筆／PayPay 40 筆）遠遠涵蓋
+  # 上一小時的新增量，翻頁只會重複拿到上一輪看過的東西。
+  # 每小時 × 多查詢 × 多頁 = 請求數暴增 24 倍，翻頁是最沒必要的那一倍。
+  # comps 的已售出搜尋不受此限（pipeline 自己帶 pages=2）。
+  max_pages_per_query: 1
+  # ⚠️ 必須明顯小於排程間隔（現為 1 小時）。
+  # 這個值一旦 ≥ 執行間隔，每小時跑就會變成「12 次裡 11 次讀到同一份舊快取」，
+  # 新上架完全看不到——排程跑了、什麼也沒抓，而且沒有任何錯誤訊息。
+  # 15 分鐘：擋得住同一輪內的重複請求與開發時的反覆調試，但不會跨輪汙染。
+  cache_ttl_hours: 0.25
+  # transient 失敗（逾時、5xx、429）的重試次數；語意失敗與被擋不重試
+  max_attempts: 3
+  backoff_seconds: 2.0
+  user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+storage:
+  db_path: "data/sniper.db"
+  cache_dir: "data/cache"
+
+# ---------------------------------------------------------------------------
+# 掃描狀態機（dashboard 的「掃描中…」與清單清理）
+# ---------------------------------------------------------------------------
+scan:
+  # 狀態逾時（秒）。掃描開始時間距今超過這個值，就一律當成「那次掃描已經死了」，
+  # dashboard 把按鈕放行。
+  # ⚠️ 這個值存在的唯一理由是崩潰：kill -9／機器睡著／web 重啟時，
+  # 「掃描結束」永遠不會被寫下，只看 running 旗標的話按鈕會**永遠** disabled，
+  # 使用者沒有任何自救手段。設得比最慢的一輪掃描還長就好
+  # （comps 展開那一輪實測約 8-10 分鐘；1800 秒留了 3 倍餘裕）。
+  timeout_seconds: 1800
+  # `state='new'` 且超過這麼多天沒再被掃到 → 標成 expired（不刪除）。
+  # keep_all_candidates 打開後每輪落庫上百筆，需要一個出口，否則待處理清單
+  # 會被幾個月前就賣掉的標的塞滿。只動你從沒碰過的 new 列——任何手動標過的
+  # 狀態（已詢問／湊單籃／已買）都是人工決策，程式不准覆蓋。
+  # 設 0 = 關閉清理。
+  expire_new_after_days: 30
+  # listing_obs（在架觀測帳）的保留天數。**只刪已離場的列**：還掛在架上的
+  # 標的不論多老都留著——「掛了三個月還沒賣掉」正是賣得掉率最有資訊量的那一批。
+  #
+  # 成長速度（2026-08-02 實測）：一輪掃描約 40-60 個候選、每小時一輪，
+  # 但同一個標的重複掃到只更新不新增，所以真正的成長是「每天新上架的候選數」，
+  # 實測量級約每天 100-300 列、每列約 300 bytes → 一年約 30-100 MB。
+  # 180 天足夠回答任何「在架多久」的問題，又不會讓 db 無限長大。設 0 = 不清理。
+  listing_obs_retain_days: 180
+
+# ---------------------------------------------------------------------------
+# 發現管道（source）。與 routes 的 sites（購買路徑）是兩個維度：
+# source 決定「去哪裡搜」，site 決定「怎麼買、怎麼算成本」。
+# canary：每來源每天用一個必定大量命中的關鍵字自檢，
+# 低於門檻代表解析器壞了（而不是市場真的沒貨）。
+# ---------------------------------------------------------------------------
+#
+# sort_newest：新上架優先。每小時掃描的重點就是搶在別人前面看到定價錯誤的新貨，
+# 預設排序（Yahoo 綜合／Buyee おすすめ）會把幾天前就沒人要的東西一直排在前面。
+# 排序參數全部出自 2026-08-01 實測（各站自己的排序選單送出什麼就用什麼）。
+sources:
+  yahoo_direct:
+    canary_keyword: "遊戯王"
+    canary_min_results: 10
+    # 純競標的「現在価格」不是付得出去的價格。
+    #
+    # 2026-08-02 打開。理由：venue 實測發現 **Yahoo 的競標出清價只有它自己即決價的
+    # 0.19 倍**——關著這個開關等於只看全市場最貴的買法（即決＝賣家開的溢價），
+    # 瞎在唯一真正便宜的管道上。使用者也明確承諾「依估值下單、超過就不要」。
+    #
+    # ⚠️ 打開之後**下游必須分流**（`bidding.is_live_auction`）：競標標的不得走
+    # 「到手成本 < 鑑定費」那套判斷（現在価格會漲，現在的成本沒有意義），
+    # 改用出價上限 vs 目前出價（bidding.py）。分流壞掉的症狀就是大量假 FREE_CARD。
+    include_live_auctions: true
+    # s1=new&o1=d（新着降冪）。實測前 5 筆開始日時全在當天 14:03-16:48 且嚴格遞減；
+    # 不加參數那組混著 7/26～8/1。注意 s1=start 無效（結果與不加參數一模一樣）。
+    # ⚠️ 這個舊鍵只在**沒有設 scan_passes**時生效（單趟模式的排序）。
+    sort_newest: true
+    # --- 兩條抓取通道（sources/yahoo.py 的 ScanPass）-------------------------
+    # newest = 新着降冪（搶新上架的定價錯誤）；ending_soon = 結束時間近→遠
+    # （搶快結標、現價還低於出價上限的競標——競標價在結標前幾分鐘才會跳，
+    # 「還有 5 天、現價 ¥1」不是機會，它一定會被叫上去）。
+    #
+    # 2026-08-02 實測（「遊戯王 PSA 初期」，**不帶價格上限**、pool 279 件）：
+    #   newest      50 筆：結標倒數 min 19h／中位 115h／max 166h，≤24h 只有 2 筆
+    #   ending_soon 50 筆：min 12h／中位 45h／max 64h，≤24h 20 筆，且結標時間嚴格遞增
+    #   兩趟合併 100 筆 → 去重 97 筆（只重疊 3 筆），確認是**互斥的兩群**
+    #
+    # ⚠️ 但同一天實跑一輪完整掃描（帶 aucmaxprice=8,445，也就是真正在跑的設定）：
+    #   五條 query 在價格上限之下的 pool 是 34／38／12／2 件（第五條「PSA 三期」
+    #   Yahoo 走了模糊比對回報 32 萬件，排序對它無效）——**一頁 50 筆裝得下整個
+    #   pool**，所以兩趟拿到的是同一批，ending_soon 新增 0 筆。
+    #   也就是說「只看得到 115 小時後才結標的東西」不是抓取偏差，那就是**負擔得起
+    #   的那批貨本來的樣子**；真正的缺口在視圖（競標分頁的可行動性排序）。
+    #
+    # 那為什麼還是預設開著：pool 會不會超過一頁取決於關鍵字、價格上限（隨鑑定費
+    # 與匯率變動）與市場量，而**被截斷是無聲的**——newest 單趟被截掉的正好是
+    # 快結標那一端，你不會發現自己少看了什麼。代價是每輪多 5 個請求（10 個 → 11 個，
+    # 含 canary；間隔 2 秒 ≈ 多 10 秒），對照 comps 每天 200-450 個請求約 1%。
+    # 想省下來就把 ending_soon 的 enabled 改成 false，一行的事。
+    #
+    # 兩趟都給 1 頁：ending_soon 第 1 頁已經涵蓋 12-64 小時的窗（實測），
+    # 第 2 頁只會往「更晚結標」走，而那正是 newest 已經覆蓋的區域。
+    scan_passes:
+      newest:
+        enabled: true
+        pages: 1
+      ending_soon:
+        enabled: true
+        pages: 1
+  buyee_mercari:
+    canary_keyword: "遊戯王"
+    canary_min_results: 10
+    sort_newest: true
+  # Yahoo!フリマ（舊名 PayPayフリマ）直抓。取代舊的 buyee_paypay 鏡像：
+  # 2026-08-02 同關鍵字實測，直抓一頁 100 筆／0.86s／純 httpx，
+  # 走 Buyee 是一頁 40 筆／2.66s／要 Playwright 解 WAF，價格逐筆相同。
+  paypay_direct:
+    canary_keyword: "遊戯王"
+    canary_min_results: 10
+    # sort=openTime&order=DESC（新着降冪）。⚠️ 選單顯示的 `newer` 是前端 enum，
+    # 送進 URL 會被靜默忽略——值不可憑印象改，改了要重測第 1 筆的 openTime。
+    sort_newest: true
+    # 舊的 buyee_paypay 給 3 頁，理由是它一頁只有 40 筆、裝不下一小時的新增。
+    # 直抓一頁 100 筆（與 Mercari 同級），那個理由消失了，所以回到全域值 1：
+    # 翻頁的邊際效益取決於單頁容量，容量變了就該重算，不是把舊數字留著。
+  ebay:
+    # eBay Browse API。canary 關鍵字用英文——這條管道搜的是美國站。
+    # 2026-08-02 才接上 search_detailed，在那之前 eBay 完全在健康監測系統外面：
+    # API 壞掉／憑證過期只會安靜地回 0 筆，跟「今天美國沒好貨」外顯一模一樣。
+    canary_keyword: "yugioh"
+    canary_min_results: 10
+    # eBay 的競標標的要不要進掃描結果。**2026-08-03 打開**。
+    #
+    # 2026-08-03 實測（tests/fixtures/ebay_api_items.json）：eBay 的純競標標的在
+    # 搜尋端 `price` 是 null、價格在 `currentBidPrice`（20/20 筆）——它們會被
+    # 解析、標成 price_kind=current_bid、帶 end_time 與 bids 進 Listing，
+    # 被排除時筆數會出現在 SearchResult.detail 裡（「排除欄位不全」計帳照舊）。
+    #
+    # 先前擋著它的三個理由，如今全部解除：
+    # 1. 「上限引擎講日圓」→ 已改：eBay 走 `bidding.max_bid_ebay`，整條幣別鏈
+    #    跟著 listing 走（台幣反解 → 用 listing 自己的換匯比率換回原幣），
+    #    headroom 比較改為與現價同幣別（`BidCeiling.headroom_value`）。
+    # 2. 「ebay_direct 雜費 0 會忽略運費」→ 已改：反解直接扣 listing 上的實際
+    #    運費（運費就是 eBay 的全部 overhead）；**運費未知就不給上限**。
+    # 3. 「無代理出價」→ 事實錯誤：eBay 原生支援 automatic bidding（設最高出價
+    #    即可離開，官方頁 2026-08-03 查證，見 bidding.EBAY_PROXY_BID_FINDING）
+    #    ——這也化解了「結標多在台灣深夜」的問題。
+    include_live_auctions: true
+    # 賣家頁列舉（Seller Alpha 的輪替監控）要帶的關鍵字。
+    # ⚠️ 這是 **eBay 特有的必要之惡**：eBay 沒有遊戲王專屬分類（實測
+    # `ebay:psa` 的商品分類 100/100 都是 183454 CCG Individual Cards，寶可夢
+    # 與遊戲王同一格），而 psa 那格底下有 135,638 件、其中 q=yugioh 只有 6,241 件。
+    # 不帶關鍵字時第 1 頁（價格升冪）實測 100 筆全是寶可夢——他的遊戲王庫存
+    # 一筆都看不到。所以它是「看得到什麼」的覆蓋率決定，**不是**收不收的判準
+    # （年代與候選判定仍由 parse_card / is_candidate 決定）。
+    # PayPay 賣家頁不需要這個：那一頁本來就只有那個賣家的全部商品。
+    seller_page_keyword: "yugioh"
+  # 露天拍賣（台灣境內）。**它不在 watchlist 的 queries 也不在 comps_queries**
+  # ——註冊它的唯一目的是讓 canary 每輪確認「解析器還活著」，因為這條管道
+  # 平常只被台灣行情研究用到，沒有 canary 的話它壞掉三個月也不會有人發現。
+  # 要把它放進在架掃描或 comps 之前，先讀 sources/ruten.py 頂註最後一節
+  # （台幣價格混進日本 comps 索引 = 混源比較）。
+  ruten:
+    # 中文關鍵字：露天賣家的標題是中文，用「遊戯王」（日文舊字）會漏掉絕大多數。
+    # 實測「遊戲王 PSA」命中 8392 筆、一頁 100 筆。
+    canary_keyword: "遊戲王"
+    canary_min_results: 10
+    # sort=new/dc（新上架降冪）。⚠️ 未知排序鍵會回 HTTP 400（不是靜默忽略），
+    # 所以改壞了會當場失敗，不會安靜地什麼都沒做。
+    sort_newest: true
+
+# ---------------------------------------------------------------------------
+# 買方身分事實（不是費率）。程式只讀，不推論。
+# ---------------------------------------------------------------------------
+buying:
+  # 美國收件地址的 zip（加州 Ontario）。用途只有兩個，**預設寄送仍以台灣為準**：
+  # 1. 鑑價：eBay 標的寄不到台灣（或判斷不了）時，用
+  #    contextualLocation=country=US,zip=91762 再查一次，把「寄到美國地址」列成
+  #    替代路徑——報告會大字警告「不含美國→台灣的轉運成本，貨會留在美國」。
+  # 2. 掃描：ships_to_tw=false 的 eBay 標的不丟掉，標 us_ship_option 旗標讓
+  #    dashboard 看得到；但**不進**出價上限與推播（轉運成本未建模，誠實邊界）。
+  # 留空／刪掉這個鍵 = 沒有美國地址，上述功能全部安靜地消失。
+  us_ship_zip: "91762"
+
+notify:
+  # 推播總開關。false = 掃描、告警判定、落庫全部照跑，只是不送出任何 Telegram
+  # 訊息（訊號、摘要、健康告警都不送），CLI 會明講「已停用、N 筆只落庫」。
+  # 待推播的訊號不會被標成已通知、到期告警不會落冷卻帳，所以改回 true 的
+  # 那一輪會把這段期間的東西補送出去，不會有斷層。
+  # ⚠️ 這個開關**不碰 .env**：token 還在，改一行 yaml 就恢復。
+  enabled: true
+  # 一輪推播最多幾則（兩條規則合計），超過的併成一則統計、下輪繼續排隊。
+  # **0（或留空 null）＝ 不限**，機制保留，改回任何正整數就恢復截斷。
+  # 2026-08-03 由 15 改成 0：使用者的實際使用方式是「人在外面、收到就慢慢滑」，
+  # 而被併成統計的那幾筆要等下一輪（每小時一輪）才看得到——競標是有時效的。
+  # ⚠️ 這條與健康告警的冷卻（`max_alerts_per_run` 與 alerts 的去重窗）**是兩件事**：
+  #    那個防的是「同一個壞消息重複吵」，這條管的是「一輪送幾則不同的好貨」。
+  max_items_per_run: 0
+  # 兩則訊息之間的最小間隔（秒）。Telegram 的限制是 30 則/秒（全域）與
+  # 同一個 chat 約 20 則/分鐘；上限拿掉之後一輪可能連送數十則，沒有節流就會吃 429。
+  # 3.0 秒 = 20 則/分鐘，正好貼著同 chat 的限制。設 0 = 不節流（只建議測試用）。
+  send_interval_seconds: 3.0
+  # 規則 2 的去重窗：同一個 listing 幾天內不重複推播。
+  # ⚠️ 規則 1（競標急件）**不吃這個數字**：它同一個標的這輩子只送一次，
+  #    而且不受規則 2 送過與否影響——「快結標了」是另一件事實，不是重複。
+  #    細節見 notify_rules._apply_dedupe_and_cap 的 docstring。
+  dedupe_days: 7
+  # 解析健康告警：每天最多幾則，超過併成一則（告警本身不能變成洗版源）
+  max_alerts_per_run: 3
+  # 沒有新訊號時完全靜默：不送訊號訊息、也不送摘要。
+  # 每小時跑 24 次，其中大部分必然沒好貨——每次都報「掃完了、0 筆」
+  # 會把推播訓練成雜訊，真的有貨那次你反而會滑過去。
+  # ⚠️ 這個開關只吞「今天沒好貨」，**永遠不吞來源健康告警**：
+  # 「爬蟲壞了」與「沒好貨」外顯一樣，但只有前者需要你去修。
+  silent_when_empty: true
+
+  # --- 兩條推播規則（notify_rules.py）-------------------------------------
+  # 推播只回答一件事：「現在有沒有必須立刻處理的事」。所以規則刻意只有兩條、
+  # 而且都很窄。想看全部標的請開 dashboard——那才是清單的地方。
+  # 調門檻之前先跑 `ygo-sniper notify-preview`：只算不送，直接看這一輪會送什麼。
+  rules:
+    auction_urgent:
+      # 規則 1：有出價上限 ＋ 現價仍低於上限 ＋ 快結標。
+      enabled: true
+      # ⚠️ 時間窗**不在這裡**，在 `bidding.actionable_window_hours`（預設 24 小時）。
+      #    這條規則就是 dashboard 的「⚡ 現在就該看」梯隊，兩邊必須是同一個判定；
+      #    在這裡再放一顆旋鈕，畫面上排第一的那筆就會跟手機上收到的那筆分岔。
+
+    high_p:
+      # 規則 2：P(值得買) 夠高，但排除兩種「假高 P」。
+      enabled: true
+      # P 門檻（嚴格大於）。這個 P 是「相對於本模型殘差分布」的機率，
+      # 不是市場真實機率——見 valuation.py 頂註。
+      p_worth_min: 0.70
+      # 排除的稀有度：普卡便宜到 P 幾乎必然很高，但那不是撿漏。
+      # ⚠️ 讀不出稀有度（null）**不算普卡**，照送——那是「不知道」不是「便宜」。
+      # 設成 [] 代表連普卡一起收。
+      exclude_rarities: [normal]
+      # 競標的價格被市場發現過了沒？兩個條件都要滿足才送：
+      #   出價次數 ≥ min_bids（0 次＝現價就是起標價，那個數字沒有市場資訊）
+      #   且 結標倒數 ≤ price_discovered_within_hours（有幾次出價但還剩 6 天，
+      #   價格還會漲好幾輪——實例：「1円スタート ブラマジガール ARS10」P=99%）
+      # 來源沒給出價次數的競標一律不送（缺值寧可不送）。
+      min_bids: 1
+      price_discovered_within_hours: 48
+
+    seller_new:
+      # 規則 3：**監控名單上的賣家**剛上架一件比同儕明顯便宜的貨。
+      # 三個條件缺一不推：在名單上 ＋ 第一次進 listing_obs ＋ 折價達門檻。
+      enabled: true
+      # 折價門檻（同儕相對，0.15 = 比同儕便宜 15% 以上）。
+      # ⚠️ **這個折價是同儕相對的**（同站×同卡×同版次×同分數×同價格基準的
+      #    其他賣家中位）。⚠️ 這個數字也是 Seller Alpha 分數唯一的基準——
+      #    模型絕對值**永遠不參與評分**（第二棒實測：模型說 ebay:collectiblemore
+      #    是 0.57 像撿到寶，同儕說 1.54 其實比同儕貴，符號相反）。
+      min_discount: 0.15
+      # 這一筆至少要有幾個同儕才推。1 筆同儕＝一次 1v1 比價，訊息會把這件事
+      # 寫進本文（不是附註），但不強制擋掉——擋掉的話在目前的樣本密度下
+      # 規則 3 幾乎不會觸發。
+      min_peers: 1
+
+      # --- 沒有同儕時的模型 fallback（2026-08-04 新增）---------------------
+      # 為什麼要有：同儕算不出來就不推的話，實跑 60 筆「監控賣家 × 新上架」
+      # 只有 2 筆湊得出同儕，其餘 58 筆全部靜默略過。根因是資料密度不是門檻
+      # ——comps 的 298 張卡裡 172 張（58%）只有 1 筆成交，同卡×同稀有度×
+      # 同分數的同儕在結構上湊不出來。使用者要的是「多看到一些、自己判斷」。
+      # ⚠️ 這個 fallback **只影響「這一筆要不要通知你」**，不影響也不回饋
+      #    Seller Alpha 分數（分數永遠只用同儕相對，見上）。
+      model_fallback_enabled: true
+      # 模型 fallback 的折價門檻（售價 ÷ 模型公允價）。刻意比同儕的 15% 嚴：
+      # 同儕中位是「別的賣家真的開這個價」，模型公允價是點估計（中位誤差 ×1.9）。
+      # 實測（2026-08-04，60 筆候選）：≥15% 4 筆、≥20% 3 筆、≥25% 2 筆、≥30% 1 筆。
+      # 另外還必須通過 `bidding:` 那四道證據閘門（層級 L1/L2、分數已知、
+      # 校準樣本足夠、不在 reject_n_buckets）——閘門擋下的改走規則 3b。
+      model_min_discount: 0.25
+
+    seller_unpriced:
+      # 規則 3b：監控賣家上了一件**連模型都估不了**的東西。
+      # 不宣稱它便宜（我們不知道），只說「有這麼一件東西」＋為什麼估不了＋
+      # 卡片屬性＋到手成本＋連結。稀有品的價值恰恰在於它稀少，而稀少正是
+      # 我們估不了的原因——「估不了就不通知」會系統性漏掉唯一值得撿的那一類。
+      enabled: true
+      # 每輪上限。⚠️ 這裡的 0 = **一則都不送**（與 max_items_per_run 的
+      # 0＝不限相反）：3b 是「沒有判斷」的通知，預設立場是有限額。
+      # 它有自己的去重帳（notify_log 的 rule = seller_unpriced），
+      # 也不跟三條有判斷的規則搶 max_items_per_run 的額度。
+      #
+      # <!-- 2026-08-04：3 → 10（清積壓用的臨時值，要還原就把下面那行改回 3）-->
+      # 為什麼是 10：一開始設 3，結果 3b 積了 38 筆命中、每輪只浮 3 筆，而標的
+      # 一旦不再是「第一次進 listing_obs」就永遠失去新上架資格 → 估計 25 筆
+      # 這輩子浮不出來。上限的用意是「不要洗版」，不是「讓積壓靜靜過期」。
+      #
+      # 2026-08-04 調到 10 清積壓，使用者實收後回報「量已處理完，可以留在 10」
+      # → 這個值從臨時值轉為**穩態值**。它是使用者的音量偏好，不是技術參數：
+      # 覺得吵就調小、覺得漏就調大，改它不需要動任何程式碼。
+      max_per_run: 10
+
+# ---------------------------------------------------------------------------
+# 轉賣模型（selling.py）：買進到手 → 貨在哪裡 → 送到賣場 → 賣出實拿。
+#
+# 這個區塊存在的唯一理由是**不要讓兩個不同物理位置的價格直接相減**。
+# venue 係數實測 Yahoo ×1.00 / Mercari ×2.14 / PayPay ×2.60，三個都是
+# 日本境內市場；而 routes: 那三條路徑全部把貨運到台灣。「在 Yahoo 買、
+# 在 Mercari 賣」的 2 倍價差**要求貨留在日本**，運到台灣再運回去，
+# 國際運費付兩次而且需要日本收件地址。這是工程原則 1（同源同基準）
+# 在這個問題上的具體形式，寫成 destination / location / transfers 三件事。
+# ---------------------------------------------------------------------------
+resale:
+  # 你有沒有「日本收款身分」＝日本地址 ＋ 日本銀行帳戶 ＋ 日本手機門號。
+  # 三個平台都要求這三樣（Mercari JP 只寄日本國內、ヤフオク 本人確認要日本
+  # 金融機構、Yahoo!フリマ 走 PayPay 需日本門號）。
+  #
+  # ⚠️ **false 是目前的真實狀態**，不是保守假設。設成 true 之前請先真的
+  # 開好帳號並完成本人確認——這個開關一翻，所有日本賣場的淨利就會被算出來，
+  # 而它們正是唯一有行情樣本、唯一算得出正淨利的那一批。
+  jp_presence:
+    enabled: false
+    reason: "沒有日本地址／日本銀行帳戶／日本手機門號，無法在日本境內平台出售與收款"
+
+  # 「不經 Buyee，直接用日本帳號買、貨留在日本」的取貨路徑。
+  #
+  # ⚠️ 它**刻意不在 routes: 裡面**。一旦放進去，best_route／breakeven 會把它
+  # 當成一條可用的買進路徑，而它的到手成本不含國際運費——買方模型會整批
+  # 低估，方向還是「看起來更便宜」。這裡只給轉賣模型當反事實情境用。
+  jp_hold_route:
+    name: jp_direct_hold
+    label: "日本帳號直購（貨留日本）"
+    destination: jp_warehouse
+    requires_jp_presence: true
+    sites: [buyee_mercari, buyee_yahoo, buyee_paypay]
+    purchase_fee_jpy: 0          # 自己的日本帳號，沒有代購費
+    plan_fee_jpy: 0
+    domestic_ship_jpy: 300       # 賣家 → 你的日本地址（多數標的送料込み，保守給 300）
+    consolidation_fee_jpy: 0
+    intl_ship_jpy: 0             # 不出國
+    bundle_size: 1
+    # ⚠️ 已知的保守偏差：costs.quote_route 對日圓一律套刷卡海外手續費 1.5%
+    #    ＋匯率緩衝 2%，但用日本帳號＋日本卡付款其實不會被收。也就是這條
+    #    路徑的到手成本被**高估**約 3.5%——偏差方向是「淨利更少」，所以留著。
+
+  # 把貨從 A 地送到 B 地。**feasible: false 時沒有 cost**：不可行不是
+  # 「成本很高」，是「沒有這個選項」；給一個很大的數字會讓它默默參加排序。
+  transfers:
+    - from: jp_warehouse
+      to: tw_home
+      feasible: true
+      # 與 routes.buyee_consolidated 同源：集中包裝 700 ＋ 國際運費 2200。
+      # 同源是紅線——這裡另外拍一個數字的話，「先運回台灣再賣」與「直接買
+      # 運到台灣」的成本就會有兩份定義（工程原則 1）。
+      cost_jpy: 2900
+      amortizable: true
+      note: "Buyee 集中包裝 ¥700 ＋ 國際運費 ¥2,200，可湊單攤提"
+    - from: tw_home
+      to: jp_warehouse
+      # ⚠️ 這一條就是本模型存在的理由。
+      feasible: false
+      reason: >-
+        貨已經在台灣，要在日本境內平台賣就得整批回送日本：國際運費付第二次
+        （台灣→日本小包約 NT$500-900／件），而且**收件端仍然需要一個日本地址**
+        ——沒有日本身分的話連寄過去都無處可收。回送成本已經吃掉大部分 venue
+        價差，加上無收件地址，判定為不可行而不是「成本很高」。
+
+  # ⚠️ 稅務**完全不在模型內**。以下都沒算：
+  #   - 台灣個人海外所得／營業稅（一年數十筆以上可能被認定為營業行為）
+  #   - 日本消費税（在日本境內以事業規模販售時的申報義務）
+  #   - eBay 美國各州 sales tax（由 eBay 代收代繳，但會墊高買家總價、壓低成交率）
+  # 所有淨利數字都是**稅前**。
+  tax_note: "所有淨利為稅前；未計入台灣海外所得稅、日本消費税、eBay 各州 sales tax。"
+
+# ---------------------------------------------------------------------------
+# 賣場費率表。每一組都標了 verified（查證程度）與 source_url（來源）。
+# **未查證的費率不准長得跟查證過的一樣**——報告會把 verified 原樣印出來。
+# 查不到的一律往「成本更高」的方向給（保守 = 少賺，不是多賺）。
+#
+# valuation_venue: 對應到 comps 的 site。**null ＝ 這個賣場一筆成交樣本都沒有**，
+# 估不出賣出價，模型一律拒絕給數字（與出價上限「沒有區間就不給上限」同一條紅線）。
+# ---------------------------------------------------------------------------
+sell_venues:
+  mercari_jp:
+    label: "メルカリ（日本）"
+    currency: JPY
+    location: jp_warehouse
+    requires_jp_presence: true
+    commission_pct: 0.10         # 販売手数料 10%（查證 2026-08-02，官方）
+    payment_fee_pct: 0.0
+    listing_fee_native: 0        # 出品料なし（同一來源）
+    seller_shipping_native: 300  # ⚠️ 未查證：ネコポス 名目 ¥210，保守給 300
+    payout_fee_native: 200       # 振込申請手数料 ¥200（查證 2026-08-02，官方）
+    remit_fee_native: 5000       # ⚠️ 未查證：日本銀行→台灣的一次國際匯款（送金＋中継＋受取）
+    remit_batch_size: 10         # 湊 10 張貨款匯一次 → 每張 ¥500
+    fx_spread_pct: 0.02          # ⚠️ 未查證：日圓匯回台幣的匯差，保守 2%
+    valuation_venue: buyee_mercari
+    verified: "手數料/上架費/提領費：2026-08-02 官方頁查證；運費與匯回成本：未查證（保守值）"
+    source_url: "https://help.jp.mercari.com/guide/articles/65/"
+    notes:
+      - "定價零售市場：成交價 = 賣家開的價，但賣不賣得掉、多久賣掉本模型不預測"
+
+  yahoo_auction:
+    label: "ヤフオク!（Yahoo!オークション）"
+    currency: JPY
+    location: jp_warehouse
+    requires_jp_presence: true
+    # 落札システム利用料：2024-06-04 起 LYPプレミアム／非會員一律 10%
+    # （原本會員 8.8%）。官方費用頁是 JS 渲染抓不到，用產業媒體查證。
+    commission_pct: 0.10
+    payment_fee_pct: 0.0
+    listing_fee_native: 0        # 個人出品無出品システム利用料
+    seller_shipping_native: 300  # ⚠️ 未查證：ヤフネコ!ネコポス 名目 ¥210，保守給 300
+    payout_fee_native: 100       # 売上金→非 PayPay 銀行 ¥100
+    remit_fee_native: 5000       # ⚠️ 未查證，同 mercari_jp
+    remit_batch_size: 10
+    fx_spread_pct: 0.02
+    valuation_venue: buyee_yahoo
+    verified: "手數料：2026-08-02 產業媒體查證（官方頁 JS 渲染，WebFetch 取不到）；其餘未查證（保守值）"
+    source_url: "https://k-tai.watch.impress.co.jp/docs/news/1583585.html"
+    notes:
+      - "競價拍賣：成交價 = 市場出清價，是三個日本賣場裡最低的價格水準（係數 ×1.00）"
+      - "**在這裡賣等於把買進的優勢還回去**——Yahoo 便宜正是因為它是出清價"
+
+  yahoo_furima:
+    label: "Yahoo!フリマ（舊 PayPayフリマ）"
+    currency: JPY
+    location: jp_warehouse
+    requires_jp_presence: true
+    commission_pct: 0.05         # 販売手数料 5%（查證 2026-08-02，官方）
+    payment_fee_pct: 0.0
+    listing_fee_native: 0
+    seller_shipping_native: 300  # ⚠️ 未查證：おてがる版ゆうパケット 名目 ¥180-230，保守給 300
+    payout_fee_native: 100       # PayPayマネー 出金：非 PayPay 銀行 ¥100（查證 2026-08-02）
+    remit_fee_native: 5000       # ⚠️ 未查證，同上
+    remit_batch_size: 10
+    fx_spread_pct: 0.02
+    valuation_venue: buyee_paypay
+    verified: "販売手数料：2026-08-02 官方頁查證；出金手數料：2026-08-02 PayPay 官方說明查證；其餘未查證（保守值）"
+    source_url: "https://paypayfleamarket.yahoo.co.jp/promo/seller_fees-gold/ https://paypay.ne.jp/help/c0042/"
+    notes:
+      - "三個日本賣場裡手續費最低（5%），而且價格水準係數最高（實測 ×2.60）"
+
+  ebay_us:
+    label: "eBay（美國站，從台灣寄出）"
+    currency: USD
+    location: tw_home            # 貨在台灣就能賣——不必回日本
+    requires_jp_presence: false
+    commission_pct: 0.1325       # ⚠️ 未完全查證：Trading Cards final value fee 13.25%
+    payment_fee_pct: 0.0165      # ⚠️ 未查證：international fee（賣家註冊地在美國境外）
+    listing_fee_native: 0.40     # per-order fee（訂單 > US$10）
+    seller_shipping_native: 15.0 # ⚠️ 未查證：台灣→美國掛號小包，保守 US$15
+    payout_fee_native: 0.0
+    remit_fee_native: 0.0
+    fx_spread_pct: 0.03          # ⚠️ 未查證：eBay 撥款換匯加成，保守 3%
+    # ⚠️ comps 庫**沒有任何 ebay 成交樣本**（實測：buyee_mercari 576／
+    #    buyee_paypay 329／buyee_yahoo 730，ebay 0），估不出賣出價。
+    valuation_venue: null
+    verified: "未完全查證：eBay 官方費率頁 WebFetch 逾時／403，數字來自多方二手資料一致值；國際費與換匯為未查證保守值"
+    source_url: "https://www.ebay.com/help/selling/fees-credits-invoices/store-selling-fees?id=4809"
+    notes:
+      - "唯一一個『貨在台灣就能賣』的高價市場，但本庫零成交樣本 → 無法估價"
+
+  shopee_tw:
+    label: "蝦皮購物（台灣）"
+    currency: TWD
+    location: tw_home
+    requires_jp_presence: false
+    commission_pct: 0.055        # ⚠️ 未官方查證：一般賣家成交手續費 5.5%
+    payment_fee_pct: 0.025       # ⚠️ 未官方查證：金流與系統處理費 2.5%
+    listing_fee_native: 0
+    seller_shipping_native: 0    # 運費由買家負擔（未參加免運活動時）
+    payout_fee_native: 0
+    remit_fee_native: 0
+    fx_spread_pct: 0.0           # 台幣收款，不換匯
+    valuation_venue: null        # 本庫沒有任何台灣成交樣本
+    verified: "未官方查證：2026 年多方整理一致（5.5% ＋ 2.5%）；未計入免運活動費 7%"
+    source_url: "https://22branding.com/shopee-2026-fee-update/"
+    notes:
+      - "參加免運活動另加 7%，本模型未計入（會讓實際淨利更低）"
+
+  ruten_tw:
+    label: "露天市集（台灣）"
+    currency: TWD
+    location: tw_home
+    requires_jp_presence: false
+    commission_pct: 0.02         # 交易服務費 2%（單件上限 NT$400），2026-08-02 官方查證
+    payment_fee_pct: 0.02        # ⚠️ 未查證：金流服務費
+    listing_fee_native: 0        # 刊登免費（同一來源）
+    seller_shipping_native: 0
+    payout_fee_native: 0
+    remit_fee_native: 0
+    fx_spread_pct: 0.0
+    valuation_venue: null        # 本庫沒有任何台灣成交樣本
+    verified: "交易服務費／刊登費：2026-08-02 官方幫助中心查證；金流服務費：未查證"
+    source_url: "https://www.ruten.com.tw/help/seller/4530/"
+    notes:
+      - "台灣賣場裡費率最低，但同樣沒有成交樣本可估價"
+
+# ---------------------------------------------------------------------------
+# Seller Alpha 的參數全部在上面的 `seller_alpha:` 區塊（評分門檻 ＋ 監控名單）。
+# 第三棒（2026-08-04）已把監控名單、輪替掃描、推播規則 3 接上：
+#   名單     seller_watch 表（db）＋ `ygo-sniper watch-seller add/remove/list`
+#   輪替     每輪 scan 認領一批（seller_watch.claim_batch，節流帳落 meta）
+#   推播     notify.rules.seller_new（同儕相對折價，見上面那一段）
+# 賣家頁列舉的 URL 形狀與實測結論見 reports/seller-page-feasibility.md。
+# ---------------------------------------------------------------------------

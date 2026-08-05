@@ -1,0 +1,3321 @@
+{
+ "_provenance": "2026-08-03 實抓 eBay Browse API（X-EBAY-C-MARKETPLACE-ID: EBAY_US、X-EBAY-C-ENDUSERCTX: contextualLocation=country=TW，所以價格已換算成 TWD）。item_* 來自單品端點 /buy/browse/v1/item/v1|{id}|0，summary_* 來自 /buy/browse/v1/item_summary/search。關鍵實測：**單品端點的純競標標的 price == currentBidPrice**（不是可成交價），而 summary 端點的純競標 price 是 null；AUCTION+FIXED_PRICE（競標帶 BIN）兩邊的 price 都是 BIN 價、currentBidPrice 是目前出價。",
+ "item_fixed": {
+  "itemId": "v1|407031244912|0",
+  "title": "Yugioh Terrorking Archfiend DCR-072 1st Edition Super Rare PSA 8 NM-MT!",
+  "shortDescription": "Up for sale here is a Terrorking Archfiend DCR-072 1st edition super rare.",
+  "price": {
+   "value": "653.00",
+   "currency": "TWD",
+   "convertedFromValue": "14.99",
+   "convertedFromCurrency": "GBP"
+  },
+  "categoryPath": "Collectables|Collectable Card Games|CCG Individual Cards",
+  "categoryIdPath": "1|2536|183454",
+  "condition": "Graded",
+  "conditionId": "2750",
+  "conditionDescriptors": [
+   {
+    "name": "Professional Grader",
+    "values": [
+     {
+      "content": "Professional Sports Authenticator (PSA)"
+     }
+    ]
+   },
+   {
+    "name": "Grade",
+    "values": [
+     {
+      "content": "8"
+     }
+    ]
+   }
+  ],
+  "itemLocation": {
+   "city": "Stanmore",
+   "postalCode": "HA7 ***",
+   "country": "GB"
+  },
+  "image": {
+   "imageUrl": "https://i.ebayimg.com/images/g/eeQAAeSwkshprg34/s-l1600.jpg",
+   "width": 1201,
+   "height": 1599
+  },
+  "additionalImages": [
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/mTwAAeSwbQhprg34/s-l1600.jpg",
+    "width": 1201,
+    "height": 1599
+   },
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/wlgAAeSwHq9prg3-/s-l1600.jpg",
+    "width": 1201,
+    "height": 1599
+   },
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/xdgAAeSwyIRprg3-/s-l1600.jpg",
+    "width": 1201,
+    "height": 1599
+   }
+  ],
+  "itemCreationDate": "2026-06-27T14:53:46.000Z",
+  "seller": {
+   "username": "schloast",
+   "feedbackPercentage": "100.0",
+   "feedbackScore": 747
+  },
+  "estimatedAvailabilities": [
+   {
+    "deliveryOptions": [
+     "SHIP_TO_HOME"
+    ],
+    "estimatedAvailabilityStatus": "IN_STOCK",
+    "estimatedAvailableQuantity": 1,
+    "estimatedSoldQuantity": 0,
+    "estimatedRemainingQuantity": 1
+   }
+  ],
+  "shippingOptions": [
+   {
+    "shippingServiceCode": "Royal Mail International Tracked",
+    "shippingCarrierCode": "Royal Mail",
+    "type": "None",
+    "shippingCost": {
+     "value": "435.00",
+     "currency": "TWD",
+     "convertedFromValue": "9.99",
+     "convertedFromCurrency": "GBP"
+    },
+    "quantityUsedForEstimate": 1,
+    "minEstimatedDeliveryDate": "2026-08-10T10:00:00.000Z",
+    "maxEstimatedDeliveryDate": "2026-08-15T10:00:00.000Z",
+    "additionalShippingCostPerUnit": {
+     "value": "0.00",
+     "currency": "TWD",
+     "convertedFromValue": "0.00",
+     "convertedFromCurrency": "GBP"
+    },
+    "shippingCostType": "FIXED"
+   }
+  ],
+  "shipToLocations": {
+   "regionIncluded": [
+    {
+     "regionName": "Worldwide",
+     "regionType": "WORLDWIDE",
+     "regionId": "WORLDWIDE"
+    },
+    {
+     "regionName": "United Kingdom",
+     "regionType": "COUNTRY",
+     "regionId": "GB"
+    }
+   ],
+   "regionExcluded": [
+    {
+     "regionName": "Afghanistan",
+     "regionType": "COUNTRY",
+     "regionId": "AF"
+    },
+    {
+     "regionName": "Libya",
+     "regionType": "COUNTRY",
+     "regionId": "LY"
+    },
+    {
+     "regionName": "Nauru",
+     "regionType": "COUNTRY",
+     "regionId": "NR"
+    },
+    {
+     "regionName": "Somalia",
+     "regionType": "COUNTRY",
+     "regionId": "SO"
+    },
+    {
+     "regionName": "Yemen",
+     "regionType": "COUNTRY",
+     "regionId": "YE"
+    },
+    {
+     "regionName": "Ukraine",
+     "regionType": "COUNTRY",
+     "regionId": "UA"
+    },
+    {
+     "regionName": "Iran",
+     "regionType": "COUNTRY",
+     "regionId": "IR"
+    },
+    {
+     "regionName": "Russian Federation",
+     "regionType": "COUNTRY",
+     "regionId": "RU"
+    }
+   ]
+  },
+  "returnTerms": {
+   "returnsAccepted": false
+  },
+  "localizedAspects": [
+   {
+    "type": "STRING",
+    "name": "Attribute/MTG:Colour",
+    "value": "Red"
+   },
+   {
+    "type": "STRING",
+    "name": "Rarity",
+    "value": "Ultra Rare"
+   },
+   {
+    "type": "STRING",
+    "name": "Speciality",
+    "value": "EX"
+   },
+   {
+    "type": "STRING",
+    "name": "Set",
+    "value": "Dark Revelation Volume 2"
+   },
+   {
+    "type": "STRING",
+    "name": "Game",
+    "value": "Yu-Gi-Oh! TCG"
+   },
+   {
+    "type": "STRING",
+    "name": "Character",
+    "value": "Golem"
+   },
+   {
+    "type": "STRING",
+    "name": "Card Name",
+    "value": "Card of the Soul"
+   },
+   {
+    "type": "STRING",
+    "name": "Stage",
+    "value": "Ultimate"
+   },
+   {
+    "type": "STRING",
+    "name": "Year Manufactured",
+    "value": "2007"
+   },
+   {
+    "type": "STRING",
+    "name": "Features",
+    "value": "1st Edition"
+   },
+   {
+    "type": "STRING",
+    "name": "Country of Origin",
+    "value": "United States"
+   }
+  ],
+  "primaryProductReviewRating": {
+   "reviewCount": 0,
+   "averageRating": "0.0",
+   "ratingHistograms": [
+    {
+     "rating": "5",
+     "count": 0
+    },
+    {
+     "rating": "4",
+     "count": 0
+    },
+    {
+     "rating": "3",
+     "count": 0
+    },
+    {
+     "rating": "2",
+     "count": 0
+    },
+    {
+     "rating": "1",
+     "count": 0
+    }
+   ]
+  },
+  "topRatedBuyingExperience": false,
+  "buyingOptions": [
+   "FIXED_PRICE"
+  ],
+  "itemWebUrl": "https://www.ebay.com/itm/407031244912",
+  "description": "Up for sale here is a Terrorking Archfiend DCR-072 1st edition super rare. The card has been professionally determined by PSA to be in NM-MT condition. Any questions please ask!<div><div><br></div><div><br></div><div><br></div><div><br></div><div>US buyers please note: no additional taxes or duties will be due upon delivery. I prepay all duties prior to shipping and these are already factored into the price you see on eBay.</div></div>",
+  "paymentMethods": [
+   {
+    "paymentMethodType": "WALLET",
+    "paymentMethodBrands": [
+     {
+      "paymentMethodBrandType": "PAYPAL"
+     },
+     {
+      "paymentMethodBrandType": "APPLE_PAY"
+     },
+     {
+      "paymentMethodBrandType": "GOOGLE_PAY"
+     }
+    ]
+   },
+   {
+    "paymentMethodType": "CREDIT_CARD",
+    "paymentMethodBrands": [
+     {
+      "paymentMethodBrandType": "VISA"
+     },
+     {
+      "paymentMethodBrandType": "MASTERCARD"
+     },
+     {
+      "paymentMethodBrandType": "DINERS_CLUB"
+     }
+    ]
+   }
+  ],
+  "immediatePay": true,
+  "enabledForGuestCheckout": true,
+  "eligibleForInlineCheckout": true,
+  "lotSize": 0,
+  "legacyItemId": "407031244912",
+  "priorityListing": false,
+  "adultOnly": false,
+  "categoryId": "183454",
+  "listingMarketplaceId": "EBAY_GB"
+ },
+ "item_auction": {
+  "itemId": "v1|398220263914|0",
+  "title": "Yu-Gi-Oh Konami 1996 Seven Tools Edition SDJ-048 Card Very Good Condition PSA In",
+  "shortDescription": "Carte Card Yu-Gi-Oh Konami 1996 Edition Seven Tools Of The Bandit SDJ-048 Très Bon Etat PSA PCA En Carte Yu-Gi-Oh! Collector. Carte rare. Très rare dans cet état. Version anglaise. Protégée et conservée dans un sleeve qui sera envoyé avec la commande. Envoi soigné garanti.",
+  "price": {
+   "value": "71.00",
+   "currency": "TWD",
+   "convertedFromValue": "1.90",
+   "convertedFromCurrency": "EUR"
+  },
+  "categoryPath": "Collections|Jeux de cartes à collectionner|JCC : cartes à l'unité",
+  "categoryIdPath": "1|2536|183454",
+  "condition": "Non gradée",
+  "conditionId": "4000",
+  "conditionDescriptors": [
+   {
+    "name": "État de la carte",
+    "values": [
+     {
+      "content": "Lightly Played/Excellent (légers défauts)",
+      "additionalInfo": [
+       "Coins écornés",
+       "Légères rayures sur la surface",
+       "Entailles sur les bords"
+      ]
+     }
+    ]
+   }
+  ],
+  "itemLocation": {
+   "city": "Paris",
+   "postalCode": "75***",
+   "country": "FR"
+  },
+  "image": {
+   "imageUrl": "https://i.ebayimg.com/images/g/XIgAAOSwtUBm6FKQ/s-l1600.jpg",
+   "width": 1200,
+   "height": 1600
+  },
+  "additionalImages": [
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/uHQAAOSwcqhm6FKR/s-l1600.jpg",
+    "width": 1200,
+    "height": 1600
+   }
+  ],
+  "currentBidPrice": {
+   "value": "71.00",
+   "currency": "TWD",
+   "convertedFromValue": "1.90",
+   "convertedFromCurrency": "EUR"
+  },
+  "material": "Papier cartonné",
+  "ageGroup": "13+",
+  "itemCreationDate": "2026-07-27T14:06:29.000Z",
+  "itemEndDate": "2026-08-03T14:06:29.000Z",
+  "seller": {
+   "username": "trunksociety",
+   "feedbackPercentage": "96.0",
+   "feedbackScore": 157
+  },
+  "estimatedAvailabilities": [
+   {
+    "deliveryOptions": [
+     "SHIP_TO_HOME"
+    ],
+    "estimatedAvailabilityStatus": "IN_STOCK",
+    "estimatedAvailableQuantity": 1,
+    "estimatedSoldQuantity": 0,
+    "estimatedRemainingQuantity": 1
+   }
+  ],
+  "shippingOptions": [
+   {
+    "shippingServiceCode": "La Poste - Lettre Internationale",
+    "shippingCarrierCode": "LA POSTE",
+    "type": "Standard Shipping",
+    "shippingCost": {
+     "value": "521.00",
+     "currency": "TWD",
+     "convertedFromValue": "14.00",
+     "convertedFromCurrency": "EUR"
+    },
+    "quantityUsedForEstimate": 1,
+    "minEstimatedDeliveryDate": "2026-08-12T10:00:00.000Z",
+    "maxEstimatedDeliveryDate": "2026-09-16T10:00:00.000Z",
+    "additionalShippingCostPerUnit": {
+     "value": "74.00",
+     "currency": "TWD",
+     "convertedFromValue": "2.00",
+     "convertedFromCurrency": "EUR"
+    },
+    "shippingCostType": "FIXED"
+   }
+  ],
+  "shipToLocations": {
+   "regionIncluded": [
+    {
+     "regionName": "Worldwide",
+     "regionType": "WORLDWIDE",
+     "regionId": "WORLDWIDE"
+    }
+   ],
+   "regionExcluded": [
+    {
+     "regionName": "Belarus",
+     "regionType": "COUNTRY",
+     "regionId": "BY"
+    },
+    {
+     "regionName": "Ukraine",
+     "regionType": "COUNTRY",
+     "regionId": "UA"
+    },
+    {
+     "regionName": "Russian Federation",
+     "regionType": "COUNTRY",
+     "regionId": "RU"
+    }
+   ]
+  },
+  "returnTerms": {
+   "returnsAccepted": false
+  },
+  "localizedAspects": [
+   {
+    "type": "STRING",
+    "name": "Finition",
+    "value": "Standard"
+   },
+   {
+    "type": "STRING",
+    "name": "Set",
+    "value": "- Yugi -"
+   },
+   {
+    "type": "STRING",
+    "name": "Langue",
+    "value": "Anglais"
+   },
+   {
+    "type": "STRING",
+    "name": "Pays d'origine",
+    "value": "Japon"
+   },
+   {
+    "type": "STRING",
+    "name": "Année de fabrication",
+    "value": "2004"
+   },
+   {
+    "type": "STRING",
+    "name": "Matériau",
+    "value": "Papier cartonné"
+   },
+   {
+    "type": "STRING",
+    "name": "Type de la carte",
+    "value": "Creature"
+   },
+   {
+    "type": "STRING",
+    "name": "Signé par",
+    "value": "Non"
+   },
+   {
+    "type": "STRING",
+    "name": "Fabricant",
+    "value": "Konami"
+   },
+   {
+    "type": "STRING",
+    "name": "Caractéristiques",
+    "value": "Édition limitée, Deuxieme Edition"
+   },
+   {
+    "type": "STRING",
+    "name": "Rareté",
+    "value": "Rare"
+   },
+   {
+    "type": "STRING",
+    "name": "Signé",
+    "value": "Non"
+   },
+   {
+    "type": "STRING",
+    "name": "Taille de la carte",
+    "value": "Standard"
+   },
+   {
+    "type": "STRING",
+    "name": "Nom de la carte",
+    "value": "Seven Tools Of The Bandit"
+   },
+   {
+    "type": "STRING",
+    "name": "Numéro de carte",
+    "value": "SDJ-048"
+   },
+   {
+    "type": "STRING",
+    "name": "Tranche d'âge",
+    "value": "13+"
+   },
+   {
+    "type": "STRING",
+    "name": "Personnage",
+    "value": "Flame Swordsman"
+   },
+   {
+    "type": "STRING",
+    "name": "Type de monstre ou créature",
+    "value": "Insecte"
+   },
+   {
+    "type": "STRING",
+    "name": "Jeu",
+    "value": "Yu-Gi-Oh!"
+   },
+   {
+    "type": "STRING",
+    "name": "Attribut, MTG : couleur",
+    "value": "Obscur"
+   }
+  ],
+  "topRatedBuyingExperience": false,
+  "buyingOptions": [
+   "AUCTION",
+   "BEST_OFFER"
+  ],
+  "itemWebUrl": "https://www.ebay.com/itm/398220263914",
+  "description": "<p>Carte Card Yu-Gi-Oh Konami 1996 Edition Seven Tools Of The Bandit SDJ-048 Très Bon Etat PSA PCA En </p><br /><p>Carte Yu-Gi-Oh! Collector. </p><p>Carte rare. Très rare dans cet état.</p><p>Version anglaise.</p><br /><p>Protégée et conservée dans un sleeve qui sera envoyé avec la commande. </p><br /><p>Envoi soigné garanti.</p><br />",
+  "paymentMethods": [
+   {
+    "paymentMethodType": "WALLET",
+    "paymentMethodBrands": [
+     {
+      "paymentMethodBrandType": "PAYPAL"
+     },
+     {
+      "paymentMethodBrandType": "APPLE_PAY"
+     },
+     {
+      "paymentMethodBrandType": "GOOGLE_PAY"
+     }
+    ]
+   },
+   {
+    "paymentMethodType": "CREDIT_CARD",
+    "paymentMethodBrands": [
+     {
+      "paymentMethodBrandType": "VISA"
+     },
+     {
+      "paymentMethodBrandType": "MASTERCARD"
+     },
+     {
+      "paymentMethodBrandType": "DINERS_CLUB"
+     }
+    ]
+   }
+  ],
+  "immediatePay": false,
+  "minimumPriceToBid": {
+   "value": "71.00",
+   "currency": "TWD",
+   "convertedFromValue": "1.90",
+   "convertedFromCurrency": "EUR"
+  },
+  "uniqueBidderCount": 0,
+  "enabledForGuestCheckout": false,
+  "eligibleForInlineCheckout": true,
+  "lotSize": 0,
+  "legacyItemId": "398220263914",
+  "priorityListing": false,
+  "adultOnly": false,
+  "categoryId": "183454",
+  "listingMarketplaceId": "EBAY_FR"
+ },
+ "item_auction_with_bids": {
+  "warnings": [
+   {
+    "errorId": 11510,
+    "domain": "API_BROWSE",
+    "category": "APPLICATION",
+    "message": "There was a problem calculating the shipping cost. Please try again."
+   }
+  ],
+  "itemId": "v1|398221073955|0",
+  "title": "2026 PSA 10 Yu-Gi-Oh! LOCR-JP001 BLUE-EYES WHITE DRAGON PRISMATIC EXTENDED ART",
+  "shortDescription": "2026 PSA 10 Yu-Gi-Oh! LOCR-JP001 BLUE-EYES WHITE DRAGON PRISMATIC EXTENDED ART",
+  "price": {
+   "value": "27783.00",
+   "currency": "TWD",
+   "convertedFromValue": "860.00",
+   "convertedFromCurrency": "USD"
+  },
+  "categoryPath": "Toys & Hobbies|Collectible Card Games|CCG Individual Cards",
+  "categoryIdPath": "220|2536|183454",
+  "condition": "Graded",
+  "conditionId": "2750",
+  "conditionDescriptors": [
+   {
+    "name": "Professional Grader",
+    "values": [
+     {
+      "content": "Professional Sports Authenticator (PSA)"
+     }
+    ]
+   },
+   {
+    "name": "Grade",
+    "values": [
+     {
+      "content": "10"
+     }
+    ]
+   },
+   {
+    "name": "Certification Number",
+    "values": [
+     {
+      "content": "161223734"
+     }
+    ]
+   }
+  ],
+  "itemLocation": {
+   "city": "Chicago",
+   "stateOrProvince": "Illinois",
+   "postalCode": "606**",
+   "country": "US"
+  },
+  "image": {
+   "imageUrl": "https://i.ebayimg.com/images/g/8igAAeSwjF1qZ7Z3/s-l1600.jpg",
+   "width": 1200,
+   "height": 1600
+  },
+  "additionalImages": [
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/6TMAAeSwFJVqZ7Z3/s-l1600.jpg",
+    "width": 1200,
+    "height": 1600
+   },
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/MoYAAeSwdhFqZ7bG/s-l1600.jpg",
+    "width": 951,
+    "height": 1600
+   },
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/rg8AAeSwB-dqZ7bF/s-l1600.jpg",
+    "width": 953,
+    "height": 1600
+   },
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/i3oAAeSwDB5qZ7bG/s-l1600.jpg",
+    "width": 1600,
+    "height": 1345
+   }
+  ],
+  "currentBidPrice": {
+   "value": "27783.00",
+   "currency": "TWD",
+   "convertedFromValue": "860.00",
+   "convertedFromCurrency": "USD"
+  },
+  "itemCreationDate": "2026-07-27T19:52:04.000Z",
+  "itemEndDate": "2026-08-03T19:52:04.000Z",
+  "seller": {
+   "username": "patheticcards",
+   "feedbackPercentage": "100.0",
+   "feedbackScore": 67
+  },
+  "estimatedAvailabilities": [
+   {
+    "estimatedAvailabilityStatus": "IN_STOCK",
+    "estimatedAvailableQuantity": 1,
+    "estimatedSoldQuantity": 0,
+    "estimatedRemainingQuantity": 1
+   }
+  ],
+  "shipToLocations": {
+   "regionIncluded": [
+    {
+     "regionName": "United States",
+     "regionType": "COUNTRY",
+     "regionId": "US"
+    },
+    {
+     "regionName": "Denmark",
+     "regionType": "COUNTRY",
+     "regionId": "DK"
+    },
+    {
+     "regionName": "New Zealand",
+     "regionType": "COUNTRY",
+     "regionId": "NZ"
+    },
+    {
+     "regionName": "Guatemala",
+     "regionType": "COUNTRY",
+     "regionId": "GT"
+    },
+    {
+     "regionName": "Fiji",
+     "regionType": "COUNTRY",
+     "regionId": "FJ"
+    },
+    {
+     "regionName": "Papua New Guinea",
+     "regionType": "COUNTRY",
+     "regionId": "PG"
+    },
+    {
+     "regionName": "Solomon Islands",
+     "regionType": "COUNTRY",
+     "regionId": "SB"
+    },
+    {
+     "regionName": "Vatican City State",
+     "regionType": "COUNTRY",
+     "regionId": "VA"
+    },
+    {
+     "regionName": "Sierra Leone",
+     "regionType": "COUNTRY",
+     "regionId": "SL"
+    },
+    {
+     "regionName": "Marshall Islands",
+     "regionType": "COUNTRY",
+     "regionId": "MH"
+    },
+    {
+     "regionName": "Nauru",
+     "regionType": "COUNTRY",
+     "regionId": "NR"
+    },
+    {
+     "regionName": "Wallis and Futuna",
+     "regionType": "COUNTRY",
+     "regionId": "WF"
+    },
+    {
+     "regionName": "Anguilla",
+     "regionType": "COUNTRY",
+     "regionId": "AI"
+    },
+    {
+     "regionName": "El Salvador",
+     "regionType": "COUNTRY",
+     "regionId": "SV"
+    },
+    {
+     "regionName": "Gambia",
+     "regionType": "COUNTRY",
+     "regionId": "GM"
+    },
+    {
+     "regionName": "Micronesia",
+     "regionType": "COUNTRY",
+     "regionId": "FM"
+    },
+    {
+     "regionName": "Dominican Republic",
+     "regionType": "COUNTRY",
+     "regionId": "DO"
+    },
+    {
+     "regionName": "Malaysia",
+     "regionType": "COUNTRY",
+     "regionId": "MY"
+    },
+    {
+     "regionName": "Cameroon",
+     "regionType": "COUNTRY",
+     "regionId": "CM"
+    },
+    {
+     "regionName": "Taiwan",
+     "regionType": "COUNTRY",
+     "regionId": "TW"
+    },
+    {
+     "regionName": "Guyana",
+     "regionType": "COUNTRY",
+     "regionId": "GY"
+    },
+    {
+     "regionName": "Poland",
+     "regionType": "COUNTRY",
+     "regionId": "PL"
+    },
+    {
+     "regionName": "Azerbaijan Republic",
+     "regionType": "COUNTRY",
+     "regionId": "AZ"
+    },
+    {
+     "regionName": "Macau",
+     "regionType": "COUNTRY",
+     "regionId": "MO"
+    },
+    {
+     "regionName": "Georgia",
+     "regionType": "COUNTRY",
+     "regionId": "GE"
+    },
+    {
+     "regionName": "Oman",
+     "regionType": "COUNTRY",
+     "regionId": "OM"
+    },
+    {
+     "regionName": "Suriname",
+     "regionType": "COUNTRY",
+     "regionId": "SR"
+    },
+    {
+     "regionName": "Tonga",
+     "regionType": "COUNTRY",
+     "regionId": "TO"
+    },
+    {
+     "regionName": "United Arab Emirates",
+     "regionType": "COUNTRY",
+     "regionId": "AE"
+    },
+    {
+     "regionName": "Kenya",
+     "regionType": "COUNTRY",
+     "regionId": "KE"
+    },
+    {
+     "regionName": "Argentina",
+     "regionType": "COUNTRY",
+     "regionId": "AR"
+    },
+    {
+     "regionName": "San Marino",
+     "regionType": "COUNTRY",
+     "regionId": "SM"
+    },
+    {
+     "regionName": "Guinea-Bissau",
+     "regionType": "COUNTRY",
+     "regionId": "GW"
+    },
+    {
+     "regionName": "Alaska/Hawaii",
+     "regionType": "COUNTRY_REGION",
+     "regionId": "_AH"
+    },
+    {
+     "regionName": "APO/FPO",
+     "regionType": "COUNTRY_REGION",
+     "regionId": "_AP"
+    },
+    {
+     "regionName": "American Samoa",
+     "regionType": "COUNTRY",
+     "regionId": "AS"
+    },
+    {
+     "regionName": "Guam",
+     "regionType": "COUNTRY",
+     "regionId": "GU"
+    },
+    {
+     "regionName": "Palau",
+     "regionType": "COUNTRY",
+     "regionId": "PW"
+    },
+    {
+     "regionName": "Puerto Rico",
+     "regionType": "COUNTRY",
+     "regionId": "PR"
+    },
+    {
+     "regionName": "Virgin Islands (U.S.)",
+     "regionType": "COUNTRY",
+     "regionId": "VI"
+    },
+    {
+     "regionName": "Armenia",
+     "regionType": "COUNTRY",
+     "regionId": "AM"
+    },
+    {
+     "regionName": "Uzbekistan",
+     "regionType": "COUNTRY",
+     "regionId": "UZ"
+    },
+    {
+     "regionName": "Eritrea",
+     "regionType": "COUNTRY",
+     "regionId": "ER"
+    },
+    {
+     "regionName": "Senegal",
+     "regionType": "COUNTRY",
+     "regionId": "SN"
+    },
+    {
+     "regionName": "Togo",
+     "regionType": "COUNTRY",
+     "regionId": "TG"
+    },
+    {
+     "regionName": "Saint Kitts-Nevis",
+     "regionType": "COUNTRY",
+     "regionId": "KN"
+    },
+    {
+     "regionName": "Morocco",
+     "regionType": "COUNTRY",
+     "regionId": "MA"
+    },
+    {
+     "regionName": "Ireland",
+     "regionType": "COUNTRY",
+     "regionId": "IE"
+    },
+    {
+     "regionName": "Qatar",
+     "regionType": "COUNTRY",
+     "regionId": "QA"
+    },
+    {
+     "regionName": "Burundi",
+     "regionType": "COUNTRY",
+     "regionId": "BI"
+    },
+    {
+     "regionName": "Saint Vincent and the Grenadines",
+     "regionType": "COUNTRY",
+     "regionId": "VC"
+    },
+    {
+     "regionName": "Netherlands",
+     "regionType": "COUNTRY",
+     "regionId": "NL"
+    },
+    {
+     "regionName": "Slovakia",
+     "regionType": "COUNTRY",
+     "regionId": "SK"
+    },
+    {
+     "regionName": "Slovenia",
+     "regionType": "COUNTRY",
+     "regionId": "SI"
+    },
+    {
+     "regionName": "Equatorial Guinea",
+     "regionType": "COUNTRY",
+     "regionId": "GQ"
+    },
+    {
+     "regionName": "Mauritania",
+     "regionType": "COUNTRY",
+     "regionId": "MR"
+    },
+    {
+     "regionName": "Belize",
+     "regionType": "COUNTRY",
+     "regionId": "BZ"
+    },
+    {
+     "regionName": "Philippines",
+     "regionType": "COUNTRY",
+     "regionId": "PH"
+    },
+    {
+     "regionName": "Aruba",
+     "regionType": "COUNTRY",
+     "regionId": "AW"
+    },
+    {
+     "regionName": "Democratic Republic of the Congo",
+     "regionType": "COUNTRY",
+     "regionId": "CD"
+    },
+    {
+     "regionType": "COUNTRY",
+     "regionId": "UY"
+    },
+    {
+     "regionName": "Republic of the Congo",
+     "regionType": "COUNTRY",
+     "regionId": "CG"
+    },
+    {
+     "regionName": "Sweden",
+     "regionType": "COUNTRY",
+     "regionId": "SE"
+    },
+    {
+     "regionName": "Colombia",
+     "regionType": "COUNTRY",
+     "regionId": "CO"
+    },
+    {
+     "regionName": "Spain",
+     "regionType": "COUNTRY",
+     "regionId": "ES"
+    },
+    {
+     "regionName": "Iceland",
+     "regionType": "COUNTRY",
+     "regionId": "IS"
+    },
+    {
+     "regionName": "Estonia",
+     "regionType": "COUNTRY",
+     "regionId": "EE"
+    },
+    {
+     "regionName": "Macedonia",
+     "regionType": "COUNTRY",
+     "regionId": "MK"
+    },
+    {
+     "regionName": "Belgium",
+     "regionType": "COUNTRY",
+     "regionId": "BE"
+    },
+    {
+     "regionName": "Israel",
+     "regionType": "COUNTRY",
+     "regionId": "IL"
+    },
+    {
+     "regionName": "Kuwait",
+     "regionType": "COUNTRY",
+     "regionId": "KW"
+    },
+    {
+     "regionName": "Liechtenstein",
+     "regionType": "COUNTRY",
+     "regionId": "LI"
+    },
+    {
+     "regionName": "Benin",
+     "regionType": "COUNTRY",
+     "regionId": "BJ"
+    },
+    {
+     "regionName": "Algeria",
+     "regionType": "COUNTRY",
+     "regionId": "DZ"
+    },
+    {
+     "regionName": "Bermuda",
+     "regionType": "COUNTRY",
+     "regionId": "BM"
+    },
+    {
+     "regionName": "Montserrat",
+     "regionType": "COUNTRY",
+     "regionId": "MS"
+    },
+    {
+     "regionName": "Zambia",
+     "regionType": "COUNTRY",
+     "regionId": "ZM"
+    },
+    {
+     "regionName": "South Korea",
+     "regionType": "COUNTRY",
+     "regionId": "KR"
+    },
+    {
+     "regionName": "Antigua and Barbuda",
+     "regionType": "COUNTRY",
+     "regionId": "AG"
+    },
+    {
+     "regionName": "Vanuatu",
+     "regionType": "COUNTRY",
+     "regionId": "VU"
+    },
+    {
+     "regionName": "Ecuador",
+     "regionType": "COUNTRY",
+     "regionId": "EC"
+    },
+    {
+     "regionName": "Italy",
+     "regionType": "COUNTRY",
+     "regionId": "IT"
+    },
+    {
+     "regionName": "Albania",
+     "regionType": "COUNTRY",
+     "regionId": "AL"
+    },
+    {
+     "regionName": "Swaziland",
+     "regionType": "COUNTRY",
+     "regionId": "SZ"
+    },
+    {
+     "regionName": "Ethiopia",
+     "regionType": "COUNTRY",
+     "regionId": "ET"
+    },
+    {
+     "regionName": "Monaco",
+     "regionType": "COUNTRY",
+     "regionId": "MC"
+    },
+    {
+     "regionName": "Niger",
+     "regionType": "COUNTRY",
+     "regionId": "NE"
+    },
+    {
+     "regionName": "Tanzania",
+     "regionType": "COUNTRY",
+     "regionId": "TZ"
+    },
+    {
+     "regionName": "Pakistan",
+     "regionType": "COUNTRY",
+     "regionId": "PK"
+    },
+    {
+     "regionName": "Burkina Faso",
+     "regionType": "COUNTRY",
+     "regionId": "BF"
+    },
+    {
+     "regionName": "Panama",
+     "regionType": "COUNTRY",
+     "regionId": "PA"
+    },
+    {
+     "regionName": "Singapore",
+     "regionType": "COUNTRY",
+     "regionId": "SG"
+    },
+    {
+     "regionName": "Kyrgyzstan",
+     "regionType": "COUNTRY",
+     "regionId": "KG"
+    },
+    {
+     "regionName": "Switzerland",
+     "regionType": "COUNTRY",
+     "regionId": "CH"
+    },
+    {
+     "regionName": "Ghana",
+     "regionType": "COUNTRY",
+     "regionId": "GH"
+    },
+    {
+     "regionName": "Djibouti",
+     "regionType": "COUNTRY",
+     "regionId": "DJ"
+    },
+    {
+     "regionName": "Chile",
+     "regionType": "COUNTRY",
+     "regionId": "CL"
+    },
+    {
+     "regionName": "China",
+     "regionType": "COUNTRY",
+     "regionId": "CN"
+    },
+    {
+     "regionName": "Cape Verde Islands",
+     "regionType": "COUNTRY",
+     "regionId": "CV"
+    },
+    {
+     "regionName": "Moldova",
+     "regionType": "COUNTRY",
+     "regionId": "MD"
+    },
+    {
+     "regionName": "Mali",
+     "regionType": "COUNTRY",
+     "regionId": "ML"
+    },
+    {
+     "regionName": "Republic of Croatia",
+     "regionType": "COUNTRY",
+     "regionId": "HR"
+    },
+    {
+     "regionName": "Botswana",
+     "regionType": "COUNTRY",
+     "regionId": "BW"
+    },
+    {
+     "regionName": "Cambodia",
+     "regionType": "COUNTRY",
+     "regionId": "KH"
+    },
+    {
+     "regionName": "Madagascar",
+     "regionType": "COUNTRY",
+     "regionId": "MG"
+    },
+    {
+     "regionName": "Indonesia",
+     "regionType": "COUNTRY",
+     "regionId": "ID"
+    },
+    {
+     "regionName": "Portugal",
+     "regionType": "COUNTRY",
+     "regionId": "PT"
+    },
+    {
+     "regionName": "Malta",
+     "regionType": "COUNTRY",
+     "regionId": "MT"
+    },
+    {
+     "regionName": "Tajikistan",
+     "regionType": "COUNTRY",
+     "regionId": "TJ"
+    },
+    {
+     "regionName": "Vietnam",
+     "regionType": "COUNTRY",
+     "regionId": "VN"
+    },
+    {
+     "regionName": "Cayman Islands",
+     "regionType": "COUNTRY",
+     "regionId": "KY"
+    },
+    {
+     "regionName": "Paraguay",
+     "regionType": "COUNTRY",
+     "regionId": "PY"
+    },
+    {
+     "regionName": "Lebanon",
+     "regionType": "COUNTRY",
+     "regionId": "LB"
+    },
+    {
+     "regionName": "Cyprus",
+     "regionType": "COUNTRY",
+     "regionId": "CY"
+    },
+    {
+     "regionName": "Seychelles",
+     "regionType": "COUNTRY",
+     "regionId": "SC"
+    },
+    {
+     "regionName": "Liberia",
+     "regionType": "COUNTRY",
+     "regionId": "LR"
+    },
+    {
+     "regionName": "Rwanda",
+     "regionType": "COUNTRY",
+     "regionId": "RW"
+    },
+    {
+     "regionName": "Bangladesh",
+     "regionType": "COUNTRY",
+     "regionId": "BD"
+    },
+    {
+     "regionName": "Bolivia",
+     "regionType": "COUNTRY",
+     "regionId": "BO"
+    },
+    {
+     "regionName": "Maldives",
+     "regionType": "COUNTRY",
+     "regionId": "MV"
+    },
+    {
+     "regionName": "Australia",
+     "regionType": "COUNTRY",
+     "regionId": "AU"
+    },
+    {
+     "regionName": "Austria",
+     "regionType": "COUNTRY",
+     "regionId": "AT"
+    },
+    {
+     "regionName": "Gibraltar",
+     "regionType": "COUNTRY",
+     "regionId": "GI"
+    },
+    {
+     "regionName": "Sri Lanka",
+     "regionType": "COUNTRY",
+     "regionId": "LK"
+    },
+    {
+     "regionName": "Hong Kong",
+     "regionType": "COUNTRY",
+     "regionId": "HK"
+    },
+    {
+     "regionName": "Central African Republic",
+     "regionType": "COUNTRY",
+     "regionId": "CF"
+    },
+    {
+     "regionName": "Gabon Republic",
+     "regionType": "COUNTRY",
+     "regionId": "GA"
+    },
+    {
+     "regionName": "Lesotho",
+     "regionType": "COUNTRY",
+     "regionId": "LS"
+    },
+    {
+     "regionName": "Nigeria",
+     "regionType": "COUNTRY",
+     "regionId": "NG"
+    },
+    {
+     "regionName": "Zimbabwe",
+     "regionType": "COUNTRY",
+     "regionId": "ZW"
+    },
+    {
+     "regionName": "Mauritius",
+     "regionType": "COUNTRY",
+     "regionId": "MU"
+    },
+    {
+     "regionName": "Saint Lucia",
+     "regionType": "COUNTRY",
+     "regionId": "LC"
+    },
+    {
+     "regionName": "Bulgaria",
+     "regionType": "COUNTRY",
+     "regionId": "BG"
+    },
+    {
+     "regionName": "Guinea",
+     "regionType": "COUNTRY",
+     "regionId": "GN"
+    },
+    {
+     "regionName": "Czech Republic",
+     "regionType": "COUNTRY",
+     "regionId": "CZ"
+    },
+    {
+     "regionName": "Norway",
+     "regionType": "COUNTRY",
+     "regionId": "NO"
+    },
+    {
+     "regionName": "Canada",
+     "regionType": "COUNTRY",
+     "regionId": "CA"
+    },
+    {
+     "regionName": "Côte d'Ivoire (Ivory Coast)",
+     "regionType": "COUNTRY",
+     "regionId": "CI"
+    },
+    {
+     "regionName": "Turks and Caicos Islands",
+     "regionType": "COUNTRY",
+     "regionId": "TC"
+    },
+    {
+     "regionName": "Kiribati",
+     "regionType": "COUNTRY",
+     "regionId": "KI"
+    },
+    {
+     "regionName": "Andorra",
+     "regionType": "COUNTRY",
+     "regionId": "AD"
+    },
+    {
+     "regionName": "Grenada",
+     "regionType": "COUNTRY",
+     "regionId": "GD"
+    },
+    {
+     "regionName": "Greece",
+     "regionType": "COUNTRY",
+     "regionId": "GR"
+    },
+    {
+     "regionName": "Romania",
+     "regionType": "COUNTRY",
+     "regionId": "RO"
+    },
+    {
+     "regionName": "Costa Rica",
+     "regionType": "COUNTRY",
+     "regionId": "CR"
+    },
+    {
+     "regionName": "India",
+     "regionType": "COUNTRY",
+     "regionId": "IN"
+    },
+    {
+     "regionName": "Greenland",
+     "regionType": "COUNTRY",
+     "regionId": "GL"
+    },
+    {
+     "regionName": "Mexico",
+     "regionType": "COUNTRY",
+     "regionId": "MX"
+    },
+    {
+     "regionName": "Serbia",
+     "regionType": "COUNTRY",
+     "regionId": "RS"
+    },
+    {
+     "regionName": "Kazakhstan",
+     "regionType": "COUNTRY",
+     "regionId": "KZ"
+    },
+    {
+     "regionName": "Montenegro",
+     "regionType": "COUNTRY",
+     "regionId": "ME"
+    },
+    {
+     "regionName": "Saudi Arabia",
+     "regionType": "COUNTRY",
+     "regionId": "SA"
+    },
+    {
+     "regionName": "Japan",
+     "regionType": "COUNTRY",
+     "regionId": "JP"
+    },
+    {
+     "regionName": "Nepal",
+     "regionType": "COUNTRY",
+     "regionId": "NP"
+    },
+    {
+     "regionName": "Lithuania",
+     "regionType": "COUNTRY",
+     "regionId": "LT"
+    },
+    {
+     "regionName": "Bahamas",
+     "regionType": "COUNTRY",
+     "regionId": "BS"
+    },
+    {
+     "regionName": "Bahrain",
+     "regionType": "COUNTRY",
+     "regionId": "BH"
+    },
+    {
+     "regionName": "Trinidad and Tobago",
+     "regionType": "COUNTRY",
+     "regionId": "TT"
+    },
+    {
+     "regionName": "United Kingdom",
+     "regionType": "COUNTRY",
+     "regionId": "GB"
+    },
+    {
+     "regionName": "Malawi",
+     "regionType": "COUNTRY",
+     "regionId": "MW"
+    },
+    {
+     "regionName": "Hungary",
+     "regionType": "COUNTRY",
+     "regionId": "HU"
+    },
+    {
+     "regionName": "Bosnia and Herzegovina",
+     "regionType": "COUNTRY",
+     "regionId": "BA"
+    },
+    {
+     "regionName": "Angola",
+     "regionType": "COUNTRY",
+     "regionId": "AO"
+    },
+    {
+     "regionName": "Nicaragua",
+     "regionType": "COUNTRY",
+     "regionId": "NI"
+    },
+    {
+     "regionName": "Finland",
+     "regionType": "COUNTRY",
+     "regionId": "FI"
+    },
+    {
+     "regionName": "Tunisia",
+     "regionType": "COUNTRY",
+     "regionId": "TN"
+    },
+    {
+     "regionName": "Luxembourg",
+     "regionType": "COUNTRY",
+     "regionId": "LU"
+    },
+    {
+     "regionName": "Uganda",
+     "regionType": "COUNTRY",
+     "regionId": "UG"
+    },
+    {
+     "regionName": "Brazil",
+     "regionType": "COUNTRY",
+     "regionId": "BR"
+    },
+    {
+     "regionName": "Turkey",
+     "regionType": "COUNTRY",
+     "regionId": "TR"
+    },
+    {
+     "regionName": "Western Samoa",
+     "regionType": "COUNTRY",
+     "regionId": "WS"
+    },
+    {
+     "regionName": "France",
+     "regionType": "COUNTRY",
+     "regionId": "FR"
+    },
+    {
+     "regionName": "Germany",
+     "regionType": "COUNTRY",
+     "regionId": "DE"
+    },
+    {
+     "regionName": "Latvia",
+     "regionType": "COUNTRY",
+     "regionId": "LV"
+    },
+    {
+     "regionName": "Egypt",
+     "regionType": "COUNTRY",
+     "regionId": "EG"
+    },
+    {
+     "regionName": "Jamaica",
+     "regionType": "COUNTRY",
+     "regionId": "JM"
+    },
+    {
+     "regionName": "Mozambique",
+     "regionType": "COUNTRY",
+     "regionId": "MZ"
+    },
+    {
+     "regionName": "Namibia",
+     "regionType": "COUNTRY",
+     "regionId": "NA"
+    },
+    {
+     "regionName": "Peru",
+     "regionType": "COUNTRY",
+     "regionId": "PE"
+    },
+    {
+     "regionName": "South Africa",
+     "regionType": "COUNTRY",
+     "regionId": "ZA"
+    },
+    {
+     "regionName": "Honduras",
+     "regionType": "COUNTRY",
+     "regionId": "HN"
+    }
+   ],
+   "regionExcluded": [
+    {
+     "regionName": "French Polynesia",
+     "regionType": "COUNTRY",
+     "regionId": "PF"
+    },
+    {
+     "regionName": "Libya",
+     "regionType": "COUNTRY",
+     "regionId": "LY"
+    },
+    {
+     "regionName": "New Caledonia",
+     "regionType": "COUNTRY",
+     "regionId": "NC"
+    },
+    {
+     "regionName": "Guadeloupe",
+     "regionType": "COUNTRY",
+     "regionId": "GP"
+    },
+    {
+     "regionName": "Venezuela",
+     "regionType": "COUNTRY",
+     "regionId": "VE"
+    },
+    {
+     "regionName": "Reunion",
+     "regionType": "COUNTRY",
+     "regionId": "RE"
+    },
+    {
+     "regionName": "Barbados",
+     "regionType": "COUNTRY",
+     "regionId": "BB"
+    },
+    {
+     "regionName": "Martinique",
+     "regionType": "COUNTRY",
+     "regionId": "MQ"
+    },
+    {
+     "regionName": "French Guiana",
+     "regionType": "COUNTRY",
+     "regionId": "GF"
+    },
+    {
+     "regionName": "Ukraine",
+     "regionType": "COUNTRY",
+     "regionId": "UA"
+    },
+    {
+     "regionName": "Russian Federation",
+     "regionType": "COUNTRY",
+     "regionId": "RU"
+    }
+   ]
+  },
+  "returnTerms": {
+   "returnsAccepted": false
+  },
+  "localizedAspects": [
+   {
+    "type": "STRING",
+    "name": "Set",
+    "value": "LOCR"
+   },
+   {
+    "type": "STRING",
+    "name": "Character",
+    "value": "Blue-Eyes White Dragon"
+   },
+   {
+    "type": "STRING",
+    "name": "Year Manufactured",
+    "value": "2026"
+   },
+   {
+    "type": "STRING",
+    "name": "Defense/Toughness",
+    "value": "2500"
+   },
+   {
+    "type": "STRING",
+    "name": "Franchise",
+    "value": "Yu-Gi-Oh!"
+   },
+   {
+    "type": "STRING",
+    "name": "Attack/Power",
+    "value": "3000"
+   },
+   {
+    "type": "STRING",
+    "name": "Rarity",
+    "value": "Prismatic Secret Rare"
+   },
+   {
+    "type": "STRING",
+    "name": "Game",
+    "value": "Yu-Gi-Oh! TCG"
+   },
+   {
+    "type": "STRING",
+    "name": "Language",
+    "value": "Japanese"
+   },
+   {
+    "type": "STRING",
+    "name": "Card Name",
+    "value": "Blue-Eyes White Dragon"
+   },
+   {
+    "type": "STRING",
+    "name": "Manufacturer",
+    "value": "Konami"
+   },
+   {
+    "type": "STRING",
+    "name": "Professional Grader",
+    "value": "Professional Sports Authenticator (PSA)"
+   },
+   {
+    "type": "STRING",
+    "name": "Features",
+    "value": "Extended Art"
+   },
+   {
+    "type": "STRING",
+    "name": "Card Type",
+    "value": "Monster"
+   },
+   {
+    "type": "STRING",
+    "name": "Card Number",
+    "value": "JP001"
+   },
+   {
+    "type": "STRING",
+    "name": "Finish",
+    "value": "Foil"
+   }
+  ],
+  "topRatedBuyingExperience": false,
+  "buyingOptions": [
+   "AUCTION"
+  ],
+  "bidCount": 5,
+  "itemWebUrl": "https://www.ebay.com/itm/398221073955",
+  "description": "2026 PSA 10 Yu-Gi-Oh! LOCR-JP001 BLUE-EYES WHITE DRAGON PRISMATIC EXTENDED ART",
+  "paymentMethods": [
+   {
+    "paymentMethodType": "OTHER"
+   },
+   {
+    "paymentMethodType": "WALLET",
+    "paymentMethodBrands": [
+     {
+      "paymentMethodBrandType": "PAYPAL"
+     },
+     {
+      "paymentMethodBrandType": "APPLE_PAY"
+     },
+     {
+      "paymentMethodBrandType": "GOOGLE_PAY"
+     }
+    ]
+   },
+   {
+    "paymentMethodType": "CREDIT_CARD",
+    "paymentMethodBrands": [
+     {
+      "paymentMethodBrandType": "VISA"
+     },
+     {
+      "paymentMethodBrandType": "MASTERCARD"
+     },
+     {
+      "paymentMethodBrandType": "DISCOVER"
+     },
+     {
+      "paymentMethodBrandType": "DINERS_CLUB"
+     }
+    ]
+   }
+  ],
+  "immediatePay": false,
+  "minimumPriceToBid": {
+   "value": "28106.00",
+   "currency": "TWD",
+   "convertedFromValue": "870.00",
+   "convertedFromCurrency": "USD"
+  },
+  "uniqueBidderCount": 4,
+  "enabledForGuestCheckout": false,
+  "eligibleForInlineCheckout": true,
+  "lotSize": 0,
+  "legacyItemId": "398221073955",
+  "priorityListing": true,
+  "adultOnly": false,
+  "categoryId": "183454",
+  "listingMarketplaceId": "EBAY_US"
+ },
+ "item_auction_bin": {
+  "itemId": "v1|198533031826|0",
+  "title": "Yugioh cards - Blues Eyes & Red Eyes Support Collection_ 100% complete",
+  "shortDescription": "The Red Eyes and Blue Eyes archetypes are shown but the support are mystery cards. I have over 200 cards of different rarities in this collection.",
+  "price": {
+   "value": "32661.00",
+   "currency": "TWD",
+   "convertedFromValue": "1011.00",
+   "convertedFromCurrency": "USD"
+  },
+  "categoryPath": "Toys & Hobbies|Collectible Card Games|CCG Individual Cards",
+  "categoryIdPath": "220|2536|183454",
+  "condition": "Ungraded",
+  "conditionId": "4000",
+  "conditionDescriptors": [
+   {
+    "name": "Card Condition",
+    "values": [
+     {
+      "content": "Near mint or better",
+      "additionalInfo": [
+       "Minor corner and edge wear"
+      ]
+     }
+    ]
+   }
+  ],
+  "itemLocation": {
+   "city": "San Jose",
+   "stateOrProvince": "California",
+   "postalCode": "951**",
+   "country": "US"
+  },
+  "image": {
+   "imageUrl": "https://i.ebayimg.com/images/g/ZtYAAeSwTYtqQAeg/s-l1600.jpg",
+   "width": 1371,
+   "height": 900
+  },
+  "additionalImages": [
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/O3sAAeSw2RNqQAPW/s-l1600.jpg",
+    "width": 1600,
+    "height": 900
+   }
+  ],
+  "currentBidPrice": {
+   "value": "12922.00",
+   "currency": "TWD",
+   "convertedFromValue": "400.00",
+   "convertedFromCurrency": "USD"
+  },
+  "material": "Card Stock",
+  "itemCreationDate": "2026-07-29T16:01:18.000Z",
+  "itemEndDate": "2026-08-03T16:01:18.000Z",
+  "seller": {
+   "username": "sceesay2012",
+   "feedbackPercentage": "98.9",
+   "feedbackScore": 556
+  },
+  "estimatedAvailabilities": [
+   {
+    "deliveryOptions": [
+     "SHIP_TO_HOME"
+    ],
+    "estimatedAvailabilityStatus": "IN_STOCK",
+    "estimatedAvailableQuantity": 1,
+    "estimatedSoldQuantity": 0,
+    "estimatedRemainingQuantity": 1
+   }
+  ],
+  "shippingOptions": [
+   {
+    "shippingServiceCode": "USPS Priority Mail International",
+    "trademarkSymbol": "TM",
+    "shippingCarrierCode": "USPS",
+    "type": "None",
+    "shippingCost": {
+     "value": "2591.00",
+     "currency": "TWD",
+     "convertedFromValue": "80.20",
+     "convertedFromCurrency": "USD"
+    },
+    "quantityUsedForEstimate": 1,
+    "minEstimatedDeliveryDate": "2026-09-30T10:00:00.000Z",
+    "maxEstimatedDeliveryDate": "2026-10-21T10:00:00.000Z",
+    "shippingCostType": "CALCULATED"
+   }
+  ],
+  "shipToLocations": {
+   "regionIncluded": [
+    {
+     "regionName": "Worldwide",
+     "regionType": "WORLDWIDE",
+     "regionId": "WORLDWIDE"
+    },
+    {
+     "regionName": "New Zealand",
+     "regionType": "COUNTRY",
+     "regionId": "NZ"
+    },
+    {
+     "regionName": "Fiji",
+     "regionType": "COUNTRY",
+     "regionId": "FJ"
+    },
+    {
+     "regionName": "Papua New Guinea",
+     "regionType": "COUNTRY",
+     "regionId": "PG"
+    },
+    {
+     "regionName": "Marshall Islands",
+     "regionType": "COUNTRY",
+     "regionId": "MH"
+    },
+    {
+     "regionName": "Wallis and Futuna",
+     "regionType": "COUNTRY",
+     "regionId": "WF"
+    },
+    {
+     "regionName": "Gambia",
+     "regionType": "COUNTRY",
+     "regionId": "GM"
+    },
+    {
+     "regionName": "Malaysia",
+     "regionType": "COUNTRY",
+     "regionId": "MY"
+    },
+    {
+     "regionName": "Mayotte",
+     "regionType": "COUNTRY",
+     "regionId": "YT"
+    },
+    {
+     "regionName": "Taiwan",
+     "regionType": "COUNTRY",
+     "regionId": "TW"
+    },
+    {
+     "regionName": "Poland",
+     "regionType": "COUNTRY",
+     "regionId": "PL"
+    },
+    {
+     "regionName": "Oman",
+     "regionType": "COUNTRY",
+     "regionId": "OM"
+    },
+    {
+     "regionName": "Suriname",
+     "regionType": "COUNTRY",
+     "regionId": "SR"
+    },
+    {
+     "regionName": "United Arab Emirates",
+     "regionType": "COUNTRY",
+     "regionId": "AE"
+    },
+    {
+     "regionName": "Kenya",
+     "regionType": "COUNTRY",
+     "regionId": "KE"
+    },
+    {
+     "regionName": "Argentina",
+     "regionType": "COUNTRY",
+     "regionId": "AR"
+    },
+    {
+     "regionName": "Guinea-Bissau",
+     "regionType": "COUNTRY",
+     "regionId": "GW"
+    },
+    {
+     "regionName": "Armenia",
+     "regionType": "COUNTRY",
+     "regionId": "AM"
+    },
+    {
+     "regionName": "Uzbekistan",
+     "regionType": "COUNTRY",
+     "regionId": "UZ"
+    },
+    {
+     "regionName": "Bhutan",
+     "regionType": "COUNTRY",
+     "regionId": "BT"
+    },
+    {
+     "regionName": "Senegal",
+     "regionType": "COUNTRY",
+     "regionId": "SN"
+    },
+    {
+     "regionName": "Togo",
+     "regionType": "COUNTRY",
+     "regionId": "TG"
+    },
+    {
+     "regionName": "Ireland",
+     "regionType": "COUNTRY",
+     "regionId": "IE"
+    },
+    {
+     "regionName": "Falkland Islands (Islas Malvinas)",
+     "regionType": "COUNTRY",
+     "regionId": "FK"
+    },
+    {
+     "regionName": "Qatar",
+     "regionType": "COUNTRY",
+     "regionId": "QA"
+    },
+    {
+     "regionName": "Burundi",
+     "regionType": "COUNTRY",
+     "regionId": "BI"
+    },
+    {
+     "regionName": "Netherlands",
+     "regionType": "COUNTRY",
+     "regionId": "NL"
+    },
+    {
+     "regionName": "Slovakia",
+     "regionType": "COUNTRY",
+     "regionId": "SK"
+    },
+    {
+     "regionName": "Iraq",
+     "regionType": "COUNTRY",
+     "regionId": "IQ"
+    },
+    {
+     "regionName": "Slovenia",
+     "regionType": "COUNTRY",
+     "regionId": "SI"
+    },
+    {
+     "regionName": "Equatorial Guinea",
+     "regionType": "COUNTRY",
+     "regionId": "GQ"
+    },
+    {
+     "regionName": "Thailand",
+     "regionType": "COUNTRY",
+     "regionId": "TH"
+    },
+    {
+     "regionName": "Aruba",
+     "regionType": "COUNTRY",
+     "regionId": "AW"
+    },
+    {
+     "regionName": "American Samoa",
+     "regionType": "COUNTRY",
+     "regionId": "AS"
+    },
+    {
+     "regionName": "Sweden",
+     "regionType": "COUNTRY",
+     "regionId": "SE"
+    },
+    {
+     "regionName": "Iceland",
+     "regionType": "COUNTRY",
+     "regionId": "IS"
+    },
+    {
+     "regionName": "Macedonia",
+     "regionType": "COUNTRY",
+     "regionId": "MK"
+    },
+    {
+     "regionName": "Belgium",
+     "regionType": "COUNTRY",
+     "regionId": "BE"
+    },
+    {
+     "regionName": "Israel",
+     "regionType": "COUNTRY",
+     "regionId": "IL"
+    },
+    {
+     "regionName": "Kuwait",
+     "regionType": "COUNTRY",
+     "regionId": "KW"
+    },
+    {
+     "regionName": "Liechtenstein",
+     "regionType": "COUNTRY",
+     "regionId": "LI"
+    },
+    {
+     "regionName": "Benin",
+     "regionType": "COUNTRY",
+     "regionId": "BJ"
+    },
+    {
+     "regionName": "Algeria",
+     "regionType": "COUNTRY",
+     "regionId": "DZ"
+    },
+    {
+     "regionName": "Antigua and Barbuda",
+     "regionType": "COUNTRY",
+     "regionId": "AG"
+    },
+    {
+     "regionName": "Italy",
+     "regionType": "COUNTRY",
+     "regionId": "IT"
+    },
+    {
+     "regionName": "Swaziland",
+     "regionType": "COUNTRY",
+     "regionId": "SZ"
+    },
+    {
+     "regionName": "Tanzania",
+     "regionType": "COUNTRY",
+     "regionId": "TZ"
+    },
+    {
+     "regionName": "Pakistan",
+     "regionType": "COUNTRY",
+     "regionId": "PK"
+    },
+    {
+     "regionName": "Burkina Faso",
+     "regionType": "COUNTRY",
+     "regionId": "BF"
+    },
+    {
+     "regionName": "Panama",
+     "regionType": "COUNTRY",
+     "regionId": "PA"
+    },
+    {
+     "regionName": "Singapore",
+     "regionType": "COUNTRY",
+     "regionId": "SG"
+    },
+    {
+     "regionName": "Jersey",
+     "regionType": "COUNTRY",
+     "regionId": "JE"
+    },
+    {
+     "regionName": "Kyrgyzstan",
+     "regionType": "COUNTRY",
+     "regionId": "KG"
+    },
+    {
+     "regionName": "Switzerland",
+     "regionType": "COUNTRY",
+     "regionId": "CH"
+    },
+    {
+     "regionName": "Djibouti",
+     "regionType": "COUNTRY",
+     "regionId": "DJ"
+    },
+    {
+     "regionName": "Chile",
+     "regionType": "COUNTRY",
+     "regionId": "CL"
+    },
+    {
+     "regionName": "Puerto Rico",
+     "regionType": "COUNTRY",
+     "regionId": "PR"
+    },
+    {
+     "regionName": "China",
+     "regionType": "COUNTRY",
+     "regionId": "CN"
+    },
+    {
+     "regionName": "Mali",
+     "regionType": "COUNTRY",
+     "regionId": "ML"
+    },
+    {
+     "regionName": "Republic of Croatia",
+     "regionType": "COUNTRY",
+     "regionId": "HR"
+    },
+    {
+     "regionName": "Botswana",
+     "regionType": "COUNTRY",
+     "regionId": "BW"
+    },
+    {
+     "regionName": "Cambodia",
+     "regionType": "COUNTRY",
+     "regionId": "KH"
+    },
+    {
+     "regionName": "Indonesia",
+     "regionType": "COUNTRY",
+     "regionId": "ID"
+    },
+    {
+     "regionName": "Portugal",
+     "regionType": "COUNTRY",
+     "regionId": "PT"
+    },
+    {
+     "regionName": "Malta",
+     "regionType": "COUNTRY",
+     "regionId": "MT"
+    },
+    {
+     "regionName": "Tajikistan",
+     "regionType": "COUNTRY",
+     "regionId": "TJ"
+    },
+    {
+     "regionName": "Vietnam",
+     "regionType": "COUNTRY",
+     "regionId": "VN"
+    },
+    {
+     "regionName": "Cayman Islands",
+     "regionType": "COUNTRY",
+     "regionId": "KY"
+    },
+    {
+     "regionName": "Paraguay",
+     "regionType": "COUNTRY",
+     "regionId": "PY"
+    },
+    {
+     "regionName": "Saint Helena",
+     "regionType": "COUNTRY",
+     "regionId": "SH"
+    },
+    {
+     "regionName": "Cyprus",
+     "regionType": "COUNTRY",
+     "regionId": "CY"
+    },
+    {
+     "regionName": "Seychelles",
+     "regionType": "COUNTRY",
+     "regionId": "SC"
+    },
+    {
+     "regionName": "Rwanda",
+     "regionType": "COUNTRY",
+     "regionId": "RW"
+    },
+    {
+     "regionName": "Bangladesh",
+     "regionType": "COUNTRY",
+     "regionId": "BD"
+    },
+    {
+     "regionName": "Australia",
+     "regionType": "COUNTRY",
+     "regionId": "AU"
+    },
+    {
+     "regionName": "Austria",
+     "regionType": "COUNTRY",
+     "regionId": "AT"
+    },
+    {
+     "regionName": "Sri Lanka",
+     "regionType": "COUNTRY",
+     "regionId": "LK"
+    },
+    {
+     "regionName": "Gabon Republic",
+     "regionType": "COUNTRY",
+     "regionId": "GA"
+    },
+    {
+     "regionName": "Zimbabwe",
+     "regionType": "COUNTRY",
+     "regionId": "ZW"
+    },
+    {
+     "regionName": "Bulgaria",
+     "regionType": "COUNTRY",
+     "regionId": "BG"
+    },
+    {
+     "regionName": "Czech Republic",
+     "regionType": "COUNTRY",
+     "regionId": "CZ"
+    },
+    {
+     "regionName": "Norway",
+     "regionType": "COUNTRY",
+     "regionId": "NO"
+    },
+    {
+     "regionName": "Côte d'Ivoire (Ivory Coast)",
+     "regionType": "COUNTRY",
+     "regionId": "CI"
+    },
+    {
+     "regionName": "Kiribati",
+     "regionType": "COUNTRY",
+     "regionId": "KI"
+    },
+    {
+     "regionName": "Turkmenistan",
+     "regionType": "COUNTRY",
+     "regionId": "TM"
+    },
+    {
+     "regionName": "Grenada",
+     "regionType": "COUNTRY",
+     "regionId": "GD"
+    },
+    {
+     "regionName": "Greece",
+     "regionType": "COUNTRY",
+     "regionId": "GR"
+    },
+    {
+     "regionName": "Haiti",
+     "regionType": "COUNTRY",
+     "regionId": "HT"
+    },
+    {
+     "regionName": "Greenland",
+     "regionType": "COUNTRY",
+     "regionId": "GL"
+    },
+    {
+     "regionName": "Yemen",
+     "regionType": "COUNTRY",
+     "regionId": "YE"
+    },
+    {
+     "regionName": "Afghanistan",
+     "regionType": "COUNTRY",
+     "regionId": "AF"
+    },
+    {
+     "regionName": "Montenegro",
+     "regionType": "COUNTRY",
+     "regionId": "ME"
+    },
+    {
+     "regionName": "Mongolia",
+     "regionType": "COUNTRY",
+     "regionId": "MN"
+    },
+    {
+     "regionName": "Nepal",
+     "regionType": "COUNTRY",
+     "regionId": "NP"
+    },
+    {
+     "regionName": "Bahamas",
+     "regionType": "COUNTRY",
+     "regionId": "BS"
+    },
+    {
+     "regionName": "Bahrain",
+     "regionType": "COUNTRY",
+     "regionId": "BH"
+    },
+    {
+     "regionName": "United Kingdom",
+     "regionType": "COUNTRY",
+     "regionId": "GB"
+    },
+    {
+     "regionName": "Svalbard and Jan Mayen",
+     "regionType": "COUNTRY",
+     "regionId": "SJ"
+    },
+    {
+     "regionName": "Dominica",
+     "regionType": "COUNTRY",
+     "regionId": "DM"
+    },
+    {
+     "regionName": "Hungary",
+     "regionType": "COUNTRY",
+     "regionId": "HU"
+    },
+    {
+     "regionName": "Bosnia and Herzegovina",
+     "regionType": "COUNTRY",
+     "regionId": "BA"
+    },
+    {
+     "regionName": "Angola",
+     "regionType": "COUNTRY",
+     "regionId": "AO"
+    },
+    {
+     "regionName": "Western Samoa",
+     "regionType": "COUNTRY",
+     "regionId": "WS"
+    },
+    {
+     "regionName": "France",
+     "regionType": "COUNTRY",
+     "regionId": "FR"
+    },
+    {
+     "regionName": "Mozambique",
+     "regionType": "COUNTRY",
+     "regionId": "MZ"
+    },
+    {
+     "regionName": "Namibia",
+     "regionType": "COUNTRY",
+     "regionId": "NA"
+    },
+    {
+     "regionName": "Peru",
+     "regionType": "COUNTRY",
+     "regionId": "PE"
+    },
+    {
+     "regionName": "Denmark",
+     "regionType": "COUNTRY",
+     "regionId": "DK"
+    },
+    {
+     "regionName": "Guatemala",
+     "regionType": "COUNTRY",
+     "regionId": "GT"
+    },
+    {
+     "regionName": "Solomon Islands",
+     "regionType": "COUNTRY",
+     "regionId": "SB"
+    },
+    {
+     "regionName": "Vatican City State",
+     "regionType": "COUNTRY",
+     "regionId": "VA"
+    },
+    {
+     "regionName": "Sierra Leone",
+     "regionType": "COUNTRY",
+     "regionId": "SL"
+    },
+    {
+     "regionName": "Nauru",
+     "regionType": "COUNTRY",
+     "regionId": "NR"
+    },
+    {
+     "regionName": "Anguilla",
+     "regionType": "COUNTRY",
+     "regionId": "AI"
+    },
+    {
+     "regionName": "El Salvador",
+     "regionType": "COUNTRY",
+     "regionId": "SV"
+    },
+    {
+     "regionName": "Guam",
+     "regionType": "COUNTRY",
+     "regionId": "GU"
+    },
+    {
+     "regionName": "Micronesia",
+     "regionType": "COUNTRY",
+     "regionId": "FM"
+    },
+    {
+     "regionName": "Dominican Republic",
+     "regionType": "COUNTRY",
+     "regionId": "DO"
+    },
+    {
+     "regionName": "Cameroon",
+     "regionType": "COUNTRY",
+     "regionId": "CM"
+    },
+    {
+     "regionName": "Guyana",
+     "regionType": "COUNTRY",
+     "regionId": "GY"
+    },
+    {
+     "regionName": "Azerbaijan Republic",
+     "regionType": "COUNTRY",
+     "regionId": "AZ"
+    },
+    {
+     "regionName": "Macau",
+     "regionType": "COUNTRY",
+     "regionId": "MO"
+    },
+    {
+     "regionName": "Georgia",
+     "regionType": "COUNTRY",
+     "regionId": "GE"
+    },
+    {
+     "regionName": "Tonga",
+     "regionType": "COUNTRY",
+     "regionId": "TO"
+    },
+    {
+     "regionName": "San Marino",
+     "regionType": "COUNTRY",
+     "regionId": "SM"
+    },
+    {
+     "regionName": "Eritrea",
+     "regionType": "COUNTRY",
+     "regionId": "ER"
+    },
+    {
+     "regionName": "Saint Kitts-Nevis",
+     "regionType": "COUNTRY",
+     "regionId": "KN"
+    },
+    {
+     "regionName": "Morocco",
+     "regionType": "COUNTRY",
+     "regionId": "MA"
+    },
+    {
+     "regionName": "Saint Vincent and the Grenadines",
+     "regionType": "COUNTRY",
+     "regionId": "VC"
+    },
+    {
+     "regionName": "Belarus",
+     "regionType": "COUNTRY",
+     "regionId": "BY"
+    },
+    {
+     "regionName": "Mauritania",
+     "regionType": "COUNTRY",
+     "regionId": "MR"
+    },
+    {
+     "regionName": "Belize",
+     "regionType": "COUNTRY",
+     "regionId": "BZ"
+    },
+    {
+     "regionName": "Philippines",
+     "regionType": "COUNTRY",
+     "regionId": "PH"
+    },
+    {
+     "regionName": "Democratic Republic of the Congo",
+     "regionType": "COUNTRY",
+     "regionId": "CD"
+    },
+    {
+     "regionType": "COUNTRY",
+     "regionId": "UY"
+    },
+    {
+     "regionName": "Republic of the Congo",
+     "regionType": "COUNTRY",
+     "regionId": "CG"
+    },
+    {
+     "regionName": "Western Sahara",
+     "regionType": "COUNTRY",
+     "regionId": "EH"
+    },
+    {
+     "regionName": "Cook Islands",
+     "regionType": "COUNTRY",
+     "regionId": "CK"
+    },
+    {
+     "regionName": "Comoros",
+     "regionType": "COUNTRY",
+     "regionId": "KM"
+    },
+    {
+     "regionName": "Colombia",
+     "regionType": "COUNTRY",
+     "regionId": "CO"
+    },
+    {
+     "regionName": "Spain",
+     "regionType": "COUNTRY",
+     "regionId": "ES"
+    },
+    {
+     "regionName": "Estonia",
+     "regionType": "COUNTRY",
+     "regionId": "EE"
+    },
+    {
+     "regionName": "Bermuda",
+     "regionType": "COUNTRY",
+     "regionId": "BM"
+    },
+    {
+     "regionName": "Montserrat",
+     "regionType": "COUNTRY",
+     "regionId": "MS"
+    },
+    {
+     "regionName": "Zambia",
+     "regionType": "COUNTRY",
+     "regionId": "ZM"
+    },
+    {
+     "regionName": "South Korea",
+     "regionType": "COUNTRY",
+     "regionId": "KR"
+    },
+    {
+     "regionName": "Somalia",
+     "regionType": "COUNTRY",
+     "regionId": "SO"
+    },
+    {
+     "regionName": "Vanuatu",
+     "regionType": "COUNTRY",
+     "regionId": "VU"
+    },
+    {
+     "regionName": "Ecuador",
+     "regionType": "COUNTRY",
+     "regionId": "EC"
+    },
+    {
+     "regionName": "Albania",
+     "regionType": "COUNTRY",
+     "regionId": "AL"
+    },
+    {
+     "regionName": "Ethiopia",
+     "regionType": "COUNTRY",
+     "regionId": "ET"
+    },
+    {
+     "regionName": "Guernsey",
+     "regionType": "COUNTRY",
+     "regionId": "GG"
+    },
+    {
+     "regionName": "Monaco",
+     "regionType": "COUNTRY",
+     "regionId": "MC"
+    },
+    {
+     "regionName": "Niger",
+     "regionType": "COUNTRY",
+     "regionId": "NE"
+    },
+    {
+     "regionName": "Laos",
+     "regionType": "COUNTRY",
+     "regionId": "LA"
+    },
+    {
+     "regionName": "Ghana",
+     "regionType": "COUNTRY",
+     "regionId": "GH"
+    },
+    {
+     "regionName": "Cape Verde Islands",
+     "regionType": "COUNTRY",
+     "regionId": "CV"
+    },
+    {
+     "regionName": "Moldova",
+     "regionType": "COUNTRY",
+     "regionId": "MD"
+    },
+    {
+     "regionName": "Madagascar",
+     "regionType": "COUNTRY",
+     "regionId": "MG"
+    },
+    {
+     "regionName": "Saint Pierre and Miquelon",
+     "regionType": "COUNTRY",
+     "regionId": "PM"
+    },
+    {
+     "regionName": "Lebanon",
+     "regionType": "COUNTRY",
+     "regionId": "LB"
+    },
+    {
+     "regionName": "Liberia",
+     "regionType": "COUNTRY",
+     "regionId": "LR"
+    },
+    {
+     "regionName": "Bolivia",
+     "regionType": "COUNTRY",
+     "regionId": "BO"
+    },
+    {
+     "regionName": "Maldives",
+     "regionType": "COUNTRY",
+     "regionId": "MV"
+    },
+    {
+     "regionName": "Gibraltar",
+     "regionType": "COUNTRY",
+     "regionId": "GI"
+    },
+    {
+     "regionName": "Hong Kong",
+     "regionType": "COUNTRY",
+     "regionId": "HK"
+    },
+    {
+     "regionName": "Central African Republic",
+     "regionType": "COUNTRY",
+     "regionId": "CF"
+    },
+    {
+     "regionName": "Lesotho",
+     "regionType": "COUNTRY",
+     "regionId": "LS"
+    },
+    {
+     "regionName": "Nigeria",
+     "regionType": "COUNTRY",
+     "regionId": "NG"
+    },
+    {
+     "regionName": "Mauritius",
+     "regionType": "COUNTRY",
+     "regionId": "MU"
+    },
+    {
+     "regionName": "Saint Lucia",
+     "regionType": "COUNTRY",
+     "regionId": "LC"
+    },
+    {
+     "regionName": "Jordan",
+     "regionType": "COUNTRY",
+     "regionId": "JO"
+    },
+    {
+     "regionName": "Guinea",
+     "regionType": "COUNTRY",
+     "regionId": "GN"
+    },
+    {
+     "regionName": "British Virgin Islands",
+     "regionType": "COUNTRY",
+     "regionId": "VG"
+    },
+    {
+     "regionName": "Canada",
+     "regionType": "COUNTRY",
+     "regionId": "CA"
+    },
+    {
+     "regionName": "Turks and Caicos Islands",
+     "regionType": "COUNTRY",
+     "regionId": "TC"
+    },
+    {
+     "regionName": "Chad",
+     "regionType": "COUNTRY",
+     "regionId": "TD"
+    },
+    {
+     "regionName": "Andorra",
+     "regionType": "COUNTRY",
+     "regionId": "AD"
+    },
+    {
+     "regionName": "Romania",
+     "regionType": "COUNTRY",
+     "regionId": "RO"
+    },
+    {
+     "regionName": "Costa Rica",
+     "regionType": "COUNTRY",
+     "regionId": "CR"
+    },
+    {
+     "regionName": "India",
+     "regionType": "COUNTRY",
+     "regionId": "IN"
+    },
+    {
+     "regionName": "Mexico",
+     "regionType": "COUNTRY",
+     "regionId": "MX"
+    },
+    {
+     "regionName": "Serbia",
+     "regionType": "COUNTRY",
+     "regionId": "RS"
+    },
+    {
+     "regionName": "Kazakhstan",
+     "regionType": "COUNTRY",
+     "regionId": "KZ"
+    },
+    {
+     "regionName": "Saudi Arabia",
+     "regionType": "COUNTRY",
+     "regionId": "SA"
+    },
+    {
+     "regionName": "Netherlands Antilles",
+     "regionType": "COUNTRY",
+     "regionId": "AN"
+    },
+    {
+     "regionName": "Japan",
+     "regionType": "COUNTRY",
+     "regionId": "JP"
+    },
+    {
+     "regionName": "Lithuania",
+     "regionType": "COUNTRY",
+     "regionId": "LT"
+    },
+    {
+     "regionName": "Trinidad and Tobago",
+     "regionType": "COUNTRY",
+     "regionId": "TT"
+    },
+    {
+     "regionName": "Palau",
+     "regionType": "COUNTRY",
+     "regionId": "PW"
+    },
+    {
+     "regionName": "Malawi",
+     "regionType": "COUNTRY",
+     "regionId": "MW"
+    },
+    {
+     "regionName": "Nicaragua",
+     "regionType": "COUNTRY",
+     "regionId": "NI"
+    },
+    {
+     "regionName": "Finland",
+     "regionType": "COUNTRY",
+     "regionId": "FI"
+    },
+    {
+     "regionName": "Tunisia",
+     "regionType": "COUNTRY",
+     "regionId": "TN"
+    },
+    {
+     "regionName": "Luxembourg",
+     "regionType": "COUNTRY",
+     "regionId": "LU"
+    },
+    {
+     "regionName": "Uganda",
+     "regionType": "COUNTRY",
+     "regionId": "UG"
+    },
+    {
+     "regionName": "Brazil",
+     "regionType": "COUNTRY",
+     "regionId": "BR"
+    },
+    {
+     "regionName": "Turkey",
+     "regionType": "COUNTRY",
+     "regionId": "TR"
+    },
+    {
+     "regionName": "Tuvalu",
+     "regionType": "COUNTRY",
+     "regionId": "TV"
+    },
+    {
+     "regionName": "Germany",
+     "regionType": "COUNTRY",
+     "regionId": "DE"
+    },
+    {
+     "regionName": "Latvia",
+     "regionType": "COUNTRY",
+     "regionId": "LV"
+    },
+    {
+     "regionName": "Egypt",
+     "regionType": "COUNTRY",
+     "regionId": "EG"
+    },
+    {
+     "regionName": "Jamaica",
+     "regionType": "COUNTRY",
+     "regionId": "JM"
+    },
+    {
+     "regionName": "Niue",
+     "regionType": "COUNTRY",
+     "regionId": "NU"
+    },
+    {
+     "regionName": "Virgin Islands (U.S.)",
+     "regionType": "COUNTRY",
+     "regionId": "VI"
+    },
+    {
+     "regionName": "South Africa",
+     "regionType": "COUNTRY",
+     "regionId": "ZA"
+    },
+    {
+     "regionName": "Brunei Darussalam",
+     "regionType": "COUNTRY",
+     "regionId": "BN"
+    },
+    {
+     "regionName": "Honduras",
+     "regionType": "COUNTRY",
+     "regionId": "HN"
+    }
+   ],
+   "regionExcluded": [
+    {
+     "regionName": "French Polynesia",
+     "regionType": "COUNTRY",
+     "regionId": "PF"
+    },
+    {
+     "regionName": "Libya",
+     "regionType": "COUNTRY",
+     "regionId": "LY"
+    },
+    {
+     "regionName": "New Caledonia",
+     "regionType": "COUNTRY",
+     "regionId": "NC"
+    },
+    {
+     "regionName": "Guadeloupe",
+     "regionType": "COUNTRY",
+     "regionId": "GP"
+    },
+    {
+     "regionName": "Venezuela",
+     "regionType": "COUNTRY",
+     "regionId": "VE"
+    },
+    {
+     "regionName": "Reunion",
+     "regionType": "COUNTRY",
+     "regionId": "RE"
+    },
+    {
+     "regionName": "Barbados",
+     "regionType": "COUNTRY",
+     "regionId": "BB"
+    },
+    {
+     "regionName": "Martinique",
+     "regionType": "COUNTRY",
+     "regionId": "MQ"
+    },
+    {
+     "regionName": "French Guiana",
+     "regionType": "COUNTRY",
+     "regionId": "GF"
+    },
+    {
+     "regionName": "Ukraine",
+     "regionType": "COUNTRY",
+     "regionId": "UA"
+    },
+    {
+     "regionName": "Russian Federation",
+     "regionType": "COUNTRY",
+     "regionId": "RU"
+    }
+   ]
+  },
+  "returnTerms": {
+   "returnsAccepted": false
+  },
+  "localizedAspects": [
+   {
+    "type": "STRING",
+    "name": "Convention/Event",
+    "value": "Yu-Gi-Oh! TCG World Championship"
+   },
+   {
+    "type": "STRING",
+    "name": "Card Size",
+    "value": "Standard"
+   },
+   {
+    "type": "STRING",
+    "name": "Attribute/MTG:Color",
+    "value": "Earth"
+   },
+   {
+    "type": "STRING",
+    "name": "Autographed",
+    "value": "No"
+   },
+   {
+    "type": "STRING",
+    "name": "Set",
+    "value": "Blue-Eyes and Red-Eyes cards"
+   },
+   {
+    "type": "STRING",
+    "name": "Creature/Monster Type",
+    "value": "Warrior, Dragon"
+   },
+   {
+    "type": "STRING",
+    "name": "Year Manufactured",
+    "value": "2020"
+   },
+   {
+    "type": "STRING",
+    "name": "Vintage",
+    "value": "No"
+   },
+   {
+    "type": "STRING",
+    "name": "Language",
+    "value": "English"
+   },
+   {
+    "type": "STRING",
+    "name": "Card Name",
+    "value": "Dragon Monsters"
+   },
+   {
+    "type": "STRING",
+    "name": "Manufacturer",
+    "value": "Konami"
+   },
+   {
+    "type": "STRING",
+    "name": "Features",
+    "value": "1st Edition, Unlimited"
+   },
+   {
+    "type": "STRING",
+    "name": "Card Type",
+    "value": "Collection"
+   },
+   {
+    "type": "STRING",
+    "name": "Finish",
+    "value": "Various"
+   },
+   {
+    "type": "STRING",
+    "name": "Speciality",
+    "value": "Head-On Attacks"
+   },
+   {
+    "type": "STRING",
+    "name": "Character",
+    "value": "Joey Wheeler, Seto Kaiba, Atticus Rhodes"
+   },
+   {
+    "type": "STRING",
+    "name": "Material",
+    "value": "Card Stock"
+   },
+   {
+    "type": "STRING",
+    "name": "Grade",
+    "value": "9"
+   },
+   {
+    "type": "STRING",
+    "name": "Age Level",
+    "value": "6+"
+   },
+   {
+    "type": "STRING",
+    "name": "Franchise",
+    "value": "Yu-Gi-Oh!"
+   },
+   {
+    "type": "STRING",
+    "name": "Rarity",
+    "value": "Common"
+   },
+   {
+    "type": "STRING",
+    "name": "Game",
+    "value": "Yu-Gi-Oh! TCG"
+   },
+   {
+    "type": "STRING",
+    "name": "Collection",
+    "value": "Custom Starter Pack"
+   },
+   {
+    "type": "STRING",
+    "name": "Country of Origin",
+    "value": "United States"
+   }
+  ],
+  "topRatedBuyingExperience": false,
+  "buyingOptions": [
+   "FIXED_PRICE",
+   "AUCTION"
+  ],
+  "itemWebUrl": "https://www.ebay.com/itm/198533031826",
+  "description": "<p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\">I have a collection of Dragon and Dragon support ftom the yugioh cards game and show</p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\"><br></p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\"><br></p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\">I have over 200 cards of different rarities in this collection.</p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\"><br></p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\"><br></p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\">The Red Eyes and Blue Eyes archetypes are shown but the support are mystery cards.</p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\"><br></p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\">All of which are to support the 2 boss monsters, Blue-Eyes Shining Dragon and Red-Eyes Darkness Dragon.</p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\"><br></p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\"><br></p><p dir=\"ltr\" style=\"margin-top:0; margin-bottom:0;\">Whomever, chooses the buy it now option, will receive these cards in&nbsp; a special made tin, along with a custom made card that relies on both archetypes.</p>",
+  "paymentMethods": [
+   {
+    "paymentMethodType": "OTHER"
+   },
+   {
+    "paymentMethodType": "WALLET",
+    "paymentMethodBrands": [
+     {
+      "paymentMethodBrandType": "PAYPAL"
+     },
+     {
+      "paymentMethodBrandType": "APPLE_PAY"
+     },
+     {
+      "paymentMethodBrandType": "GOOGLE_PAY"
+     }
+    ]
+   },
+   {
+    "paymentMethodType": "CREDIT_CARD",
+    "paymentMethodBrands": [
+     {
+      "paymentMethodBrandType": "VISA"
+     },
+     {
+      "paymentMethodBrandType": "MASTERCARD"
+     },
+     {
+      "paymentMethodBrandType": "DISCOVER"
+     },
+     {
+      "paymentMethodBrandType": "DINERS_CLUB"
+     }
+    ]
+   }
+  ],
+  "immediatePay": true,
+  "minimumPriceToBid": {
+   "value": "12922.00",
+   "currency": "TWD",
+   "convertedFromValue": "400.00",
+   "convertedFromCurrency": "USD"
+  },
+  "uniqueBidderCount": 0,
+  "enabledForGuestCheckout": true,
+  "eligibleForInlineCheckout": true,
+  "lotSize": 0,
+  "legacyItemId": "198533031826",
+  "priorityListing": true,
+  "adultOnly": false,
+  "categoryId": "183454",
+  "listingMarketplaceId": "EBAY_US"
+ },
+ "summary_auction": {
+  "itemId": "v1|398220263914|0",
+  "title": "Yu-Gi-Oh Konami 1996 Seven Tools Edition SDJ-048 Card Very Good Condition PSA In",
+  "leafCategoryIds": [
+   "183454"
+  ],
+  "categories": [
+   {
+    "categoryId": "183454",
+    "categoryName": "JCC : cartes à l'unité"
+   },
+   {
+    "categoryId": "1",
+    "categoryName": "Collections"
+   },
+   {
+    "categoryId": "2536",
+    "categoryName": "Jeux de cartes à collectionner"
+   }
+  ],
+  "image": {
+   "imageUrl": "https://i.ebayimg.com/images/g/XIgAAOSwtUBm6FKQ/s-l225.jpg"
+  },
+  "itemHref": "https://api.ebay.com/buy/browse/v1/item/v1%7C398220263914%7C0",
+  "seller": {
+   "username": "trunksociety",
+   "feedbackPercentage": "96.0",
+   "feedbackScore": 157
+  },
+  "condition": "Non gradée",
+  "conditionId": "4000",
+  "thumbnailImages": [
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/XIgAAOSwtUBm6FKQ/s-l1600.jpg"
+   }
+  ],
+  "shippingOptions": [
+   {
+    "shippingCostType": "FIXED",
+    "shippingCost": {
+     "value": "521.35",
+     "currency": "TWD",
+     "convertedFromValue": "14.00",
+     "convertedFromCurrency": "EUR"
+    },
+    "minEstimatedDeliveryDate": "2026-08-11T16:00:00.000Z",
+    "maxEstimatedDeliveryDate": "2026-09-15T16:00:00.000Z"
+   }
+  ],
+  "buyingOptions": [
+   "AUCTION",
+   "BEST_OFFER"
+  ],
+  "bidCount": 0,
+  "currentBidPrice": {
+   "value": "70.75",
+   "currency": "TWD",
+   "convertedFromValue": "1.90",
+   "convertedFromCurrency": "EUR"
+  },
+  "itemWebUrl": "https://www.ebay.com/itm/398220263914?_skw=yugioh+psa&hash=item5cb7c701ea:g:XIgAAOSwtUBm6FKQ",
+  "itemLocation": {
+   "postalCode": "75***",
+   "country": "FR"
+  },
+  "additionalImages": [
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/uHQAAOSwcqhm6FKR/s-l225.jpg"
+   }
+  ],
+  "adultOnly": false,
+  "legacyItemId": "398220263914",
+  "availableCoupons": false,
+  "itemOriginDate": "2024-09-16T15:48:40.000Z",
+  "itemCreationDate": "2026-07-27T14:06:29.000Z",
+  "itemEndDate": "2026-08-03T14:06:29.000Z",
+  "topRatedBuyingExperience": false,
+  "priorityListing": false,
+  "listingMarketplaceId": "EBAY_FR"
+ },
+ "summary_auction_bin": {
+  "itemId": "v1|198533031826|0",
+  "title": "Yugioh cards - Blues Eyes & Red Eyes Support Collection_ 100% complete",
+  "leafCategoryIds": [
+   "183454"
+  ],
+  "categories": [
+   {
+    "categoryId": "183454",
+    "categoryName": "CCG Individual Cards"
+   },
+   {
+    "categoryId": "220",
+    "categoryName": "Toys & Hobbies"
+   },
+   {
+    "categoryId": "2536",
+    "categoryName": "Collectible Card Games"
+   }
+  ],
+  "image": {
+   "imageUrl": "https://i.ebayimg.com/images/g/ZtYAAeSwTYtqQAeg/s-l225.jpg"
+  },
+  "price": {
+   "value": "32661.37",
+   "currency": "TWD",
+   "convertedFromValue": "1011.00",
+   "convertedFromCurrency": "USD"
+  },
+  "itemHref": "https://api.ebay.com/buy/browse/v1/item/v1%7C198533031826%7C0",
+  "seller": {
+   "username": "sceesay2012",
+   "feedbackPercentage": "98.9",
+   "feedbackScore": 556
+  },
+  "condition": "Ungraded",
+  "conditionId": "4000",
+  "thumbnailImages": [
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/ZtYAAeSwTYtqQAeg/s-l1600.jpg"
+   }
+  ],
+  "shippingOptions": [
+   {
+    "shippingCostType": "CALCULATED",
+    "shippingCost": {
+     "value": "2590.94",
+     "currency": "TWD",
+     "convertedFromValue": "80.20",
+     "convertedFromCurrency": "USD"
+    },
+    "minEstimatedDeliveryDate": "2026-09-29T16:00:00.000Z",
+    "maxEstimatedDeliveryDate": "2026-10-20T16:00:00.000Z"
+   }
+  ],
+  "buyingOptions": [
+   "FIXED_PRICE",
+   "AUCTION"
+  ],
+  "bidCount": 0,
+  "currentBidPrice": {
+   "value": "12922.40",
+   "currency": "TWD",
+   "convertedFromValue": "400.00",
+   "convertedFromCurrency": "USD"
+  },
+  "itemWebUrl": "https://www.ebay.com/itm/198533031826?_skw=yugioh&hash=item2e397da792:g:ZtYAAeSwTYtqQAeg",
+  "itemLocation": {
+   "postalCode": "951**",
+   "country": "US"
+  },
+  "additionalImages": [
+   {
+    "imageUrl": "https://i.ebayimg.com/images/g/O3sAAeSw2RNqQAPW/s-l225.jpg"
+   }
+  ],
+  "adultOnly": false,
+  "legacyItemId": "198533031826",
+  "availableCoupons": false,
+  "itemOriginDate": "2022-10-06T19:00:01.000Z",
+  "itemCreationDate": "2026-07-29T16:01:18.000Z",
+  "itemEndDate": "2026-08-03T16:01:18.000Z",
+  "topRatedBuyingExperience": false,
+  "priorityListing": false,
+  "listingMarketplaceId": "EBAY_US"
+ }
+}

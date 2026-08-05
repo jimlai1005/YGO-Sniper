@@ -1,0 +1,12 @@
+{
+  "_why": "buyee_mercari 與 mercari_tw 的 seller_id 是不是同一個 ID 空間——這條測試釘住 2026-08-04 的實測答案：是。同一件 Mercari 日本商品 m38347072251，兩個平台的商品頁各自報出 901019808。片段是從當天實抓的原始頁面**逐字擷取**（不是手寫的），保留賣家標記與圖片檔名（圖片檔名帶著日本站的商品 ID，那正是把兩個平台的同一件商品綁在一起的證據）。",
+  "captured_at": "2026-08-04",
+  "jp_item_id": "m38347072251",
+  "expected_seller_id": "901019808",
+  "tw_item_url": "https://tw.mercari.com/zh-hant/items/2a2f632e-1b44-4864-b5cd-e684f2db8db1",
+  "tw_fragment": "ssName\\\":\\\"fPSBzf buKhAN iRgpoQ dpfntZ\\\",\\\"style\\\":{\\\"flexGrow\\\":1},\\\"ref\\\":\\\"$undefined\\\"}]\\n\"])</script><script nonce=\"NTQ4OWI2ZmQtZDUzYi00MjMwLWEwMTUtOGE4MmI2ZWJkYWI1\">self.__next_f.push([1,\"d2:[\\\"$\\\",\\\"$Ld3\\\",\\\"view-detail-link\\\",{\\\"itemType\\\":1,\\\"sellerId\\\":\\\"901019808\\\",\\\"sellerName\\\":\\\"りり\\\"}]\\nbd:[\\\"$\\\",\\\"div\\\",null,{\\\"children\\\":[null,[\\\"$\\\",\\\"div\\\",null,{\\\"data-testid\\\":\\\"checkout-section\\\",\\\"children\\\":[null,null,[\\\"$\\\",\\\"div\\\",null,{\\\"className\\\":\\\"eRRfNr dAlrim jVCpHx\\\",\\\"children\\\":\\\"$Ld4\\\"}]],\\\"className\\\":",
+  "tw_photo_fragment": "ce\\\",\\\"urls\\\":[\\\"https://static.mercdn.net/item/detail/webp/photos/m38347072251_1.jpg?1785791242\\\",\\\"https://static.mercdn.net/item/detail/webp/p",
+  "buyee_item_url": "https://buyee.jp/mercari/item/m38347072251",
+  "buyee_fragment": "p/901019808.jpg?1758054615\">\n                  </div>\n                                  <div class=\"m-goodsDetail__avatarSeller\">\n                    <div class=\"m-goodsDetail__avatarSellerContainer\">\n                                              <a href=\"/mercari/search?seller=901019808\">りり</a>\n                        <ul class=\"m-goodsDetail__avatarSellerList\">\n                                                                            </ul>\n                                          </div>\n                                          ",
+  "buyee_photo_fragment": ":image\" content=\"https://static.mercdn.net/item/detail/orig/photos/m38347072251_1.jpg?1785791242\" />\n<meta property=\"og:url\" content=\"https://buy"
+}

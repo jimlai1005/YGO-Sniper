@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  安裝／改完之後重載：
+    cp scripts/com.jim.ygosniper.plist ~/Library/LaunchAgents/
+    launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.plist
+    launchctl load   ~/Library/LaunchAgents/com.jim.ygosniper.plist
+
+  ── 為什麼是 StartCalendarInterval 而不是 StartInterval 3600 ──
+
+  兩者都能做到「每小時一次」，差別全在 MBP 蓋起來睡著的時候：
+
+  * StartInterval 3600 是相對計時：睡眠期間不計時，醒來後從頭再數 3600 秒。
+    也就是說闔上蓋子 5 小時，醒來後還要再等最多一小時才會跑第一次。
+  * StartCalendarInterval 給一組時間點（見下方 array）。
+    睡眠期間錯過的排程，launchd 會在醒來後**立刻補跑一次**（只補一次，
+    不會把錯過的 5 次全部補齊）。
+
+  對「狙擊新上架」這個目的，這個取捨是有方向性的：
+  補跑一次「五小時前那一輪」本身沒有價值（那批貨早就被人撿走或已不新），
+  但「醒來後立刻跑一次」很有價值——它抓的是當下的最新狀態，而且讓你闔蓋
+  再打開就有結果，不必乾等一小時。兩個效果由同一個機制提供，所以選它。
+
+  想改時段就改下方 StartCalendarInterval 的 array。
+  改完要 unload 再 load 一次才生效。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jim.ygosniper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>$HOME/projects/ygo-sniper/scripts/run_daily.sh</string>
+    </array>
+
+    <!--
+      ── 排程按「日本拍賣實際的結標時刻」設計，不是均勻分佈 ──
+
+      實測 63 筆競標的結標時刻（台灣時間）：18:00 有 12 筆、19:00 有 2 筆、
+      20:00 有 6 筆、21:00 有 22 筆、22:00 有 21 筆，**其餘 19 個小時全部是 0**。
+      日本賣家把結標時間排在當地晚上流量最高的時段（JST 19-23 = TPE 18-22）。
+
+      使用者的作息：白天靠 Telegram、晚上 21-24 點才開 dashboard。
+      兩者疊起來的結論：
+
+      * 09:00-17:00 每 2 小時 —— 這個時段沒有任何標的結標，跑掃描是為了
+        「新上架的即決標的」（先搶先贏）。每 2 小時足夠，跑更密只是浪費請求。
+      * 18:00-22:00 每 30 分鐘 —— 結標高峰。競標急件通知要夠即時，
+        而且 18-20 點使用者還沒開 dashboard，只能靠 Telegram。
+      * 23:00-08:00 不跑 —— 日本賣家也在睡：沒有新上架，也沒有結標。
+        少跑 9 個時段，總請求數比「每小時跑」還低約三成。
+
+      改時段就改下面的 array。每個 dict 是一個觸發點；只給 Minute 不給 Hour
+      代表「每小時的那一分」，這裡刻意每個都寫死 Hour 以免又變成整天跑。
+    -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <!-- 白天：每 2 小時，抓新上架 -->
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+        <!-- 結標高峰：每 30 分鐘 -->
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>30</integer></dict>
+    </array>
+
+    <!-- 載入時不要立刻跑一次，等排程時間到（最多等 1 小時，可接受） -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- 掛掉不要無限重啟；跑不完就等下一個整點半，不要疊上去 -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/ygosniper.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ygosniper.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <!--
+      節流：避免同一分鐘內被重複觸發。
+      刻意**不**設成 3600：排程本身就是每 3600 秒一次，兩者相等時只要有一點點
+      抖動（睡眠喚醒後的補跑尤其明顯）就會把一次合法的執行整個吃掉。
+      300 秒足以擋掉重複觸發，又不會跟每小時的排程打架。
+      真正防「上一輪還在跑就又開一輪」的是 run_daily.sh 裡的鎖，不是這個值。
+    -->
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

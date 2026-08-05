@@ -1,0 +1,25 @@
+# 第二輪探勘：第一輪學到「單字弱關鍵字 ＋ 新着排序 ＋ 1 頁」＝ 只看得到整個
+# 分類最近幾分鐘的上架，候選率趨近 0。所以這一輪測的是「**兩個字**的弱關鍵字」
+# ——保留年代／機構語意、但拿掉『遊戯王』這個字，讓標題沒寫廠牌的標的進得來。
+# 另外測 PayPay 的 brandIds（分類 2420 有一半是ポケモン／ワンピース）。
+variants:
+  - {label: r2-m-psa-shoki,    group: r2, source: buyee_mercari, keyword: "PSA 初期",  category: "1152"}
+  - {label: r2-m-kantei-shoki, group: r2, source: buyee_mercari, keyword: "鑑定 初期", category: "1152"}
+  - {label: r2-m-ars-shoki,    group: r2, source: buyee_mercari, keyword: "ARS 初期",  category: "1152"}
+  - {label: r2-m-psa-nocat,    group: r2, source: buyee_mercari, keyword: "PSA 初期"}
+  - {label: r2-m-shoki-pp,     group: r2, source: buyee_mercari, keyword: "初期 プレミアムパック", category: "1152"}
+  - {label: r2-m-psa-relief,   group: r2, source: buyee_mercari, keyword: "PSA レリーフ", category: "1152"}
+
+  - {label: r2-y-psa-shoki,    group: r2, source: yahoo_direct, keyword: "PSA 初期",  category: "2084005059"}
+  - {label: r2-y-kantei-shoki, group: r2, source: yahoo_direct, keyword: "鑑定 初期", category: "2084005059"}
+  - {label: r2-y-ars-shoki,    group: r2, source: yahoo_direct, keyword: "ARS 初期",  category: "2084005059"}
+
+  - {label: r2-p-brand-psa,    group: r2, source: paypay_direct, keyword: "PSA",       category: "brand:167476"}
+  - {label: r2-p-brand-kantei, group: r2, source: paypay_direct, keyword: "鑑定",      category: "brand:167476"}
+  - {label: r2-p-psa-shoki,    group: r2, source: paypay_direct, keyword: "PSA 初期",  category: "brand:167476"}
+  - {label: r2-p-brand-only,   group: r2, source: paypay_direct, keyword: "",          category: "brand:167476"}
+
+  - {label: r2-e-1st-psa,      group: r2, source: ebay, keyword: "yugioh PSA 1st edition"}
+  - {label: r2-e-lob-hyphen,   group: r2, source: ebay, keyword: "yu-gi-oh PSA LOB"}
+  - {label: r2-e-sets,         group: r2, source: ebay, keyword: "yugioh PSA MRD SRL LOB"}
+  - {label: r2-e-yugioh-psa,   group: r2, source: ebay, keyword: "yugioh PSA"}
