@@ -285,6 +285,13 @@ class AlphaParams:
     breadth_full_cards: int = 8
     #: 廣度的時間那一半滿分要幾天觀測跨度。
     breadth_full_days: float = 30.0
+    #: **視角 B（模型正規化）專用**：同群裡至少要幾個「別的」賣家才算得出來。
+    #: 3 個是與 `min_comparable` 同一個理由：兩個人比不出「群的水準」，只比得出
+    #: 一次 1v1。**這是顯示用的門檻，不進任何分數**（見 `build_lenses`）。
+    min_cohort_sellers: int = 3
+    #: **視角 B／C 專用**：這個賣家自己至少要有幾筆算得出模型估值的列。
+    #: 沿用 `min_comparable` 的 3——同一個專案裡「幾筆才算證據」不各自發明。
+    min_model_rows: int = 3
 
     @classmethod
     def from_config(cls, cfg: Any) -> AlphaParams:
@@ -296,6 +303,7 @@ class AlphaParams:
             ("shrink_k", float), ("max_depth", float), ("max_consistency", float),
             ("max_breadth", float), ("max_risk_penalty", float),
             ("breadth_full_cards", int), ("breadth_full_days", float),
+            ("min_cohort_sellers", int), ("min_model_rows", int),
         ):
             if f not in b:
                 continue
@@ -1162,6 +1170,448 @@ def _risk_penalty(m: SellerMetrics, p: AlphaParams) -> tuple[float, str]:
 
 
 # ---------------------------------------------------------------------------
+# 三個並排的比價視角（2026-08-06，使用者明確要求）
+# ---------------------------------------------------------------------------
+#: 使用者知道模組頂註那個事故（`ebay:collectiblemore` 模型絕對法 0.57× vs
+#: 同儕相對法 1.59×，**符號相反**），仍然要求把模型視角加回來——因為同儕相對的
+#: 覆蓋率太小（實測 450 個計分點、33 個賣家有分數）。他選的方案是
+#: **「三種都算、並排顯示、不合成」**，不是「用模型補洞」。差別是決定性的：
+#: 前者讓使用者看見三把尺不一致，後者讓一把壞掉的尺偷偷變成答案。
+#:
+#: | 視角 | 算式 | 特性 |
+#: |---|---|---|
+#: | A 同儕相對 | 賣家價 ÷ 同站同卡同版次同稀有度同分數同型態的其他賣家中位 | 最正確、覆蓋最小 |
+#: | B 模型正規化 | 賣家的 (價÷模型估值) 中位 ÷ 同群其他賣家的同一個比值中位 | 模型偏誤相除抵消、覆蓋中等 |
+#: | C 模型絕對 | 賣家的 (價÷模型估值) 中位 | 覆蓋最大、**已知會出錯** |
+#:
+#: **B 的關鍵：模型在這裡是「控制變數」不是「真值」。** 同一個模型偏誤同時出現
+#: 在分子（這個賣家）與分母（同群其他賣家），相除時抵消，留下來的才是賣家自己
+#: 的定價偏離。所以 B 的同群可以放寬成「同站 × 同基準 × 同型態 × 同證據層級」，
+#: **不必是同一張卡**——這正是它解決覆蓋率的機制，也是它與 C 的唯一差別。
+#: 極限見 `test_model_normalized_lens_does_not_cancel_a_bias_that_only_hits_one_seller`：
+#: 群內**非共通**的偏誤 B 抵消不掉，它不是「不受模型影響」。
+LENS_PEER = "peer"
+LENS_MODEL_NORM = "model_norm"
+LENS_MODEL_ABS = "model_abs"
+
+#: 固定順序：由最正確（覆蓋最小）到最不正確（覆蓋最大）。畫面上永遠這個順序，
+#: 讓「越右邊越該懷疑」變成看得懂的視覺慣例。
+LENS_ORDER: tuple[str, ...] = (LENS_PEER, LENS_MODEL_NORM, LENS_MODEL_ABS)
+
+LENS_LABEL: dict[str, str] = {
+    LENS_PEER: "同儕相對",
+    LENS_MODEL_NORM: "模型正規化",
+    LENS_MODEL_ABS: "模型絕對",
+}
+
+#: 每把尺量的到底是什麼——欄名一定要讓人一眼知道這是**不同的尺**。
+LENS_RULER: dict[str, str] = {
+    LENS_PEER: "賣家價 ÷ 同站×同卡×同版次×同稀有度×同分數×同成交型態的其他賣家中位",
+    LENS_MODEL_NORM: "賣家的（價÷模型估值）中位 ÷ 同群其他賣家的（價÷模型估值）中位",
+    LENS_MODEL_ABS: "賣家的（價÷模型估值）中位",
+}
+
+#: 表頭底下那一句話。CLI 與 dashboard 共用同一份字串（工程原則 1：
+#: 同一份資料只能講一種話）。
+LENSES_NOTE = (
+    "三欄是三把不同的尺，**任兩欄都不可相加、不可平均、不可挑一個當最終分數**："
+    "同儕相對（A）兩邊都來自市場、模型偏誤相除抵消，最正確但覆蓋最小；"
+    "模型正規化（B）把模型當控制變數，分子分母同樣受偏誤、群內共通的部分相除抵消，"
+    "覆蓋較大；模型絕對（C）承受模型分段偏誤（實測 L3×Mercari 高估 5.9 倍），"
+    "覆蓋最大但**已知會出錯**。**分數、監控名單、通知一律只讀 A**，B／C 純顯示。"
+)
+
+#: 方向判定的死區：比值落在 1±2% 內一律算「跟大家差不多」，不參與「方向相反」
+#: 的判定。沒有死區的話 0.999× vs 1.001× 會被報成衝突，告警多到看不完
+#: 就等於沒有告警（本專案第五節：量錯東西的指標比沒有指標更糟）。
+SIGN_CONFLICT_DEADBAND = 0.02
+
+DIRECTION_CHEAPER = "cheaper"
+DIRECTION_PRICIER = "pricier"
+DIRECTION_FLAT = "flat"
+
+_DIRECTION_WORD = {
+    DIRECTION_CHEAPER: "便宜",
+    DIRECTION_PRICIER: "貴",
+    DIRECTION_FLAT: "差不多",
+}
+
+
+def _direction_of(ratio: float | None, band: float = SIGN_CONFLICT_DEADBAND) -> str | None:
+    """比值 → 方向。None ＝ 算不出來（**不是** flat）。"""
+    if ratio is None:
+        return None
+    if ratio < 1.0 - band:
+        return DIRECTION_CHEAPER
+    if ratio > 1.0 + band:
+        return DIRECTION_PRICIER
+    return DIRECTION_FLAT
+
+
+@dataclass(slots=True, frozen=True)
+class LensView:
+    """一把尺的答案。`ok=False` 時 `ratio` **必定是 None**（不是 0）。
+
+    0 的語意是「這個賣家開價等於免費」，None 才是「證據不足，我不知道」——
+    與 `SellerScore.total`、`BidCeiling` 同一套慣例。
+    """
+
+    name: str
+    label: str
+    #: 這把尺量的是什麼（一句話，畫面上要跟數字一起出現）。
+    ruler: str
+    ok: bool
+    #: <1 ＝ 比這把尺的基準便宜。None ＝ 證據不足。
+    ratio: float | None = None
+    #: 這個數字是這個賣家的幾筆列撐出來的。
+    n: int = 0
+    #: 分母那一側的規模（A：同儕列數；B：同群其他賣家數；C：0＝分母是模型不是人）。
+    n_pool: int = 0
+    detail: str = ""
+    #: 還缺什麼才算得出來（`ok=False` 時必填）。
+    missing: tuple[str, ...] = ()
+    #: 算得出來、但讀的時候必須知道的前提（一律 `⚠️` 開頭）。
+    caveats: tuple[str, ...] = ()
+    #: 這把尺會不會進分數／監控／通知。**只有 A 是 True**。
+    scoring: bool = False
+
+    @property
+    def direction(self) -> str | None:
+        return _direction_of(self.ratio)
+
+    @property
+    def verdict(self) -> str:
+        """畫面用的一句話（沒有數字時說「證據不足」，絕不說 0）。"""
+        if not self.ok or self.ratio is None:
+            return "證據不足"
+        d = self.direction
+        if d == DIRECTION_FLAT:
+            return f"{self.ratio:.3f}×（跟這把尺的基準差不多）"
+        return (
+            f"{self.ratio:.3f}×（比{'同儕' if self.name == LENS_PEER else '基準'}"
+            f"{_DIRECTION_WORD[d]} {abs(1 - self.ratio) * 100:.1f}%）"
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class SellerLenses:
+    """一個賣家的三把尺，**並排、不合成**。
+
+    刻意沒有任何「總分／平均／最佳」欄位：使用者要的是三個並列的觀點，
+    合成出來的單一數字會把「兩把尺意見相反」這個最有資訊量的事實抹掉。
+    `tests/test_seller_lenses.py::test_no_field_or_method_ever_combines_the_three_lenses`
+    用屬性名黑名單把這件事釘住。
+    """
+
+    seller_key: str
+    peer: LensView
+    model_norm: LensView
+    model_abs: LensView
+    #: A 與 B／C 方向相反時的警示句（含「以同儕相對為準」）。
+    conflicts: tuple[str, ...] = ()
+
+    @property
+    def views(self) -> tuple[LensView, ...]:
+        """固定順序的三把尺。**這是並排不是聚合**——沒有回傳合成值。"""
+        return (self.peer, self.model_norm, self.model_abs)
+
+    @property
+    def has_conflict(self) -> bool:
+        return bool(self.conflicts)
+
+    def view(self, name: str) -> LensView:
+        return {v.name: v for v in self.views}[name]
+
+
+#: B 的同群鍵。**不含卡名**——那正是 B 與 A 的差別（見上方表格）。
+#: 但基準（ask／sold）、成交型態（競標結標／定價）、站台一個都不能少：
+#: 那三個維度混池會讓 B 量到平台差與價格形成機制，不是賣家定價
+#: （模組頂註第 1-2 點、CLAUDE.md 第三節第七項）。
+def _cohort_key(item: SellerItem) -> tuple[Any, ...] | None:
+    r = item.row
+    if r.basis not in SCORING_BASES or r.sale_kind not in SCORING_SALE_KINDS:
+        return None
+    if item.model_ratio is None or item.model_ratio <= 0:
+        return None
+    return (r.site, r.basis, r.sale_kind, item.model_level or "L0")
+
+
+def _cohort_label(key: tuple[Any, ...]) -> str:
+    site, basis, sale_kind, level = key
+    return f"{site}／{basis_kind_label(basis, sale_kind)}／估價層級 {level}"
+
+
+class ModelCohortIndex:
+    """視角 B 的同群池：`(站 × 價格基準 × 成交型態 × 模型證據層級)`。
+
+    每一格存的是 `賣家 → 他在這一格的 (價÷模型估值) 清單`。**先按賣家收斂**
+    是刻意的：群比 A 的同儕寬得多，一個上架量大的賣家很容易在池裡占七成，
+    把所有列倒成一池等於拿那一家的定價當「同群水準」（一人一票，見
+    `test_one_prolific_seller_cannot_dominate_the_cohort_baseline`）。
+    """
+
+    def __init__(
+        self, items_by_seller: dict[str, list[SellerItem]], *, min_sellers: int = 3
+    ) -> None:
+        self.min_sellers = max(1, int(min_sellers))
+        self._pool: dict[tuple[Any, ...], dict[str, list[float]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        for seller_key, items in items_by_seller.items():
+            for item in items:
+                key = _cohort_key(item)
+                if key is not None:
+                    self._pool[key][seller_key].append(float(item.model_ratio or 0.0))
+
+    def cohorts_of(self, seller_key: str) -> list[dict[str, Any]]:
+        """這個賣家踩到的每一格，連同「同群其他賣家」的規模與基準。
+
+        回傳每一格都帶 `ok`：不足 `min_sellers` 的格子**也回**，因為
+        「差幾個賣家才算得出來」是使用者要看的東西（缺什麼要說得出來）。
+        """
+        out: list[dict[str, Any]] = []
+        for key, by_seller in self._pool.items():
+            own = by_seller.get(seller_key)
+            if not own:
+                continue
+            others = {k: v for k, v in by_seller.items() if k != seller_key}
+            own_med = statistics.median(own)
+            peer_meds = sorted(statistics.median(v) for v in others.values())
+            ok = len(others) >= self.min_sellers and bool(peer_meds)
+            base = statistics.median(peer_meds) if peer_meds else None
+            out.append({
+                "key": key,
+                "label": _cohort_label(key),
+                "ok": ok and bool(base and base > 0),
+                "own_n": len(own),
+                "own_median": own_med,
+                "peer_sellers": len(others),
+                "peer_median": base,
+                "ratio": (own_med / base) if (ok and base and base > 0) else None,
+            })
+        out.sort(key=lambda c: (-c["own_n"], c["label"]))
+        return out
+
+
+def _peer_lens(m: SellerMetrics, p: AlphaParams) -> LensView:
+    """視角 A：**現有指標的純視圖，算法一個字都沒動。**
+
+    閘門刻意與 `score_seller` 完全同一道：兩個數字若各有一套門檻，畫面上的
+    「算得出 A 的賣家數」與排行榜長度會安靜地對不起來（工程原則 1）。
+    """
+    missing: list[str] = []
+    if m.n_comparable < p.min_comparable:
+        missing.append(
+            f"可比標的只有 {m.n_comparable} 筆（門檻 {p.min_comparable} 筆）"
+            "——缺的是：同一張卡同版次同分數、同站同價格基準的其他賣家標的進到帳本"
+        )
+    if m.n_distinct_cards < p.min_distinct_cards:
+        missing.append(
+            f"可比標的只涵蓋 {m.n_distinct_cards} 張相異卡（門檻 {p.min_distinct_cards} 張）"
+        )
+    if missing or m.discount_ratio_median is None:
+        if m.discount_ratio_median is None and not missing:
+            missing.append("一筆同儕都湊不出來")
+        return LensView(
+            name=LENS_PEER, label=LENS_LABEL[LENS_PEER], ruler=LENS_RULER[LENS_PEER],
+            ok=False, ratio=None, n=m.n_comparable, missing=tuple(missing),
+            detail="同儕湊不齊 → **不退回模型頂替**（那正是 CLAUDE.md 第四節的事故）",
+            scoring=True,
+        )
+    caveats: list[str] = []
+    if m.peer_seller_pool <= 1:
+        caveats.append(
+            f"⚠️ 全部同儕只來自 {m.peer_seller_pool} 個賣家——這是一次 1v1 比價，"
+            "對方自己偏貴就會讓這個數字是假的"
+        )
+    return LensView(
+        name=LENS_PEER, label=LENS_LABEL[LENS_PEER], ruler=LENS_RULER[LENS_PEER],
+        ok=True, ratio=m.discount_ratio_median, n=m.n_comparable,
+        n_pool=m.peer_seller_pool,
+        detail=(
+            f"可比 {m.n_comparable} 筆／{m.n_distinct_cards} 張相異卡，"
+            f"同儕來自 {m.peer_seller_pool} 個已知賣家；"
+            f"P25/P75 {m.discount_ratio_p25:.2f}／{m.discount_ratio_p75:.2f}"
+        ),
+        caveats=tuple(caveats),
+        scoring=True,
+    )
+
+
+def _model_norm_lens(
+    m: SellerMetrics,
+    cohorts: list[dict[str, Any]],
+    p: AlphaParams,
+    *,
+    sites_without_comps: set[str],
+) -> LensView:
+    """視角 B：模型正規化。**模型是控制變數，不是真值。**"""
+    label, ruler = LENS_LABEL[LENS_MODEL_NORM], LENS_RULER[LENS_MODEL_NORM]
+    usable = [c for c in cohorts if c["ok"] and c["ratio"] and c["ratio"] > 0]
+    own_n = sum(c["own_n"] for c in usable)
+
+    if not cohorts:
+        return LensView(
+            name=LENS_MODEL_NORM, label=label, ruler=ruler, ok=False, ratio=None,
+            missing=(
+                "這個賣家沒有任何「算得出模型估值 ＋ 可計分基準 ＋ 型態已知」的列"
+                "——缺的是：模型估得出這些卡（卡名比對得到、有同稀有度同分數的成交），"
+                "或這個賣家上架可計分基準（定價／成交價）的標的",
+            ),
+            detail="沒有列進得了同群池",
+        )
+    if not usable:
+        best = max(cohorts, key=lambda c: c["peer_sellers"])
+        return LensView(
+            name=LENS_MODEL_NORM, label=label, ruler=ruler, ok=False, ratio=None,
+            n=sum(c["own_n"] for c in cohorts),
+            n_pool=best["peer_sellers"],
+            missing=(
+                f"最大的同群（{best['label']}）裡只有 {best['peer_sellers']} 個"
+                f"其他賣家（門檻 {p.min_cohort_sellers} 個）"
+                "——缺的是：同站、同價格基準、同成交型態、同估價層級的其他賣家"
+                "有算得出模型估值的標的進到帳本",
+            ),
+            detail=f"踩到 {len(cohorts)} 個同群，沒有一個湊得到 {p.min_cohort_sellers} 個其他賣家",
+        )
+    if own_n < p.min_model_rows:
+        return LensView(
+            name=LENS_MODEL_NORM, label=label, ruler=ruler, ok=False, ratio=None,
+            n=own_n, n_pool=sum(c["peer_sellers"] for c in usable),
+            missing=(
+                f"這個賣家在湊得齊同群的格子裡只有 {own_n} 筆列"
+                f"（門檻 {p.min_model_rows} 筆）",
+            ),
+            detail=f"{len(usable)} 個同群湊得齊，但自己的樣本太少",
+        )
+
+    ratios = sorted(c["ratio"] for c in usable)
+    ratio = statistics.median(ratios)
+    peer_sellers = sum(c["peer_sellers"] for c in usable)
+
+    caveats = [
+        "⚠️ 模型在這把尺裡是**控制變數不是真值**：分子（這個賣家）與分母"
+        "（同群其他賣家）承受同一個模型偏誤，**群內共通**的那部分在相除時抵消。"
+        "群內**不共通**的偏誤（例如模型只高估這個賣家在賣的那幾張卡）抵消不掉"
+        "——B 不是「不受模型影響」，只是比 C 少受一層。",
+    ]
+    if len(usable) > 1:
+        per_cohort = "；".join(
+            "{}…{:.2f}×".format(c["label"], c["ratio"]) for c in usable[:3]
+        )
+        caveats.append(
+            f"⚠️ 這個數字是 {len(usable)} 個同群各自算完再取中位（一群一票），"
+            f"不是把所有列倒成一池：{per_cohort}"
+        )
+    if m.site in sites_without_comps:
+        caveats.append(
+            f"⚠️ comps 表裡一筆 {m.site} 成交都沒有，模型的平台係數對這一站根本"
+            "估不出來——但那是**整站共通**的偏誤，在同群相除時抵消（這正是 B 比 C "
+            "可信的地方）；仍然無法抵消卡與卡之間的差異偏誤"
+        )
+    if m.model_n < m.n_rows:
+        caveats.append(
+            f"⚠️ 可得性：這個賣家 {m.n_rows} 筆列裡只有 {m.model_n} 筆算得出模型估值，"
+            "估不出來的**不計入**（不是當成 1.0×）"
+        )
+
+    return LensView(
+        name=LENS_MODEL_NORM, label=label, ruler=ruler, ok=True, ratio=ratio,
+        n=own_n, n_pool=peer_sellers,
+        detail=(
+            f"{len(usable)} 個同群（{'、'.join(c['label'] for c in usable[:2])}"
+            f"{'…' if len(usable) > 2 else ''}）、自己 {own_n} 筆、"
+            f"同群其他賣家 {peer_sellers} 個（去重前計次）"
+        ),
+        caveats=tuple(caveats),
+    )
+
+
+def _model_abs_lens(
+    m: SellerMetrics, p: AlphaParams, *, sites_without_comps: set[str]
+) -> LensView:
+    """視角 C：模型絕對。**這就是出過事的做法**，做出來並把破口標清楚。"""
+    label, ruler = LENS_LABEL[LENS_MODEL_ABS], LENS_RULER[LENS_MODEL_ABS]
+    if m.model_ratio_median is None or m.model_n < p.min_model_rows:
+        return LensView(
+            name=LENS_MODEL_ABS, label=label, ruler=ruler, ok=False, ratio=None,
+            n=m.model_n,
+            missing=(
+                f"只有 {m.model_n} 筆列算得出模型估值（門檻 {p.min_model_rows} 筆）"
+                "——缺的是：卡名比對得到、且同稀有度同分數的成交進到 comps",
+            ),
+            detail="模型估不出來的標的不計入（不是當成 1.0×）",
+        )
+    caveats = [
+        "⚠️ **這把尺已知會出錯**：模型有分段偏誤（實測 L3×Mercari 那個切片高估 "
+        "5.9 倍），任何專賣便宜普卡的賣家在這裡都會長得像持續低於市場價。"
+        "CLAUDE.md 第四節那個事故就是這個數字造成的。",
+    ]
+    if m.site in sites_without_comps:
+        caveats.append(
+            f"⚠️ comps 表裡**一筆 {m.site} 成交都沒有** → 模型的平台係數對這一站"
+            "根本估不出來，這個數字的**方向都不可信**（`ebay:collectiblemore` "
+            "當初就是這樣被讀成 alpha 的）"
+        )
+    if m.model_n < m.n_rows:
+        caveats.append(
+            f"⚠️ 可得性：這個賣家 {m.n_rows} 筆列裡只有 {m.model_n} 筆算得出模型估值，"
+            "估不出來的**不計入**"
+        )
+    return LensView(
+        name=LENS_MODEL_ABS, label=label, ruler=ruler, ok=True,
+        ratio=m.model_ratio_median, n=m.model_n,
+        detail=f"{m.model_n}/{m.n_rows} 筆算得出模型估值，取中位；分母是模型不是人",
+        caveats=tuple(caveats),
+    )
+
+
+def _sign_conflicts(peer: LensView, others: tuple[LensView, ...]) -> tuple[str, ...]:
+    """A 與 B／C 方向相反 → 大聲標出來，並且**寫出以 A 為準**。
+
+    只在兩邊都算得出來、且都不在死區內時才算衝突（見 `SIGN_CONFLICT_DEADBAND`）。
+    """
+    base = peer.direction
+    if not peer.ok or base is None or base == DIRECTION_FLAT:
+        return ()
+    out: list[str] = []
+    for other in others:
+        d = other.direction
+        if not other.ok or d is None or d == DIRECTION_FLAT or d == base:
+            continue
+        out.append(
+            f"⚠️ **方向相反**：{peer.label} 說比同儕{_DIRECTION_WORD[base]} "
+            f"{abs(1 - (peer.ratio or 1)) * 100:.0f}%（{peer.ratio:.3f}×），"
+            f"{other.label} 說比基準{_DIRECTION_WORD[d]} "
+            f"{abs(1 - (other.ratio or 1)) * 100:.0f}%（{other.ratio:.3f}×）"
+            f"——**以同儕相對為準**：{other.label}的分母是我們自己的模型，"
+            "而模型有已知的分段偏誤（`ebay:collectiblemore` 就是這樣被讀成 alpha 的）。"
+            "分數、監控名單、通知都只讀同儕相對。"
+        )
+    return tuple(out)
+
+
+def build_lenses(
+    m: SellerMetrics,
+    *,
+    cohorts: ModelCohortIndex | None = None,
+    params: AlphaParams | None = None,
+    sites_without_comps: set[str] | None = None,
+) -> SellerLenses:
+    """一個賣家的三把尺。**並排，不合成**（見 `SellerLenses` 的 docstring）。"""
+    p = params or AlphaParams()
+    sites = sites_without_comps or set()
+    peer = _peer_lens(m, p)
+    cohort_rows = cohorts.cohorts_of(m.seller_key) if cohorts is not None else []
+    norm = _model_norm_lens(m, cohort_rows, p, sites_without_comps=sites)
+    absolute = _model_abs_lens(m, p, sites_without_comps=sites)
+    return SellerLenses(
+        seller_key=m.seller_key, peer=peer, model_norm=norm, model_abs=absolute,
+        conflicts=_sign_conflicts(peer, (norm, absolute)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 全量分析
 # ---------------------------------------------------------------------------
 @dataclass(slots=True)
@@ -1170,6 +1620,10 @@ class AlphaReport:
 
     metrics: dict[str, SellerMetrics] = field(default_factory=dict)
     scores: dict[str, SellerScore] = field(default_factory=dict)
+    #: 三個並排的比價視角（A 同儕相對／B 模型正規化／C 模型絕對）。
+    #: **純顯示**：`scores` 一律只讀 A，`ranked()`／`sync_auto_watch` 也是。
+    #: 沒帶 `valuator` 跑的話 B／C 會誠實地回「證據不足」，不會是 0。
+    lenses: dict[str, SellerLenses] = field(default_factory=dict)
     coverage: dict[str, Any] = field(default_factory=dict)
     params: AlphaParams = field(default_factory=AlphaParams)
 
@@ -1227,12 +1681,24 @@ def analyze(
     ledger = {r["seller_key"]: r for r in store.list_sellers(limit=100000)}
     obs_rows = {r["key"]: r for r in store.listing_obs(limit=50000)}
 
+    #: **哪些站在 comps 表裡一筆成交都沒有**——那些站的平台係數模型根本估不出來
+    #: （eBay 就是這樣，見模組頂註）。這件事實測出來、不寫死站名：寫死的話
+    #: 資料補進來之後警語會繼續騙人，而站台名單變了也不會有人記得改。
+    sites_seen = {r.site for r in rows if r.site}
+    sites_with_comps = {r.site for r in rows if r.source_table == "comps" and r.site}
+    sites_without_comps = sites_seen - sites_with_comps
+
     report = AlphaReport(params=p)
+    cohorts = ModelCohortIndex(by_seller, min_sellers=p.min_cohort_sellers)
     for key, items in by_seller.items():
         m = seller_metrics(key, items, ledger=ledger.get(key), obs_rows=obs_rows)
         report.metrics[key] = m
         report.scores[key] = score_seller(m, p)
+        report.lenses[key] = build_lenses(
+            m, cohorts=cohorts, params=p, sites_without_comps=sites_without_comps
+        )
     report.coverage = coverage_report(rows, report, p)
+    report.coverage["sites_without_comps"] = sorted(sites_without_comps)
     return report
 
 
@@ -1278,6 +1744,19 @@ def coverage_report(
             )
         },
         "stratum_only_items": len(stratum_only),
+        #: **三把尺各自算得出幾個賣家**（A／B／C）。三個數字分開報、絕不相加：
+        #: 它們回答的是「這把尺看得到多少人」，不是「有多少人便宜」。
+        #: B 的數字如果沒有明顯高於 A，那本身就是重要發現（代表放寬同群
+        #: 沒有換到覆蓋率），必須看得見而不是被藏在平均裡。
+        "lens_coverage": {
+            name: sum(1 for lz in report.lenses.values() if lz.view(name).ok)
+            for name in LENS_ORDER
+        },
+        #: A 與 B／C 方向相反的賣家數。**這個數字越大越該懷疑模型，不是懷疑 A。**
+        "lens_sign_conflicts": sum(1 for lz in report.lenses.values() if lz.has_conflict),
+        "lens_note": LENSES_NOTE,
+        "min_cohort_sellers": params.min_cohort_sellers,
+        "min_model_rows": params.min_model_rows,
         "min_comparable": params.min_comparable,
         "min_distinct_cards": params.min_distinct_cards,
         "observation_span_days": max(
@@ -1323,7 +1802,18 @@ __all__ = [
     "BASIS_BID",
     "BASIS_LABEL",
     "BASIS_SOLD",
+    "DIRECTION_CHEAPER",
+    "DIRECTION_FLAT",
+    "DIRECTION_PRICIER",
+    "LENSES_NOTE",
+    "LENS_LABEL",
+    "LENS_MODEL_ABS",
+    "LENS_MODEL_NORM",
+    "LENS_ORDER",
+    "LENS_PEER",
+    "LENS_RULER",
     "PERSISTENCE_MIN_DAYS",
+    "SIGN_CONFLICT_DEADBAND",
     "SALE_AUCTION",
     "SALE_FIXED",
     "SALE_KIND_LABEL",
@@ -1337,16 +1827,20 @@ __all__ = [
     "TIER_STRICT",
     "AlphaParams",
     "AlphaReport",
+    "LensView",
     "MarketRow",
+    "ModelCohortIndex",
     "PeerIndex",
     "PeerMatch",
     "ScoreComponent",
     "SellerItem",
+    "SellerLenses",
     "SellerMetrics",
     "SellerScore",
     "analyze",
     "basis_kind_label",
     "basis_of",
+    "build_lenses",
     "build_seller_items",
     "sale_kind_of_price_kind",
     "coverage_report",
