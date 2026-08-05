@@ -229,7 +229,14 @@ class SupplyFit:
 
 
 def _percentile_within(raw: float, pool: list[float]) -> float:
-    """站內百分位：比我小的有幾個 / (可比的人數 - 1)。
+    """站內百分位（midrank）：(比我小的人數 + 0.5 * 與我同分的其他人數) / (可比的人數 - 1)。
+
+    用「嚴格小於」計數會讓一整組同分的人全部拿到該組最低的百分位——
+    那是「這組最差」的語意，但事實是「這組彼此一樣」，且壓低的程度
+    取決於平手組多大而非賣家本身（實測 ebay 的 grade_profile 有 5 人
+    平手組、yahoo/paypay 各有 8 人平手組）。標準修法是 midrank：
+    把「與我同分的其他人」算半個名次，讓平手組整組落在組內中點——
+    全部同分時每個人都拿 50.0，是這個算式的自然結果，不是另外特判。
 
     只有我一個人可得這個維度時回 100.0——沒有人可以比，硬給 0 會把
     「唯一有這項證據的人」讀成「這方面最差」，方向剛好相反。
@@ -237,7 +244,8 @@ def _percentile_within(raw: float, pool: list[float]) -> float:
     if len(pool) <= 1:
         return 100.0
     n_below = sum(1 for other in pool if other < raw)
-    return 100.0 * n_below / (len(pool) - 1)
+    n_tied_others = sum(1 for other in pool if other == raw) - 1
+    return 100.0 * (n_below + 0.5 * n_tied_others) / (len(pool) - 1)
 
 
 def supply_fit_all(

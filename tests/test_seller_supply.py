@@ -199,3 +199,46 @@ def test_thin_evidence_is_flagged_in_caveats():
     assert fit.ok is True and fit.n_dimensions_used == 2
     assert any("2/5" in c for c in fit.caveats)
     assert all(c.startswith("⚠️") for c in fit.caveats)
+
+
+def test_tied_sellers_land_in_the_middle_not_at_the_bottom():
+    """一群人在某維度完全同分時，整組該落在中點——
+    用「嚴格小於」計數會讓他們全部拿 0，那是「這組最差」的語意，
+    但事實是「這組彼此一樣」。實測 ebay 的 grade_profile 有 5 人平手組。"""
+    ms = [metrics(seller_key=f"ebay:s{i}", site="ebay", n_rows=i,
+                  observation_span_days=float(i),
+                  grade_mix={"PSA 8": 3, "PSA 10": 3},   # 每個人都是 0.5，全平手
+                  listing_hour_hist={20: 5}) for i in range(1, 12)]
+    out = supply_fit_all(ms, params=SupplyParams())
+    for fit in out.values():
+        gp = next(d for d in fit.dimensions if d.name == "grade_profile")
+        assert gp.score == pytest.approx(50.0), "全部同分應該落在中點"
+
+
+def test_partial_tie_group_lands_at_its_own_midpoint():
+    """3 人墊底平手 + 1 人在上：墊底那組拿 (0 + 0.5*2)/3 * 100 = 33.3，不是 0。"""
+    tied = [metrics(seller_key=f"ebay:t{i}", site="ebay", n_rows=1,
+                    observation_span_days=1.0, grade_mix={"PSA 10": 3},
+                    listing_hour_hist={20: 5}) for i in range(3)]
+    higher = [metrics(seller_key=f"ebay:h{i}", site="ebay", n_rows=1,
+                      observation_span_days=1.0, grade_mix={"PSA 8": 3},
+                      listing_hour_hist={20: 5}) for i in range(8)]
+    out = supply_fit_all(tied + higher, params=SupplyParams())
+    lo = next(d for d in out["ebay:t0"].dimensions if d.name == "grade_profile")
+    hi = next(d for d in out["ebay:h0"].dimensions if d.name == "grade_profile")
+    assert lo.score == pytest.approx(100 * (0 + 0.5 * 2) / 10)   # 10.0
+    assert hi.score == pytest.approx(100 * (3 + 0.5 * 7) / 10)   # 65.0
+    assert lo.score < hi.score
+
+
+def test_single_seller_in_pool_still_scores_100():
+    """池只有一個人時給 100——硬給 0 會把「唯一有這項證據的人」讀成「這方面最差」。"""
+    ms = [metrics(seller_key="ebay:only", site="ebay", n_rows=5,
+                  observation_span_days=3.0, series_top1_share=0.9, series_known_n=5,
+                  grade_mix={"PSA 8": 3}, listing_hour_hist={20: 5})]
+    ms += [metrics(seller_key=f"ebay:s{i}", site="ebay", n_rows=1,
+                   observation_span_days=1.0, grade_mix={"PSA 8": 3},
+                   listing_hour_hist={20: 5}) for i in range(10)]
+    out = supply_fit_all(ms, params=SupplyParams())
+    sf = next(d for d in out["ebay:only"].dimensions if d.name == "series_focus")
+    assert sf.available is True and sf.score == pytest.approx(100.0)
