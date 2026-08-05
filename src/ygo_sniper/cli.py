@@ -22,10 +22,23 @@ from .config import load_config
 from .costs import breakeven_table
 from .fx import FxRates
 from .pipeline import Pipeline
+from .seller_links import seller_page_url
 from .store import Store
 
 app = typer.Typer(add_completion=False, help="遊戲王 1998-2004 鑑定卡撿漏掃描器")
 console = Console()
+
+
+def _seller_cell(seller_key: str) -> str:
+    """賣家鍵 → rich 表格／console.print 用的文字。
+
+    有原站連結（見 `seller_links.seller_page_url`）就包成
+    `[link=url]key[/link]`——支援的終端機可以直接點開，不支援的就顯示成
+    一般文字，不會壞。未知 site 回 `None`，這裡就印純文字，**不猜連結**：
+    猜錯的連結點下去是 404，比沒有連結更糟（CLAUDE.md 第五節）。
+    """
+    url = seller_page_url(seller_key)
+    return f"[link={url}]{seller_key}[/link]" if url else seller_key
 
 
 @app.command()
@@ -730,7 +743,7 @@ def sellers(
         table.add_column(col)
     for r in rows:
         table.add_row(
-            r["seller_key"],
+            _seller_cell(r["seller_key"]),
             str(r["listing_count"]),
             str(r["sold_count"]),
             str(r["feedback_score"] if r["feedback_score"] is not None else "—"),
@@ -848,14 +861,14 @@ def _print_seller_rank(cfg, store, *, site, limit, show_rejected, sync_watch=Fal
             f"{abbrev.get(c.name, c.name)}{c.points:+.1f}" for c in score.components
         )
         t.add_row(
-            score.seller_key, f"{score.total:.1f}", str(m.n_comparable),
+            _seller_cell(score.seller_key), f"{score.total:.1f}", str(m.n_comparable),
             str(m.n_distinct_cards), f"{m.discount_ratio_median:.3f}×",
             f"{m.discount_ratio_p25:.2f}/{m.discount_ratio_p75:.2f}",
             "+".join(sorted(set(m.tier_counts) & {"T1", "T2"})) or "—", contrib,
         )
     console.print(t)
     for score, _m in ranked:
-        console.print(f"[dim]  {score.seller_key}：{score.reason}[/dim]")
+        console.print(f"[dim]  {_seller_cell(score.seller_key)}：{score.reason}[/dim]")
         for cv in score.caveats:
             console.print(f"[yellow]     {cv}[/yellow]")
     if not ranked:
@@ -869,7 +882,7 @@ def _print_seller_rank(cfg, store, *, site, limit, show_rejected, sync_watch=Fal
         )
         for score, m in rej:
             console.print(
-                f"  {score.seller_key}：觀測 {m.n_rows} 列、可比 {m.n_comparable} 筆／"
+                f"  {_seller_cell(score.seller_key)}：觀測 {m.n_rows} 列、可比 {m.n_comparable} 筆／"
                 f"{m.n_distinct_cards} 張相異卡 → "
                 + (score.missing[0].split("——")[0] if score.missing else score.reason)
             )
@@ -945,7 +958,7 @@ def _print_supply_fit(cfg, store, *, site, limit) -> None:
             grade = _supply_dim_raw(fit, "grade_profile")
             series = _supply_dim_raw(fit, "series_focus")
             t.add_row(
-                fit.seller_key,
+                _seller_cell(fit.seller_key),
                 f"{fit.total:.1f}",
                 f"{fit.n_dimensions_used}/{fit.n_dimensions_total}",
                 f"{depth:.0f}" if depth is not None else "—",
@@ -959,7 +972,7 @@ def _print_supply_fit(cfg, store, *, site, limit) -> None:
         n_caveat_rows = min(5, limit)
         for fit in ranked[:n_caveat_rows]:
             if fit.caveats:
-                console.print(f"[dim]  {fit.seller_key}：[/dim]")
+                console.print(f"[dim]  {_seller_cell(fit.seller_key)}：[/dim]")
                 for cv in fit.caveats:
                     console.print(f"[yellow]    {cv}[/yellow]")
 
@@ -994,7 +1007,7 @@ def seller(
         raise typer.Exit(1)
     score = rep.scores[key]
 
-    console.print(f"\n[bold]{key}[/bold]（{m.site}）")
+    console.print(f"\n[bold]{_seller_cell(key)}[/bold]（{m.site}）")
     if score.ok:
         console.print(f"[bold green]Seller Alpha {score.total:.1f} / 100[/bold green]  {score.reason}")
     else:
@@ -1171,7 +1184,7 @@ def watch_seller_list(
         t.add_column(col, overflow="fold")
     for r in rows:
         t.add_row(
-            r["seller_key"],
+            _seller_cell(r["seller_key"]),
             r["source"],
             # 手動加入的賣家**沒有分數**，這裡印「—」而不是 0：
             # 0 會被讀成「這個賣家很差」，事實是「還沒有證據」。

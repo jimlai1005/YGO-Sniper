@@ -50,6 +50,7 @@ from ygo_sniper.scoring import (  # noqa: E402
     overhead_threshold,
     shipping_alert_for_row,
 )
+from ygo_sniper.seller_links import seller_page_url  # noqa: E402
 from ygo_sniper.selling import (  # noqa: E402
     best_round_trip,
     listing_from_signal_row,
@@ -690,6 +691,9 @@ def _supply_fit_dict(fit, alpha_score) -> dict:
     dims = {d.name: (d.raw if d.available else None) for d in fit.dimensions}
     return {
         "seller_key": fit.seller_key,
+        # None ＝ 未知 site（見 seller_links.seller_page_url）：前端顯示純文字，
+        # 不猜 URL——猜錯的連結點下去是 404，比沒有連結更糟。
+        "url": seller_page_url(fit.seller_key),
         "site": fit.site,
         "ok": fit.ok,
         "reason": fit.reason,
@@ -746,6 +750,9 @@ def _supply_fit_block(rep, *, limit: int) -> dict:
 def _score_dict(score) -> dict:
     return {
         "seller_key": score.seller_key,
+        # None ＝ 未知 site（見 seller_links.seller_page_url）：前端顯示純文字，
+        # 不猜 URL——猜錯的連結點下去是 404，比沒有連結更糟。
+        "url": seller_page_url(score.seller_key),
         "ok": score.ok,
         # ⚠️ `ok=False` 時 total 一律 None（不是 0）——0 會被讀成「這個賣家很差」，
         # None 才是「證據不足，我不知道」。前端照這個差別顯示。
@@ -803,6 +810,8 @@ def sellers(limit: int = 50):
     from ygo_sniper.seller_watch import rotation_state
 
     watch_rows = store.list_seller_watch(active_only=False)
+    for r in watch_rows:
+        r["url"] = seller_page_url(r["seller_key"])
     watch_active = {r["seller_key"]: r for r in watch_rows if r["active"]}
     ranked = [
         {**_score_dict(s), "metrics": _metrics_brief(m),
@@ -879,6 +888,9 @@ def seller_detail(seller_key: str, items: int = 40, peers: int = 3):
 
     return {
         "seller_key": seller_key,
+        # None ＝ 未知 site（見 seller_links.seller_page_url）：前端顯示純文字，
+        # 不猜 URL——猜錯的連結點下去是 404，比沒有連結更糟。
+        "url": seller_page_url(seller_key),
         "score": _score_dict(score),
         "metrics": _metrics_brief(m),
         "watch": store.get_seller_watch(seller_key),

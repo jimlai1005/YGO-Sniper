@@ -2098,6 +2098,18 @@ function svWatchTag(w){
   return `<span class="sv-tag ${cls}">${w.source === "manual" ? "手動" : "自動"}·批 ${w.batch}</span>`;
 }
 
+/* 賣家的原站賣場連結（不是 Buyee——見 CLAUDE.md 第五節與
+   seller_links.seller_page_url 的 docstring）。`url` 為 null 代表未知 site
+   （目前表上還沒有的值），這裡就不輸出任何連結，讓那一列維持純文字——
+   猜一個 URL 出來、點下去卻是 404，比沒有連結更糟。放進獨立的
+   `stopPropagation`，避免點到它時把整列的「開啟賣家細節」也一起觸發。 */
+function sellerExtLink(url){
+  return url
+    ? ` <a href="${escapeHtml(url)}" target="_blank" rel="noopener" title="到原站賣場看賣家頁"
+         onclick="event.stopPropagation()">↗</a>`
+    : "";
+}
+
 function svCaveats(list){
   return (list || []).map(c => `<span class="caveat">${escapeHtml(c)}</span>`).join("");
 }
@@ -2137,7 +2149,7 @@ async function loadSellers(){
   const rot = d.rotation || {};
   const wrows = (d.watch || []).filter(w => w.active).map(w => `
     <tr>
-      <td><a href="#" onclick="openSeller('${escapeHtml(w.seller_key)}');return false">${escapeHtml(w.seller_key)}</a></td>
+      <td><a href="#" onclick="openSeller('${escapeHtml(w.seller_key)}');return false">${escapeHtml(w.seller_key)}</a>${sellerExtLink(w.url)}</td>
       <td>${svWatchTag(w)}</td>
       <td>${w.score == null ? `<span class="noscore" title="手動加入的賣家沒有分數——不假裝它有">—</span>` : w.score.toFixed(1)}</td>
       <td>${w.batch}</td>
@@ -2205,7 +2217,7 @@ function svSupplyTable(rows){
     <th>深度</th><th>跨度</th><th>8-9分</th><th>系列</th><th>Alpha</th></tr></thead>`;
   const body = (rows || []).map(f => `
     <tr class="sv-row" onclick="openSeller('${escapeHtml(f.seller_key)}')">
-      <td>${escapeHtml(f.seller_key)}</td>
+      <td>${escapeHtml(f.seller_key)}${sellerExtLink(f.url)}</td>
       <td><b>${f.total.toFixed(1)}</b></td>
       <td>${f.n_dimensions_used}/${f.n_dimensions_total}</td>
       <td>${svSupplyDim(f.dims, "supply_depth")}</td>
@@ -2245,7 +2257,7 @@ function svTable(rows, ranked){
         ${watched ? "移出監控" : "加入監控"}</button>`;
     if(!ranked){
       return `<tr class="sv-row" onclick="openSeller('${escapeHtml(r.seller_key)}')">
-        <td>${escapeHtml(r.seller_key)}</td><td>${m.n_rows}</td>
+        <td>${escapeHtml(r.seller_key)}${sellerExtLink(r.url)}</td><td>${m.n_rows}</td>
         <td>${m.n_comparable}/${m.n_distinct_cards}</td>
         <td style="white-space:normal">${escapeHtml((r.missing||[])[0] || r.reason)}</td>
         <td>${svWatchTag(r.watch)}</td>
@@ -2255,7 +2267,7 @@ function svTable(rows, ranked){
     const cheaper = d != null && d < 1;
     const w = d == null ? 0 : Math.min(100, Math.abs(1 - d) * 100);
     return `<tr class="sv-row" onclick="openSeller('${escapeHtml(r.seller_key)}')">
-      <td>${escapeHtml(r.seller_key)}</td>
+      <td>${escapeHtml(r.seller_key)}${sellerExtLink(r.url)}</td>
       <td>${svScore(r)}</td>
       <td><div class="row" style="gap:6px">
         <span class="pw">${d == null ? "–" : d.toFixed(3) + "×"}</span>
@@ -2329,6 +2341,7 @@ async function openSeller(key){
       <span class="pill">可比 <b>${sc.n_comparable}</b> 筆／<b>${sc.n_distinct_cards}</b> 張相異卡</span>
       <span class="pill">觀測列 <b>${m.n_rows}</b>（定價 ${m.n_ask}·成交 ${m.n_sold}·競標中出價 ${m.n_bid_excluded} 不入指標）</span>
       <span class="pill">同儕來源賣家 <b>${m.peer_seller_pool}</b></span>
+      ${d.url ? `<a class="pill" href="${escapeHtml(d.url)}" target="_blank" rel="noopener">前往原站賣場 ↗</a>` : ""}
       ${w ? `<span class="pill">監控中 ${svWatchTag(w)}</span>` : ""}
       <button onclick="toggleWatch('${escapeHtml(key)}','${w && w.active ? "remove" : "add"}')">
         ${w && w.active ? "移出監控" : "加入監控"}</button>
