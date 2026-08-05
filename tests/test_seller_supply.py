@@ -242,3 +242,44 @@ def test_single_seller_in_pool_still_scores_100():
     out = supply_fit_all(ms, params=SupplyParams())
     sf = next(d for d in out["ebay:only"].dimensions if d.name == "series_focus")
     assert sf.available is True and sf.score == pytest.approx(100.0)
+
+
+import inspect
+
+from ygo_sniper import seller_supply
+
+
+def test_supply_module_never_imports_the_valuator_or_alpha_score():
+    """Supply Fit 不准碰估值模型，也不准讀 Alpha 的分數——它只吃 SellerMetrics
+    的原始量。這是結構性的，不是靠人記得。
+
+    CLAUDE.md 第四節:拿自己的模型當尺去量別人，會把自己的分段偏誤讀成
+    對方的 alpha(實測同一賣家,模型絕對法 0.57x vs 同儕相對法 1.59x,符號相反)。
+    Alpha 已經守住了這條線;Supply Fit 不可以從側門把模型放回來。
+    """
+    src = inspect.getsource(seller_supply)
+    for banned in ("valuator", "Valuator", "SellerScore", "discount_ratio", "model_ratio"):
+        assert banned not in src, f"seller_supply 不該提到 {banned}"
+
+
+def test_supply_fit_of_a_seller_with_zero_peers_is_still_scoreable():
+    """整個功能的存在理由:零可比(Alpha 算不出來)的賣家必須算得出 Supply Fit。
+
+    否則就回到雞生蛋——要有 Alpha 才進監控名單、進名單才長得出在架觀測、
+    有在架觀測才湊得出同儕、湊得出同儕才算得出 Alpha。
+    """
+    ms = [metrics(seller_key=f"y:s{i}", site="buyee_yahoo", n_rows=i,
+                  n_comparable=0, n_distinct_cards=0,      # 零可比:Alpha 給不出分數
+                  observation_span_days=float(i),
+                  grade_mix={"PSA 8": 3}, listing_hour_hist={20: 5})
+          for i in range(1, 12)]
+    out = supply_fit_all(ms, params=SupplyParams())
+    assert sum(1 for f in out.values() if f.ok) >= 10
+
+
+def test_supply_fit_has_no_field_that_could_be_read_as_a_discount():
+    """欄位名本身也是介面——不准出現看起來像「便宜多少」的欄位,
+    否則下一個人會很自然地把它跟 Alpha 的折價欄位放在一起相加。"""
+    fields = set(SupplyFit.__dataclass_fields__)
+    for banned in ("discount", "ratio", "alpha", "cheap", "peer"):
+        assert not any(banned in f for f in fields), f"SupplyFit 有欄位含 {banned}"
