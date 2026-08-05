@@ -78,8 +78,11 @@
 - eBay **沒有成交價可用**（Marketplace Insights API 403、賣家頁 sold 篩選
   403，見 `history` 模組頂註）。eBay 賣家的持續性只能靠在架帳慢慢累積，
   而在架帳的跨度目前只有 2 天上下——**不可以拿在架價冒充成交價來補**。
-- 賣家評價只有 eBay／PayPay 有；Yahoo 賣家頁的評價還沒抓（open item），
-  那些賣家的風險維度是**未知**，不是「沒問題」——`risk_known=False`。
+- Yahoo 賣家頁評價擷取已完成（2026-08-04 前後接上：`yahoo.seller_feedback`
+  → `venue_study.listing_row` → `sellers.feedback_pct`），但覆蓋率跟著監控
+  輪替走，不是全量賣家都有——2026-08-05 實測：8 個監控中的 Yahoo 賣家裡
+  4 個已抓到、其餘還沒輪到。沒被監控的 Yahoo 賣家（以及還沒輪到的那些）
+  風險維度仍是**未知**，不是「沒問題」——`risk_known=False`。
 """
 
 from __future__ import annotations
@@ -307,9 +310,10 @@ def _set_series_of(title: str | None) -> str | None:
 def _card_name_of(index: CardIndex | None, title: str | None, fallback: str | None) -> str | None:
     """標題 → 目標年代卡名。**卡名在這裡才決定**（與 `valuation.obs_from_comps` 同哲學）。
 
-    `comps.card_name` 只是物化快取（2265 筆裡只有 892 筆有值），
-    而 `listing_obs.card_name` 目前 **0/416**——只靠欄位會讓在架側整個算不出來。
-    實測用 `CardIndex` 現場比對：listing_obs 386/416、comps 1889/2265 有卡名。
+    `comps.card_name` 只是物化快取（2026-08-05 實測 2554 筆裡只有 892 筆有值），
+    而 `listing_obs.card_name` 目前 **0/542**——只靠欄位會讓在架側整個算不出來。
+    2026-08-05 實測用 `CardIndex` 現場比對：listing_obs 506/542、
+    comps 2346/2554 有卡名。
     """
     if index is not None and index.available:
         m = index.match(title or "")
@@ -804,7 +808,8 @@ def seller_metrics(
     m.risk_known = m.feedback_pct is not None or m.feedback_score is not None
     if not m.risk_known:
         m.risk_notes.append(
-            f"{site} 沒有賣家評價（Yahoo 賣家頁的評價尚未抓，open item）"
+            f"{site} 沒有賣家評價（Yahoo 賣家頁評價擷取已支援，"
+            "但這個賣家還沒被監控輪替掃到，或站台本身沒有評價可讀）"
             "——風險維度是**未知**，不是「沒問題」"
         )
     return m
@@ -1049,8 +1054,8 @@ def _risk_penalty(m: SellerMetrics, p: AlphaParams) -> tuple[float, str]:
             parts.append(f"評價筆數 {m.feedback_score}（<50，新帳號）→ -5")
     else:
         parts.append(
-            f"⚠️ {m.site} 沒有賣家評價可讀（Yahoo 賣家頁尚未抓，open item）"
-            "→ 風險**未知**，不扣分但不代表安全"
+            f"⚠️ {m.site} 沒有賣家評價可讀（Yahoo 賣家頁評價擷取已支援，"
+            "覆蓋率仍限監控輪替掃過的賣家）→ 風險**未知**，不扣分但不代表安全"
         )
     return min(penalty, p.max_risk_penalty), "；".join(parts)
 

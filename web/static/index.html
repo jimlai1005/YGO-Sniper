@@ -2155,11 +2155,13 @@ async function loadSellers(){
         ${escapeHtml(String(rot.claimed_at||"").slice(0,16).replace("T"," "))}</span>` : ""}
       ${p.enabled ? "" : `<span class="pill" style="color:var(--danger)">監控掃描已關閉</span>`}
     </div>
+    <!-- 2026-08-05 實測：自動入選已有 16 個（Alpha 軌）＋ manual 1 個，
+         下面這句只是名單真的清空時的 fallback 文案，實務上很少出現。 -->
     <div class="scroll-x" style="margin-top:8px"><table><thead><tr>
       <th>賣家</th><th>來源</th><th>分數</th><th>批次</th><th>上次掃描</th><th>上次結果</th><th></th>
     </tr></thead><tbody>${wrows || `<tr><td colspan="7">名單是空的
       —— 在下面的排行榜按「加入監控」，或用 <code>ygo-sniper watch-seller add &lt;key&gt;</code>。
-      自動門檻目前只選得出 1 個賣家，所以手動加入是常態不是例外。</td></tr>`}</tbody></table></div>`;
+      自動入選（Alpha 軌 ＋ 供給軌）與手動加入都會補進來。</td></tr>`}</tbody></table></div>`;
 
   document.getElementById("sv-rank").innerHTML = svTable(d.ranked, true);
   document.getElementById("sv-rejected").innerHTML = svTable(d.rejected, false);
