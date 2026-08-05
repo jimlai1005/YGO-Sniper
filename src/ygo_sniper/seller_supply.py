@@ -42,11 +42,6 @@ class SupplyDimension:
         return cls(name=name, available=False, missing=missing)
 
 
-#: 這些站台拿不到歷史成交（例：eBay 的 Marketplace Insights API 回 403），
-#: 所以這幾站的 `n_sold` 是「我們沒能力量」，不是「賣家真的沒賣過」。
-#: 誤把兩者混為一談 = CLAUDE.md 第五節的靜默失敗（0 筆要能分辨成因）。
-SITES_WITHOUT_SOLD_HISTORY = frozenset({"ebay"})
-
 #: 8-9 分是性價比帶的假設——PSA10 溢價通常很高、7 分以下品相風險上升，
 #: 賣家常態性供應 8-9 分代表「不追頂級溢價、也不清倉低品相貨」。
 #: **這是未經驗證的假設，不是已驗證的事實**，之後有校準資料要重看這個區間。
@@ -54,44 +49,62 @@ GRADE_PROFILE_SWEET_SPOT_MIN = 8.0
 GRADE_PROFILE_SWEET_SPOT_MAX = 9.5
 
 
-def dim_sold_depth(m: SellerMetrics) -> SupplyDimension:
-    """這個賣家能不能被驗證「真的賣得出去」——用成交筆數，不是在架筆數。
-
-    站台可得性是這個維度的核心：eBay 的 Marketplace Insights API 對這個帳號
-    回 403，所以 eBay 賣家的 `n_sold` 恆為 0，但那是「我們拿不到」不是
-    「他沒賣過」。用 `m.site` 判斷可得性，絕不用 `n_sold == 0` 判斷——
-    後者會把兩種完全不同的事實（未知 vs 已知為零）混成同一個數字，
-    這正是 CLAUDE.md 第五節點名的靜默失敗。
-    """
-    if m.site in SITES_WITHOUT_SOLD_HISTORY:
-        return SupplyDimension.unavailable(
-            "sold_depth",
-            "eBay 拿不到歷史成交（Marketplace Insights API 403），"
-            "成交數是未知不是 0",
-        )
-    return SupplyDimension.of(
-        "sold_depth",
-        raw=float(m.n_sold),
-        detail=f"成交 {m.n_sold} 筆（{m.site} 可得歷史成交）",
-    )
-
-
-def dim_supply_scale(m: SellerMetrics) -> SupplyDimension:
+def dim_supply_depth(m: SellerMetrics) -> SupplyDimension:
     """這個賣家的供給規模——用累積觀測列數，不是「件/週」這種速率。
 
     速率在這個資料集上會產生垃圾數字：全域在架帳的觀測跨度中位數只有
-    3.2 天，且約 20% 的賣家 `observation_span_days` 是 0——除以一個接近
-    0 的跨度，任何微小樣本都會爆出離譜的高速率。累積量沒有這個除零風險，
+    3.2 天，且大量賣家 `observation_span_days` 是 0——除以一個接近 0 的
+    跨度，任何微小樣本都會爆出離譜的高速率。累積量沒有這個除零風險，
     且與「盯這個賣家未來會不會持續有貨」的問題更直接對應。恆可得
     （即使一列觀測都沒有，0 本身也是有意義的答案）。
+
+    **`n_rows` 的組成隨站台而異，這個數字只能站內比，不能跨站比**：
+    buyee_yahoo / paypay 的列多半來自挖回來的成交帳（觀測跨度可達
+    182 天），eBay 的列則幾乎只有在架（跨度僅 3.2 天）。同一個 117
+    在兩站背後的供給密度完全不是一回事。跨站可比性由 Task 3 的
+    站內百分位負責，這裡不處理。
+
+    （這裡原本拆成成交筆數與觀測列數兩個維度，但實測 corr(n_sold,
+    n_rows)=0.989、87% 的賣家兩者相等——多數賣家只出現在成交帳，
+    從未被看到在架，`n_rows == n_sold`。當成兩個獨立維度等於把同一個
+    訊號算兩次，見 CLAUDE.md 第三節，故合併為這個單一維度。）
     """
     return SupplyDimension.of(
-        "supply_scale",
+        "supply_depth",
         raw=float(m.n_rows),
         detail=(
             f"累積觀測 {m.n_rows} 列（跨度 {m.observation_span_days:.1f} 天"
             "——這是累積量不是速率）"
         ),
+    )
+
+
+def dim_persistence(m: SellerMetrics) -> SupplyDimension:
+    """這個賣家是不是持續在賣，還是我們只是恰好瞄到一個時間點。
+
+    `dim_supply_depth` 量的是「多少」（累積列數），這個維度量的是
+    「多久」（觀測跨度天數）——實測兩者相關性只有 0.52（相較於被合併掉的
+    n_sold/n_rows 的 0.989），是真正獨立的資訊。「持續經營 vs
+    一次性清倉」的語意本來就是時間維度的事，筆數再多也回答不了這個問題
+    （清一次倉也可以留下上百列觀測）。
+
+    可以直接信任 `m.observation_span_days`：`SellerMetrics` 在計算跨度時
+    已經排除了入庫時間戳偽裝的「觀測」（`n_fake_timestamps`，見
+    `seller_alpha.py` 建構 SellerMetrics 處的註解），這裡不需要再過濾一次。
+
+    跨度為 0 代表我們只在單一時間點看過這個賣家，談不上「持續」，
+    視為不可得而不是給 0 分（0 分會暗示「他不持續」，但事實是「不知道」）。
+    """
+    if m.observation_span_days <= 0:
+        return SupplyDimension.unavailable(
+            "persistence",
+            "只觀測到單一時間點（跨度 0 天），談不了持續性——"
+            "缺的是這個賣家在不同時間再被觀測到",
+        )
+    return SupplyDimension.of(
+        "persistence",
+        raw=float(m.observation_span_days),
+        detail=f"觀測跨度 {m.observation_span_days:.1f} 天（{m.n_rows} 列）",
     )
 
 

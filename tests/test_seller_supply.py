@@ -26,8 +26,8 @@ import pytest
 
 from ygo_sniper.seller_alpha import SellerMetrics
 from ygo_sniper.seller_supply import (
-    dim_grade_profile, dim_listing_rhythm, dim_series_focus,
-    dim_sold_depth, dim_supply_scale,
+    dim_grade_profile, dim_listing_rhythm, dim_persistence, dim_series_focus,
+    dim_supply_depth,
 )
 
 
@@ -73,28 +73,39 @@ def test_series_focus_unavailable_when_share_is_none():
     assert dim_series_focus(metrics(series_top1_share=None, series_known_n=9)).available is False
 
 
-def test_sold_depth_unavailable_when_site_cannot_yield_sold_prices():
-    """eBay 的 Marketplace Insights 是 403，成交數在這一站是「不知道」不是「0」。"""
-    d = dim_sold_depth(metrics(site="ebay", n_sold=0))
-    assert d.available is False
-    assert "403" in d.missing or "Insights" in d.missing
+def test_supply_depth_is_always_available_and_says_it_is_cumulative():
+    d = dim_supply_depth(metrics(n_rows=117, observation_span_days=3.2))
+    assert d.available is True and d.raw == 117.0
+    assert "累積" in d.detail            # 不是速率
 
 
-def test_sold_depth_zero_on_a_site_that_can_yield_sold_is_available():
-    """能拿到成交的站，n_sold=0 是真的沒賣過——這是可得的資訊，不是不可得。"""
-    d = dim_sold_depth(metrics(site="buyee_yahoo", n_sold=0))
+def test_supply_depth_available_even_with_zero_rows():
+    """0 列是「我們沒看到貨」，是可得的資訊——不可得留給算不出來的維度。"""
+    d = dim_supply_depth(metrics(n_rows=0))
     assert d.available is True and d.raw == 0.0
 
 
-def test_sold_depth_available_on_sites_with_history():
-    d = dim_sold_depth(metrics(site="buyee_yahoo", n_sold=184))
-    assert d.available is True and d.raw == 184.0
+def test_persistence_unavailable_at_a_single_point_in_time():
+    """跨度 0 = 只看到他一個時間點，談不了持續性。"""
+    d = dim_persistence(metrics(n_rows=9, observation_span_days=0.0))
+    assert d.available is False
+    assert d.raw is None and d.score is None
+    assert "持續" in d.missing
 
 
-def test_supply_scale_is_always_available_and_says_it_is_cumulative():
-    d = dim_supply_scale(metrics(n_rows=117, observation_span_days=3.2))
-    assert d.available is True and d.raw == 117.0
-    assert "累積" in d.detail            # 不是速率
+def test_persistence_reports_the_actual_span():
+    d = dim_persistence(metrics(n_rows=20, observation_span_days=174.9))
+    assert d.available is True
+    assert d.raw == pytest.approx(174.9)
+    assert "174.9" in d.detail
+
+
+def test_supply_depth_and_persistence_are_not_the_same_number():
+    """這條測試守的是本次修正的原因本身：實測 corr(n_sold, n_rows)=0.989、
+    87% 的賣家兩者相等，把它們當兩個維度等於同一個訊號算兩次。
+    supply_depth 量「多少」、persistence 量「多久」，必須是不同的量。"""
+    m = metrics(n_rows=100, observation_span_days=2.0)
+    assert dim_supply_depth(m).raw != dim_persistence(m).raw
 
 
 def test_listing_rhythm_measures_concentration_not_quality():
