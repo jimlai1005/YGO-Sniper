@@ -49,7 +49,13 @@ CREATE TABLE IF NOT EXISTS signals (
     note            TEXT DEFAULT '',
     first_seen      TEXT,
     last_seen       TEXT,
-    notified_at     TEXT
+    notified_at     TEXT,
+    -- 清除已離場標的（expiry.py）。cleared_from 非空 = 這是**程式**清的，
+    -- 重新掃到時要自動還原回去；使用者手動標的 expired 沒有它，不受影響。
+    -- restored_count 是這個功能自己的誤殺率：清掉的東西有幾成又回來了。
+    cleared_at      TEXT,
+    cleared_from    TEXT,
+    restored_count  INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_signals_state ON signals(state);
 CREATE INDEX IF NOT EXISTS idx_signals_score ON signals(score DESC);
@@ -341,6 +347,11 @@ _LISTING_OBS_MIGRATE_COLUMNS: dict[str, str] = {
 #: 正式庫每 30 分鐘被排程開啟一次，所以「冪等」不是加分項而是必要條件。
 _SIGNALS_MIGRATE_COLUMNS: dict[str, str] = {
     "bucket": "TEXT",
+    # 清除已離場標的（2026-08-06）。與 _SCHEMA 雙寫：新 db 走 CREATE TABLE、
+    # 舊 db 走 ALTER。DEFAULT 直接寫在型別字串裡即可。
+    "cleared_at": "TEXT",
+    "cleared_from": "TEXT",
+    "restored_count": "INTEGER DEFAULT 0",
 }
 
 
@@ -433,6 +444,8 @@ class Store:
         for col, col_type in _SIGNALS_MIGRATE_COLUMNS.items():
             if col not in have:
                 c.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}")
+        # 舊列補 0：後面 `restored_count + 1` 遇到 NULL 會得到 NULL 而不是 1。
+        c.execute("UPDATE signals SET restored_count = 0 WHERE restored_count IS NULL")
         # 同 idx_comps_attrs：索引要等欄位存在，不能進 _SCHEMA
         c.execute("CREATE INDEX IF NOT EXISTS idx_signals_bucket ON signals(bucket)")
 
