@@ -117,3 +117,85 @@ def test_listing_rhythm_measures_concentration_not_quality():
 
 def test_listing_rhythm_unavailable_below_five_observations():
     assert dim_listing_rhythm(metrics(listing_hour_hist={20: 3})).available is False
+
+
+from ygo_sniper.seller_supply import SupplyFit, SupplyParams, supply_fit_all
+
+
+def test_score_is_renormalised_over_available_dimensions_only():
+    """跨度 0（persistence 20 分）與系列不明（series_focus 15 分）都不可得
+    → 剩下 65 的權重要重新正規化到 100，不是讓他直接損失 35 分。"""
+    ms = [metrics(seller_key=f"ebay:s{i}", site="ebay", n_rows=i * 10,
+                  observation_span_days=0.0,          # persistence 不可得
+                  grade_mix={"PSA 8": i, "PSA 10": 1},
+                  listing_hour_hist={20: 5, 21: 1}) for i in range(1, 12)]
+    out = supply_fit_all(ms, params=SupplyParams())
+    top = out[ms[-1].seller_key]
+    assert top.ok is True
+    assert top.n_dimensions_used == 3        # persistence 與 series_focus 都不可得
+    assert top.n_dimensions_total == 5
+    assert 0.0 <= top.total <= 100.0
+    assert any("persistence" in x for x in top.missing)
+
+
+def test_supply_depth_alone_is_never_enough():
+    """supply_depth 恆可得——如果它單獨就能給分數，那 223 個只有它的賣家
+    會全部拿到「分數」，但那其實只是「我們手上有幾列資料」的排名。"""
+    ms = [metrics(seller_key=f"ebay:s{i}", site="ebay", n_rows=i)
+          for i in range(1, 12)]           # 其餘四個維度全不可得
+    out = supply_fit_all(ms, params=SupplyParams())
+    for fit in out.values():
+        assert fit.ok is False
+        assert fit.total is None           # 不是 0
+        assert fit.n_dimensions_used == 1
+
+
+def test_site_with_too_few_sellers_is_not_ranked():
+    """站內只有 3 個賣家時百分位沒有意義——寧可不給分數。"""
+    ms = [metrics(seller_key=f"m:s{i}", site="buyee_mercari", n_rows=i,
+                  observation_span_days=float(i), grade_mix={"PSA 8": 3},
+                  listing_hour_hist={20: 5}) for i in range(3)]
+    out = supply_fit_all(ms, params=SupplyParams())
+    for fit in out.values():
+        assert fit.ok is False
+        assert fit.total is None             # 不是 0
+        assert "站內賣家數" in fit.reason
+
+
+def test_percentile_is_within_site_only():
+    """eBay 全站的量級比 yahoo 小兩個數量級，但 eBay 站內第一名仍該拿高分——
+    n_rows 的組成隨站台而異（yahoo 多半是挖回來的成交帳、eBay 只有在架），
+    跨站比大小會讓分數變成站台的代理變數。"""
+    ebay = [metrics(seller_key=f"ebay:s{i}", site="ebay", n_rows=i,
+                    observation_span_days=float(i), grade_mix={"PSA 8": 3},
+                    listing_hour_hist={20: 5}) for i in range(1, 12)]
+    yahoo = [metrics(seller_key=f"y:s{i}", site="buyee_yahoo", n_rows=i * 100,
+                     observation_span_days=float(i * 10), grade_mix={"PSA 8": 3},
+                     listing_hour_hist={20: 5}) for i in range(1, 12)]
+    out = supply_fit_all(ebay + yahoo, params=SupplyParams())
+    assert out["ebay:s11"].total > 50        # 站內第一名，不因絕對量小而被壓低
+
+
+def test_every_used_dimension_carries_its_evidence():
+    """裸數字不准輸出——沿用 seller_alpha 的 ScoreComponent.detail 慣例。"""
+    ms = [metrics(seller_key=f"ebay:s{i}", site="ebay", n_rows=i * 10,
+                  observation_span_days=float(i), grade_mix={"PSA 8": 3},
+                  listing_hour_hist={20: 5}) for i in range(1, 12)]
+    out = supply_fit_all(ms, params=SupplyParams())
+    for d in out["ebay:s11"].dimensions:
+        if d.available:
+            assert d.detail, f"{d.name} 沒有帶依據"
+            assert d.score is not None
+        else:
+            assert d.missing, f"{d.name} 不可得但沒說缺什麼"
+            assert d.score is None
+
+
+def test_thin_evidence_is_flagged_in_caveats():
+    """只用 2 個維度算出來的分數，畫面上必須看得出來它薄。"""
+    ms = [metrics(seller_key=f"ebay:s{i}", site="ebay", n_rows=i * 10,
+                  observation_span_days=float(i)) for i in range(1, 12)]
+    fit = supply_fit_all(ms, params=SupplyParams())["ebay:s11"]
+    assert fit.ok is True and fit.n_dimensions_used == 2
+    assert any("2/5" in c for c in fit.caveats)
+    assert all(c.startswith("⚠️") for c in fit.caveats)

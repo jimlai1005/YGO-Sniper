@@ -11,8 +11,8 @@ Supply Fit 回答「盯著他，未來會不會產出可買的機會」（跟便
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from ygo_sniper.seller_alpha import SellerMetrics
@@ -185,3 +185,166 @@ def dim_listing_rhythm(m: SellerMetrics) -> SupplyDimension:
         raw=top1 / total,
         detail=f"最大時段佔比 {top1 / total:.0%}（{top1}/{total} 筆）",
     )
+
+
+#: 五個維度的計算順序。固定順序讓 `SupplyFit.dimensions` 的輸出穩定
+#: （畫面、快照比對、diff 都靠這個順序）。
+DIMENSIONS: tuple[tuple[str, Callable[["SellerMetrics"], SupplyDimension]], ...] = (
+    ("supply_depth", dim_supply_depth),
+    ("persistence", dim_persistence),
+    ("grade_profile", dim_grade_profile),
+    ("series_focus", dim_series_focus),
+    ("listing_rhythm", dim_listing_rhythm),
+)
+
+
+@dataclass(slots=True)
+class SupplyParams:
+    weights: dict[str, float] = field(default_factory=lambda: {
+        "supply_depth": 40.0,
+        "persistence": 20.0,
+        "grade_profile": 20.0,
+        "series_focus": 15.0,
+        "listing_rhythm": 5.0,
+    })
+    #: 站內賣家數少於這個值就不排名——百分位在小樣本裡沒有意義。
+    min_site_sellers: int = 10
+    #: 至少要有幾個維度算得出來才給分數。supply_depth 恆可得，
+    #: 所以 2 的實際意義是「除了『我們手上有幾列』之外還要有別的證據」。
+    min_dimensions: int = 2
+
+
+@dataclass(slots=True)
+class SupplyFit:
+    seller_key: str
+    site: str
+    ok: bool
+    reason: str
+    total: float | None = None          # ok=False 時必定 None，不是 0
+    dimensions: list[SupplyDimension] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    caveats: list[str] = field(default_factory=list)
+    n_dimensions_used: int = 0
+    n_dimensions_total: int = len(DIMENSIONS)
+
+
+def _percentile_within(raw: float, pool: list[float]) -> float:
+    """站內百分位：比我小的有幾個 / (可比的人數 - 1)。
+
+    只有我一個人可得這個維度時回 100.0——沒有人可以比，硬給 0 會把
+    「唯一有這項證據的人」讀成「這方面最差」，方向剛好相反。
+    """
+    if len(pool) <= 1:
+        return 100.0
+    n_below = sum(1 for other in pool if other < raw)
+    return 100.0 * n_below / (len(pool) - 1)
+
+
+def supply_fit_all(
+    metrics_list: list["SellerMetrics"],
+    *,
+    params: SupplyParams | None = None,
+) -> dict[str, SupplyFit]:
+    """把五個維度合成 0-100 的 Supply Fit，**百分位一律只在站內比**。
+
+    為什麼不做跨站絕對比較：`n_rows` 的組成隨站台而異（buyee_yahoo /
+    paypay 的列多半來自挖回來的成交帳、跨 182 天；eBay 的列只有在架、
+    跨 3.2 天），直接比大小會讓分數退化成「站台的代理變數」——這是
+    CLAUDE.md 第三節 venue 混池事故的重演。
+
+    為什麼不可得的維度不給 0 分：0 分的語意是「這賣家這方面很差」，
+    但事實是「我們不知道」。不可得的維度直接從權重分母移除並重新
+    正規化，與 `ok=False` 時 `total` 是 None 而不是 0 是同一個哲學。
+    """
+    params = params or SupplyParams()
+
+    by_site: dict[str, list["SellerMetrics"]] = {}
+    for m in metrics_list:
+        by_site.setdefault(m.site, []).append(m)
+
+    out: dict[str, SupplyFit] = {}
+    for site, group in by_site.items():
+        # 1. 先把每個賣家的五個維度算出來（不論站內人數夠不夠——維度本身
+        #    算得出來，畫面上還是要看得到原始值，不排名的只是缺 score）。
+        dims_by_seller: dict[str, list[SupplyDimension]] = {
+            m.seller_key: [fn(m) for _, fn in DIMENSIONS] for m in group
+        }
+
+        thin_site = len(group) < params.min_site_sellers
+        if not thin_site:
+            # 2. 站內百分位：每個維度各自蒐集站內可得的 raw 當作比較池。
+            for idx, (name, _) in enumerate(DIMENSIONS):
+                pool = [
+                    dims[idx].raw
+                    for dims in dims_by_seller.values()
+                    if dims[idx].available and dims[idx].raw is not None
+                ]
+                for dims in dims_by_seller.values():
+                    d = dims[idx]
+                    if d.available and d.raw is not None:
+                        d.score = _percentile_within(d.raw, pool)
+
+        for m in group:
+            dims = dims_by_seller[m.seller_key]
+            used = [d for d in dims if d.available]
+            missing = [f"{d.name}：{d.missing}" for d in dims if not d.available]
+
+            if thin_site:
+                out[m.seller_key] = SupplyFit(
+                    seller_key=m.seller_key, site=site, ok=False,
+                    reason=(
+                        f"站內賣家數只有 {len(group)} 個"
+                        f"（門檻 {params.min_site_sellers}），百分位沒有意義"
+                    ),
+                    total=None, dimensions=dims, missing=missing,
+                    n_dimensions_used=len(used),
+                )
+                continue
+
+            if len(used) < params.min_dimensions:
+                out[m.seller_key] = SupplyFit(
+                    seller_key=m.seller_key, site=site, ok=False,
+                    reason=(
+                        f"只有 {len(used)} 個維度算得出來"
+                        f"（門檻 {params.min_dimensions}）"
+                    ),
+                    total=None, dimensions=dims, missing=missing,
+                    n_dimensions_used=len(used),
+                )
+                continue
+
+            # 3. 只用可得維度的權重當分母重新正規化。
+            wsum = sum(params.weights.get(d.name, 0.0) for d in used)
+            if wsum <= 0:
+                out[m.seller_key] = SupplyFit(
+                    seller_key=m.seller_key, site=site, ok=False,
+                    reason=(
+                        f"可得的 {len(used)} 個維度權重合計為 0，算不出分數"
+                    ),
+                    total=None, dimensions=dims, missing=missing,
+                    n_dimensions_used=len(used),
+                )
+                continue
+            total = sum(
+                params.weights.get(d.name, 0.0) * (d.score or 0.0) for d in used
+            ) / wsum
+
+            caveats: list[str] = []
+            if len(used) < 3:
+                caveats.append(
+                    f"⚠️ 只用了 {len(used)}/{len(DIMENSIONS)} 個維度算出來——"
+                    "證據薄，換一個維度可得的賣家分數可能翻盤"
+                )
+            if not any(d.name == "persistence" and d.available for d in dims):
+                caveats.append(
+                    "⚠️ 只觀測到單一時間點，這是橫斷面的供給規模，"
+                    "不是「持續」供給"
+                )
+
+            out[m.seller_key] = SupplyFit(
+                seller_key=m.seller_key, site=site, ok=True,
+                reason=f"{len(used)}/{len(DIMENSIONS)} 個維度可得，站內 {len(group)} 個賣家",
+                total=total, dimensions=dims, missing=missing,
+                caveats=caveats, n_dimensions_used=len(used),
+            )
+    return out
