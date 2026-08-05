@@ -667,6 +667,82 @@ def _watch_params():
     return WatchParams.from_config(cfg)
 
 
+#: 供給契合度回答「值不值得盯」，跟便不便宜無關，**不可與 Alpha 相加**——
+#: 這句話一字不差抄自 CLI 的 `_print_supply_fit`（跟這句話配對的表頭警語同理），
+#: dashboard 與 CLI 對同一份資料只能講一種話（工程原則 1）。
+SUPPLY_FIT_NOTE = "供給契合度回答「值不值得盯」，不是「便不便宜」——這兩欄是兩把不同的尺，不可相加。"
+
+
+def _fmt_alpha_for_supply(score) -> dict:
+    """Supply Fit 排行榜裡附帶的 Alpha 欄。
+
+    `ok=False` 或 `total is None` 一律送 `total: null`——**絕不送 0**。
+    0 的語意是「算出來就是比同儕貴」，null 是「同儕湊不齊，不知道」，
+    前端把兩者顯示成同一個東西就會讓人把「不知道」讀成「比同儕貴」
+    （見 `cli._fmt_alpha_total` 同一份規則，這裡是 API 版本）。
+    """
+    if score is None or not score.ok or score.total is None:
+        return {"ok": False, "total": None}
+    return {"ok": True, "total": score.total}
+
+
+def _supply_fit_dict(fit, alpha_score) -> dict:
+    dims = {d.name: (d.raw if d.available else None) for d in fit.dimensions}
+    return {
+        "seller_key": fit.seller_key,
+        "site": fit.site,
+        "ok": fit.ok,
+        "reason": fit.reason,
+        "total": fit.total,
+        "n_dimensions_used": fit.n_dimensions_used,
+        "n_dimensions_total": fit.n_dimensions_total,
+        "dims": dims,
+        "missing": list(fit.missing),
+        "caveats": list(fit.caveats),
+        "alpha": _fmt_alpha_for_supply(alpha_score),
+    }
+
+
+def _supply_fit_block(rep, *, limit: int) -> dict:
+    """`/api/sellers` 的 `supply_fit` 區塊。走 `seller_supply.supply_fit_all`——
+    跟 CLI 的 `ygo-sniper sellers --supply` 是同一個函式、同一份門檻，
+    dashboard 不自己定第二套規則。
+    """
+    from collections import Counter
+
+    from ygo_sniper.seller_supply import SupplyParams, supply_fit_all
+
+    fits = supply_fit_all(list(rep.metrics.values()), params=SupplyParams())
+    ok_fits = [f for f in fits.values() if f.ok]
+    ranked_fits = sorted(ok_fits, key=lambda f: (-(f.total or 0.0), f.seller_key))[:limit]
+    rejected_fits = [f for f in fits.values() if not f.ok]
+
+    rejected_summary = None
+    if rejected_fits:
+        reason_counts = Counter(f.reason for f in rejected_fits)
+        top_reason, top_count = reason_counts.most_common(1)[0]
+        rejected_summary = {
+            "count": len(rejected_fits),
+            "top_reason": top_reason,
+            "n": top_count,
+        }
+
+    return {
+        "summary": {
+            "scored": len(ok_fits),
+            "total": len(fits),
+            # 對照組：同一份 rep 算出來的 Alpha 達門檻數，跟 coverage 印的是同一個數字
+            # （工程原則 1：同一份資料只能有一個「達門檻數」）。
+            "alpha_scored": rep.coverage.get("sellers_scored"),
+            "threshold_note": SUPPLY_FIT_NOTE,
+        },
+        "ranked": [
+            _supply_fit_dict(f, rep.scores.get(f.seller_key)) for f in ranked_fits
+        ],
+        "rejected_summary": rejected_summary,
+    }
+
+
 def _score_dict(score) -> dict:
     return {
         "seller_key": score.seller_key,
@@ -753,6 +829,8 @@ def sellers(limit: int = 50):
             "per_seller_interval_minutes": params.per_seller_interval_minutes,
             "auto_min_score": params.auto_min_score,
         },
+        # 另一把尺——「值不值得盯」，跟上面的 Alpha 排行榜永遠不相加（見 CLAUDE.md 第四節）。
+        "supply_fit": _supply_fit_block(rep, limit=limit),
     }
 
 
