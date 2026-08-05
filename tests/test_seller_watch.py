@@ -957,3 +957,115 @@ def test_sync_auto_watch_without_supply_argument_still_works(store):
     result = sync_auto_watch(store, report, WatchParams())
     assert CHEAP in [a["seller_key"] for a in result["added"]]
     assert BIG not in [a["seller_key"] for a in result["added"]]
+
+
+# ---------------------------------------------------------------------------
+# 10. 拒絕訊息：預期內的摘要、非預期的照吼（2026-08-05）
+#
+# 兩個相反的失敗方向，這一節同時釘住：
+#   洗版 —— 排程一天 15 次、每輪 50 行 `[warn] 名單已滿`，真正的告警被淹死。
+#   吞掉 —— 為了不洗版而把 rejected 整個不印，就變成 CLAUDE.md 第五節的
+#           頭號敵人（「賣家鍵組錯了」與「今天沒人過門檻」外顯一模一樣）。
+# 分類依據是 `code` 不是 `reason` 字串：訊息改一個字就讓字串比對失效，而
+# 失效的方向會是「非預期被當成預期吞掉」——所以未知 code 一律歸非預期。
+# ---------------------------------------------------------------------------
+from ygo_sniper.seller_watch import (  # noqa: E402
+    EXPECTED_REJECT_CODES,
+    REJECT_LIST_FULL,
+    REJECT_MALFORMED_KEY,
+    summarize_rejections,
+)
+
+
+def test_list_full_rejection_carries_the_expected_code(store):
+    """`add_watch` 必須帶出 code——摘要分類完全靠它，斷了就整條鏈失效。"""
+    params = WatchParams(max_sellers=1)
+    add_watch(store, "ebay:psa", source=SOURCE_MANUAL, reason="使用者指定", params=params)
+    res = add_watch(store, "ebay:other", source=SOURCE_SUPPLY, reason="供給",
+                    params=params, score=90.0)
+    assert res.ok is False
+    assert res.code == REJECT_LIST_FULL
+    assert REJECT_LIST_FULL in EXPECTED_REJECT_CODES
+
+
+def test_malformed_key_rejection_carries_its_own_code(store):
+    res = add_watch(store, "psa", source=SOURCE_MANUAL, reason="t", params=PARAMS)
+    assert res.ok is False
+    assert res.code == REJECT_MALFORMED_KEY
+    assert REJECT_MALFORMED_KEY not in EXPECTED_REJECT_CODES   # 非預期＝要吼
+
+
+def test_sync_auto_watch_puts_the_code_on_every_rejected_row(store):
+    """端到端：pipeline 拿到的 rejected 列必須帶 code（沒有 code 會被當非預期）。"""
+    report, supply = _two_track_report()
+    params = WatchParams(max_sellers=1, supply_min_score=60.0)
+    out = sync_auto_watch(store, report, params, supply=supply)
+    assert out["rejected"], "名單只有 1 個位子，supply 候選人應該被擋下"
+    assert all(r["code"] == REJECT_LIST_FULL for r in out["rejected"])
+
+
+def test_many_expected_rejections_collapse_to_at_most_two_lines():
+    """50 個「名單已滿」只准變成兩行——這就是洗版的修法。"""
+    rejected = [
+        {"seller_key": f"buyee_yahoo:s{i}", "reason": "監控名單已滿（30/30）且沒有可淘汰的對象：…",
+         "track": "supply", "code": REJECT_LIST_FULL}
+        for i in range(50)
+    ]
+    digest = summarize_rejections(rejected)
+    assert digest.total == 50
+    assert digest.n_expected == 50 and digest.n_unexpected == 0
+    assert len(digest.summary_lines) <= 2
+    assert digest.alert_lines == []
+
+
+def test_summary_names_the_total_the_top_reason_and_its_count():
+    """摘要不准只寫「擋下 N 個」——要說得出最常見原因與它佔幾個，否則沒有診斷力。"""
+    rejected = [
+        {"seller_key": f"ebay:s{i}", "reason": "名單已滿…", "code": REJECT_LIST_FULL}
+        for i in range(7)
+    ]
+    digest = summarize_rejections(rejected)
+    head = digest.summary_lines[0]
+    assert "7" in head                      # 總數
+    assert "名單已滿" in head                # 最常見原因
+    # 代表例保留完整脈絡（賣家鍵），不是只有一個數字
+    assert any("ebay:s0" in line for line in digest.summary_lines)
+
+
+def test_unexpected_rejection_is_alerted_individually_and_never_truncated():
+    """1 個賣家鍵格式錯誤混在 50 個「名單已滿」裡，也必須單獨、全文印出來。"""
+    long_reason = "賣家鍵格式應為 `{site}:{seller_id}`（例：ebay:psa），收到 " + "x" * 400
+    rejected = [
+        {"seller_key": f"ebay:s{i}", "reason": "名單已滿…", "code": REJECT_LIST_FULL}
+        for i in range(50)
+    ] + [{"seller_key": "brokenkey", "reason": long_reason, "code": REJECT_MALFORMED_KEY}]
+    digest = summarize_rejections(rejected)
+
+    assert digest.n_unexpected == 1
+    assert len(digest.alert_lines) == 1
+    line = digest.alert_lines[0]
+    assert "brokenkey" in line
+    assert long_reason in line              # **不截斷**：非預期的要看得到全文
+    # 而且不准混進摘要裡被稀釋掉
+    assert "brokenkey" not in " ".join(digest.summary_lines)
+
+
+def test_unknown_or_missing_reject_code_defaults_to_loud():
+    """未來新增的拒絕路徑忘了分類時，預設要吵不要安靜——安靜的預設會讓
+    一個全新的失敗模式從第一天起就看不見。"""
+    digest = summarize_rejections([
+        {"seller_key": "ebay:a", "reason": "某種新的拒絕", "code": "brand_new_reason"},
+        {"seller_key": "ebay:b", "reason": "沒有 code 的舊格式"},
+    ])
+    assert digest.n_expected == 0
+    assert digest.n_unexpected == 2
+    assert len(digest.alert_lines) == 2
+    assert all("ebay:" in line for line in digest.alert_lines)
+
+
+def test_no_rejections_prints_nothing():
+    """沒有人被擋下時不要憑空生一行雜訊。"""
+    for empty in ([], None):
+        digest = summarize_rejections(empty)
+        assert digest.total == 0
+        assert digest.summary_lines == [] and digest.alert_lines == []

@@ -191,6 +191,27 @@ def batch_of(seller_key: str, batches: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+#: 拒絕原因的機器可讀代碼。**分類靠這個代碼，不靠比對 `reason` 字串**：
+#: 訊息文字改一個字就會讓字串比對安靜地失效（而失效的方向是「非預期被當成
+#: 預期而吞掉」，正是 CLAUDE.md 第五節要防的靜默失敗）。
+REJECT_LIST_FULL = "list_full"
+REJECT_MALFORMED_KEY = "malformed_key"
+
+#: **預期內**的拒絕：候選人數本來就會多於名額，門檻校準得再好也一定會有一批
+#: 落在名單外。這一類可以摘要（一到兩行）。
+#: 不在這張表上的代碼（含空字串、未來新增而忘了分類的）一律視為**非預期**並
+#: 逐個大聲印出來——預設要偏向吵，不是偏向安靜。
+EXPECTED_REJECT_CODES = frozenset({REJECT_LIST_FULL})
+
+REJECT_LABEL: dict[str, str] = {
+    REJECT_LIST_FULL: "名單已滿（候選多於名額）",
+    REJECT_MALFORMED_KEY: "賣家鍵格式錯誤",
+}
+
+#: 摘要行裡那個「代表例」的長度上限。只截代表例，**非預期的告警永不截斷**。
+_EXAMPLE_MAX_CHARS = 200
+
+
 @dataclass(slots=True)
 class WatchAddResult:
     """一次加入的結果。**拒絕時必須說得出為什麼、以及使用者能做什麼。**"""
@@ -203,6 +224,8 @@ class WatchAddResult:
     evicted: str | None = None
     #: 已經在名單上（不是錯誤，但也不是新增）。
     already: bool = False
+    #: 拒絕代碼（`ok=True` 時為空字串）。呼叫端據此決定摘要或逐個告警。
+    code: str = ""
 
 
 def add_watch(
@@ -237,6 +260,7 @@ def add_watch(
         return WatchAddResult(
             False, seller_key,
             f"賣家鍵格式應為 `{{site}}:{{seller_id}}`（例：ebay:psa），收到 {seller_key!r}",
+            code=REJECT_MALFORMED_KEY,
         )
     if source == SOURCE_MANUAL:
         score = None
@@ -258,6 +282,7 @@ def add_watch(
                 False, seller_key,
                 f"監控名單已滿（{len(active)}/{params.max_sellers}）且沒有可淘汰的對象："
                 + _full_hint(active, source=source, score=score),
+                code=REJECT_LIST_FULL,
             )
         store.deactivate_seller_watch(
             victim["seller_key"],
@@ -443,7 +468,7 @@ def sync_auto_watch(
                                  "track": track})
         else:
             out["rejected"].append({"seller_key": res.seller_key, "reason": res.reason,
-                                    "track": track})
+                                    "track": track, "code": res.code})
 
     # --- 1. Alpha 軌（實證：他比同儕便宜多少）------------------------------
     ranked = report.ranked() if hasattr(report, "ranked") else []
@@ -483,6 +508,82 @@ def sync_auto_watch(
         )
         _record(res, track="supply", total=total)
     return out
+
+
+# ---------------------------------------------------------------------------
+@dataclass(slots=True, frozen=True)
+class RejectionDigest:
+    """`sync_auto_watch` 的 rejected 清單 → 該印哪幾行。
+
+    為什麼要這個東西（2026-08-05）：排程白天每 2 小時、晚上每 30 分跑一次，
+    而過門檻的候選人本來就會多於名額——每輪逐個印 `[warn]` 會洗掉 50 行，
+    **真正的告警會淹死在裡面**（洗版與靜默是同一個病的兩面：兩者都讓人看不見
+    壞掉的那一行）。
+
+    但也**不准直接吞掉**（CLAUDE.md 第五節）。所以拆成兩堆：
+
+    - `summary_lines`：**預期內**的拒絕，摘要成一到兩行（總數＋最常見原因＋
+      一個帶完整脈絡的代表例）。
+    - `alert_lines`：**非預期**的拒絕，一個一行，全文不截斷。就算只有 1 個
+      也要印——那是真的有東西壞了（例如賣家鍵格式錯誤代表上游組鍵組錯）。
+
+    分類依據是 `code`（見 `EXPECTED_REJECT_CODES`），不是 `reason` 字串比對；
+    沒有 code 或 code 不認得的一律歸非預期（預設偏吵）。
+    """
+
+    total: int = 0
+    n_expected: int = 0
+    n_unexpected: int = 0
+    summary_lines: list[str] = field(default_factory=list)
+    alert_lines: list[str] = field(default_factory=list)
+
+
+def _clip(text: str) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= _EXAMPLE_MAX_CHARS else text[: _EXAMPLE_MAX_CHARS - 1] + "…"
+
+
+def summarize_rejections(rejected: list[dict[str, Any]] | None) -> RejectionDigest:
+    """把 rejected 清單分成「摘要得起來的」與「必須逐個吼出來的」。
+
+    純函式（不印任何東西、不碰 db），這樣「洗版有沒有被修掉」與「非預期有沒有
+    被吞掉」兩件事都測得起來——log 行為本身很難測，把判斷抽出來就測得動。
+    """
+    rows = list(rejected or [])
+    if not rows:
+        return RejectionDigest()
+
+    expected = [r for r in rows if str(r.get("code") or "") in EXPECTED_REJECT_CODES]
+    unexpected = [r for r in rows if str(r.get("code") or "") not in EXPECTED_REJECT_CODES]
+
+    counts: dict[str, int] = {}
+    for r in rows:
+        code = str(r.get("code") or "")
+        counts[code] = counts.get(code, 0) + 1
+    top_code, top_n = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
+    top_label = REJECT_LABEL.get(top_code, f"未分類原因（code={top_code!r}）")
+
+    summary = [
+        f"擋下 {len(rows)} 個未加入監控名單"
+        f"（預期內 {len(expected)}、非預期 {len(unexpected)}）："
+        f"最常見原因「{top_label}」{top_n} 個"
+    ]
+    if expected:
+        ex = expected[0]
+        summary.append(
+            f"  例（{REJECT_LABEL.get(str(ex.get('code') or ''), '未分類')}）："
+            f"{ex.get('seller_key')} — {_clip(ex.get('reason') or '')}"
+        )
+
+    alerts = [
+        f"賣家 {r.get('seller_key')} 未能加入監控名單"
+        f"（**非預期**，code={str(r.get('code') or '') or '無'}）：{r.get('reason')}"
+        for r in unexpected
+    ]
+    return RejectionDigest(
+        total=len(rows), n_expected=len(expected), n_unexpected=len(unexpected),
+        summary_lines=summary, alert_lines=alerts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +729,10 @@ def build_notify_context(
 
 
 __all__ = [
+    "EXPECTED_REJECT_CODES",
+    "REJECT_LABEL",
+    "REJECT_LIST_FULL",
+    "REJECT_MALFORMED_KEY",
     "SELLER_PAGE_SOURCE",
     "SOURCE_AUTO",
     "SOURCE_LABEL",
@@ -635,6 +740,7 @@ __all__ = [
     "SOURCE_SUPPLY",
     "UNSUPPORTED_SITE_NOTE",
     "WATCH_ROTATION_META_KEY",
+    "RejectionDigest",
     "SellerNotifyContext",
     "WatchAddResult",
     "WatchParams",
@@ -645,5 +751,6 @@ __all__ = [
     "due_sellers",
     "remove_watch",
     "rotation_state",
+    "summarize_rejections",
     "sync_auto_watch",
 ]

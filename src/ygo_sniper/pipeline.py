@@ -474,7 +474,7 @@ class Pipeline:
         """
         from .seller_alpha import analyze
         from .seller_supply import SupplyParams, supply_fit_all
-        from .seller_watch import sync_auto_watch
+        from .seller_watch import summarize_rejections, sync_auto_watch
 
         try:
             report = analyze(self.store, cfg=self.cfg)
@@ -492,8 +492,15 @@ class Pipeline:
                 f"{floor:g}，批次 {a['batch']}）"
                 + (f"，淘汰 {a['evicted']}" if a.get("evicted") else "")
             )
-        for r in out["rejected"]:
-            print(f"[warn] 賣家 {r['seller_key']} 未能加入監控名單：{r['reason']}")
+        # 拒絕**摘要**，不逐個印：候選人數本來就多於名額，排程一天跑 15 次，
+        # 每輪 50 行 `[warn]` 會把真正的告警洗掉（洗版與靜默是同一個病的兩面）。
+        # 但非預期的拒絕（例如賣家鍵格式錯誤）仍然逐個全文印出來——那是真的
+        # 有東西壞了，就算只有 1 個也要看得見。分類邏輯在 `summarize_rejections`。
+        digest = summarize_rejections(out["rejected"])
+        for line in digest.summary_lines:
+            print(f"[watch] {line}")
+        for line in digest.alert_lines:
+            print(f"[warn] {line}")
         return out
 
     def _scan_watched_sellers(
