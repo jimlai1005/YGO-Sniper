@@ -18,6 +18,14 @@
 2. **`SELECT *` 是刻意的**（`store.py:577` 的 docstring）：新欄位自動被帶上，不要改成手寫欄位清單。Task 4 加 JOIN 時保留 `s.*`。
 3. **`upsert_signal` 不覆寫人工狀態**（`store.py:481-486`）是紅線。Task 6 加的自動還原只作用於本功能自己寫下的 `cleared_from`，不碰使用者手動標的 `expired`。
 4. **測試不准碰正式庫**：`tests/test_card_bucket.py:203-206` 那行 `assert app_mod.store.db_path == db` 是承重斷言，照抄不要刪。
+5. **測試資料的 key 必須用生產形狀 `site:external_id`**（`domain.py:193-194` 的 `Listing.key`）。
+   <!-- 2026-08-06: 實作 Task 6 時抓到 -->
+   本計畫 Task 5/6 的測試碼原本寫裸 key（`_insert(store, "gone-1")`），而 `upsert_signal`
+   是拿 `Listing.key` 去比對既有列——裸 key 對不上，於是 upsert **插進第二列**，
+   `get_signal("gone-1")` 讀到的是那列從沒被碰過的原始資料。後果不是測試失敗，是
+   **紅線測試假性通過**：`test_manually_expired_is_never_restored` 在還原邏輯根本不存在時
+   也會綠燈。實作時已改成 `buyee_yahoo:gone-1` 這種形狀，並讓 `_signal_for` 用
+   `assert listing.key == key` 自我把關。任何新增的 store 測試都照這個做。
 
 ## File Structure
 
@@ -1584,8 +1592,13 @@ Expected: 1432+ passed（1400 基線 + 本計畫新增 32 條：`test_expiry.py`
 ```bash
 cp data/sniper.db /tmp/expiry-verify.db
 .venv/bin/python - <<'PY'
+from pathlib import Path
+
 from ygo_sniper.store import Store
-s = Store("/tmp/expiry-verify.db")
+
+# ⚠️ Store 只吃 Path 不吃 str（`store.py:407` 直接用 `db_path.parent`），
+# 傳字串會 AttributeError。
+s = Store(Path("/tmp/expiry-verify.db"))
 conf = {"buyee_yahoo": "medium", "_default": "low"}
 before = len(s.list_signals(state="watching", limit=100000))
 r = s.clear_expired_signals("watching", gone_confidence=conf)
@@ -1597,13 +1610,16 @@ print("expiry_stats:", s.expiry_stats())
 PY
 ```
 
-Expected: 清除前 81 → 清除約 47 → 剩約 34；`by_source` 以 `buyee_paypay` 為大宗
+Expected: 約六成的 watching 被清掉，`by_source` 以 `buyee_paypay` 為大宗。
+
+⚠️ **不要拿設計文件的 81/47 當通過門檻**——那是 2026-08-06 稍早的快照，掃描每 30 分鐘跑一次，數字每次都不同（Task 3-4 驗收時已經變成 78/44）。要驗的是**恆等式**：`清除前 − 清除後 == cleared`，以及 `cleared == 清除前清單裡 expiry.kind != "live"` 的筆數。數字對不上才是問題，數字變動不是。
 
 - [ ] **Step 3: 驗證自動還原（同一個副本）**
 
 ```bash
 .venv/bin/python - <<'PY'
 import sqlite3
+from pathlib import Path
 
 from ygo_sniper.domain import (
     CardInfo, CompStats, Currency, Listing, RouteQuote, Signal, Site,
@@ -1611,7 +1627,7 @@ from ygo_sniper.domain import (
 from ygo_sniper.store import Store
 
 db = "/tmp/expiry-verify.db"
-s = Store(db)
+s = Store(Path(db))          # Store 只吃 Path，不吃 str
 
 with sqlite3.connect(db) as c:
     key, cleared_from, site = c.execute(
