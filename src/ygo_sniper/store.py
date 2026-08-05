@@ -592,15 +592,25 @@ class Store:
         `state` 與 `bucket` 是**兩個獨立的維度**，可以各自給也可以併用：
         分類分頁要的是「不分狀態的高價卡」→ `state="all", bucket="high_value"`。
         """
-        q = "SELECT * FROM signals WHERE score >= ?"
+        # `s.*` 保留「新欄位自動被帶上」（見上方 docstring）；listing_obs 只挑
+        # 三個 signals 沒有的欄位並加 obs_ 前綴——兩表有 11 個同名欄位
+        # （last_seen / landed_twd / grade …），不加前綴會被靜默覆蓋，
+        # 那正是 CLAUDE.md 第三節的混源陷阱。
+        q = (
+            "SELECT s.*, o.disappeared_at AS obs_disappeared_at, "
+            "o.window_exit_at AS obs_window_exit_at, "
+            "COALESCE(o.revived_count, 0) AS obs_revived_count "
+            "FROM signals s LEFT JOIN listing_obs o ON o.key = s.key "
+            "WHERE s.score >= ?"
+        )
         params: list[Any] = [min_score]
         if state and state != "all":
-            q += " AND state = ?"
+            q += " AND s.state = ?"
             params.append(state)
         if bucket and bucket != "all":
-            q += " AND bucket = ?"
+            q += " AND s.bucket = ?"
             params.append(bucket)
-        q += " ORDER BY score DESC, last_seen DESC LIMIT ?"
+        q += " ORDER BY s.score DESC, s.last_seen DESC LIMIT ?"
         params.append(limit)
         with self._conn() as c:
             return [dict(r) for r in c.execute(q, params).fetchall()]

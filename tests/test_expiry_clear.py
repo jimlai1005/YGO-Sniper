@@ -105,3 +105,39 @@ def test_migration_is_idempotent(tmp_path):
     for _ in range(3):
         Store(db)
     assert set(NEW_COLUMNS) <= _columns(db)
+
+
+def test_list_signals_brings_obs_columns(store):
+    _insert(store, "a")
+    _mark_gone(store, "a", when="2026-08-05T00:00:00+00:00")
+    row = store.list_signals(state="watching")[0]
+    assert row["obs_disappeared_at"] == "2026-08-05T00:00:00+00:00"
+    assert row["obs_window_exit_at"] is None
+    assert row["obs_revived_count"] == 0
+
+
+def test_list_signals_join_does_not_clobber_signals_columns(store):
+    """兩表有 11 個同名欄位（last_seen / landed_twd / grade …）。
+    JOIN 之後 signals 那一側的值必須原封不動——這是 CLAUDE.md 第三節的混源陷阱。
+    """
+    _insert(store, "a")
+    with sqlite3.connect(store.db_path) as c:
+        # listing_obs 故意寫入不同的 last_seen 與 title
+        c.execute(
+            "INSERT INTO listing_obs (key, site, title, url, first_seen, last_seen,"
+            " seen_count) VALUES (?,?,?,?,?,?,?)",
+            ("a", "ebay", "別的標題", "https://other.test/a",
+             "2026-07-01T00:00:00+00:00", "2026-07-02T00:00:00+00:00", 9),
+        )
+    row = store.list_signals(state="watching")[0]
+    assert row["title"] == "卡 a"
+    assert row["site"] == "buyee_yahoo"
+    assert row["last_seen"] == "2026-08-01T00:00:00+00:00"
+
+
+def test_list_signals_without_obs_row_is_fine(store):
+    """沒有觀測列的標的照樣要出現在清單裡（LEFT JOIN 不是 INNER）。"""
+    _insert(store, "solo")
+    rows = store.list_signals(state="watching")
+    assert [r["key"] for r in rows] == ["solo"]
+    assert rows[0]["obs_disappeared_at"] is None
