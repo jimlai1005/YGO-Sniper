@@ -264,7 +264,11 @@ WHERE s.score >= ? ...
 
 ## 5. 測試計畫
 
-新檔 `tests/test_expiry.py`：
+**範本**：`tests/test_card_bucket.py`（282 行）——`bucket` 欄位當初就是用同一套「migration＋store＋web API」三段結構加進來的，本功能照抄它的骨架（`_legacy_db` / `_columns` / `_insert` / `store` fixture / `client` fixture）。
+
+⚠️ `tests/test_store.py` 與 `tests/test_web.py` **不存在**，不要往那裡加。
+
+新檔 `tests/test_expiry.py`（判定層純函式）：
 
 1. `end_time` 已過 → `kind="ended"`, `confidence="certain"`
 2. `end_time` 未到但 `disappeared_at` 非空 → `kind="gone"`
@@ -273,19 +277,17 @@ WHERE s.score >= ? ...
 5. 信心度依來源查表；未列舉的來源落到 `_default: low`
 6. `end_time` 的時區處理：naive 與 aware 輸入都得到同一結論
 
-`tests/test_store.py` 增補：
+新檔 `tests/test_expiry_clear.py`（migration + store + API，照 `test_card_bucket.py` 骨架）：
 
-7. 清除寫入 `cleared_at` / `cleared_from`，state 變 `expired`
-8. **自動還原**：清除後 `upsert_signal` 同一個 key → 回到 `cleared_from`，`restored_count` +1，`cleared_*` 清空
-9. **手動標的 `expired`（`cleared_from IS NULL`）不被自動還原**——這是紅線測試
-10. Migration 可重複執行（跑兩次不報錯、不重複加欄位）
-11. `list_signals` 的 JOIN 不讓 `obs_*` 欄位覆蓋 signals 同名欄位
-
-`tests/test_web.py` 增補：
-
-12. `POST /api/signals/clear-expired` 冪等：連按兩次第二次回 `cleared: 0`
-13. 不合法的 state 回 400
-14. `GET /api/signals` 每列都帶 `expiry`
+7. Migration 加三欄且既有列不受影響（列數不變、`state` 沒被動、新欄位 NULL）
+8. Migration 冪等（連開三次 `Store(db)` 不炸）
+9. 清除寫入 `cleared_at` / `cleared_from`，state 變 `expired`
+10. **自動還原**：清除後 `upsert_signal` 同一個 key → 回到 `cleared_from`，`restored_count` +1，`cleared_*` 清空
+11. **手動標的 `expired`（`cleared_from IS NULL`）不被自動還原**——這是紅線測試
+12. `list_signals` 的 JOIN 不讓 `listing_obs` 的同名欄位覆蓋 signals 的值（兩表有 11 個同名欄位，含 `last_seen` / `landed_twd` / `grade`）
+13. `POST /api/signals/clear-expired` 冪等：連按兩次第二次回 `cleared: 0`
+14. 不合法的 state 回 400
+15. `GET /api/signals` 每列都帶 `expiry`
 
 依 CLAUDE.md 第六節（測試路徑=生產路徑）與全域原則 4（測試不碰真實世界）：所有測試用臨時 db，不碰 `data/sniper.db`，不發任何外呼。
 
