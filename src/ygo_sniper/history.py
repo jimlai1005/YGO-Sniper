@@ -184,6 +184,14 @@ def next_page_for(ledger: dict[str, dict[str, Any]], query: str) -> int:
 # Yahoo 落札相場：廣掃深挖
 # ---------------------------------------------------------------------------
 def _sold_span(listings: list[Any]) -> tuple[str | None, str | None]:
+    """挖回來這批成交的時間跨度（最早, 最晚）。
+
+    這裡讀的是 `lst.raw["sold_at"]`——**來源直接給的成交日**，不是 comps 那個
+    可能被 `now()` 蓋過的欄位。只有 Yahoo 落札相場走這條路，而它是唯一有真實
+    成交日的來源（2026-08-06 實測：comps 裡 buyee_yahoo 957 筆全部是真時間），
+    所以這個跨度是真的。Buyee 系（Mercari／PayPay）的頁面沒有日期，
+    `raw` 裡也就沒有這個鍵，不會混進來。
+    """
     stamps = sorted(
         s for lst in listings if (s := (getattr(lst, "raw", None) or {}).get("sold_at"))
     )

@@ -92,7 +92,7 @@ import math
 import re
 import statistics
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .cards import CardIndex, extract_title_codes
@@ -1181,15 +1181,26 @@ def _risk_penalty(m: SellerMetrics, p: AlphaParams) -> tuple[float, str]:
 #: | 視角 | 算式 | 特性 |
 #: |---|---|---|
 #: | A 同儕相對 | 賣家價 ÷ 同站同卡同版次同稀有度同分數同型態的其他賣家中位 | 最正確、覆蓋最小 |
-#: | B 模型正規化 | 賣家的 (價÷模型估值) 中位 ÷ 同群其他賣家的同一個比值中位 | 模型偏誤相除抵消、覆蓋中等 |
+#: | B 模型正規化 | 賣家的 (價÷模型估值) 中位 ÷ 同群其他賣家的同一個比值中位 | 覆蓋中等、**已知會出錯（2026-08-06 起隔離）** |
 #: | C 模型絕對 | 賣家的 (價÷模型估值) 中位 | 覆蓋最大、**已知會出錯** |
 #:
-#: **B 的關鍵：模型在這裡是「控制變數」不是「真值」。** 同一個模型偏誤同時出現
-#: 在分子（這個賣家）與分母（同群其他賣家），相除時抵消，留下來的才是賣家自己
-#: 的定價偏離。所以 B 的同群可以放寬成「同站 × 同基準 × 同型態 × 同證據層級」，
-#: **不必是同一張卡**——這正是它解決覆蓋率的機制，也是它與 C 的唯一差別。
-#: 極限見 `test_model_normalized_lens_does_not_cancel_a_bias_that_only_hits_one_seller`：
-#: 群內**非共通**的偏誤 B 抵消不掉，它不是「不受模型影響」。
+#: **B 原本的設計意圖**：模型在這裡是「控制變數」不是「真值」。同一個模型偏誤
+#: 同時出現在分子（這個賣家）與分母（同群其他賣家），相除時抵消，留下來的才是
+#: 賣家自己的定價偏離。所以 B 的同群可以放寬成「同站 × 同基準 × 同型態 ×
+#: 同證據層級」，**不必是同一張卡**——那正是它解決覆蓋率的機制。
+#:
+#: ⚠️ **2026-08-06 隔離：那個抵消性質不成立，B 的每一個 `LensView` 都帶
+#: `trusted=False`。** 抵消只對「整片乘同一個常數」的偏誤成立，而本專案模型的
+#: 偏誤**是卡的價位帶的函數**（`valuation.py` 模組頂註：平台係數在高價卡上估出
+#: 來、套到便宜卡高估 6-8 倍）。B 的同群鍵刻意不含卡名 → 同一格裡混著不同價位帶
+#: 的卡 → 分子與分母吃到的是**不同的倍率**，除不掉。反例已釘成測試
+#: （`tests/test_seller_lens_b_quarantine.py`）：一個真 alpha ＝ 1.000×（開價
+#: 就是市價）的賣家，只因為他專賣便宜卡而同群其他人賣貴卡，**B ＝ C ＝ 0.169×**
+#: ——B 提供的保護是零，而且它與 C 給出**完全一樣**的錯誤。
+#: 另一個更早就寫在測試裡的極限
+#: （`test_model_normalized_lens_does_not_cancel_a_bias_that_only_hits_one_seller`）
+#: 是同一件事的特例：群內**非共通**的偏誤 B 抵消不掉。
+#: 在平台係數改成分價位帶之前，B 只是「留著當日後參考的算式」，不是可用的數字。
 LENS_PEER = "peer"
 LENS_MODEL_NORM = "model_norm"
 LENS_MODEL_ABS = "model_abs"
@@ -1216,9 +1227,26 @@ LENS_RULER: dict[str, str] = {
 LENSES_NOTE = (
     "三欄是三把不同的尺，**任兩欄都不可相加、不可平均、不可挑一個當最終分數**："
     "同儕相對（A）兩邊都來自市場、模型偏誤相除抵消，最正確但覆蓋最小；"
-    "模型正規化（B）把模型當控制變數，分子分母同樣受偏誤、群內共通的部分相除抵消，"
-    "覆蓋較大；模型絕對（C）承受模型分段偏誤（實測 L3×Mercari 高估 5.9 倍），"
-    "覆蓋最大但**已知會出錯**。**分數、監控名單、通知一律只讀 A**，B／C 純顯示。"
+    "模型正規化（B）本來想靠「分子分母同吃一個模型偏誤」抵消，但實測偏誤是**價位帶"
+    "的函數**而同群鍵不含卡名，抵消不成立（2026-08-06 起 `trusted=False`）；"
+    "模型絕對（C）承受模型分段偏誤（實測 L3×Mercari 高估 5.9 倍），"
+    "覆蓋最大但**已知會出錯**。**分數、監控名單、通知一律只讀 A**；"
+    "B／C 目前連顯示都沒有接上——要接之前先讀 `LensView.known_broken`。"
+)
+
+#: `LensView.known_broken` 的兩段固定文字。**寫在同一個地方**：這句話會同時出現在
+#: 欄位、caveat 與（未來的）畫面上，散成三份就會有一份先過期（工程原則 1）。
+LENS_B_KNOWN_BROKEN = (
+    "抵消性質不成立：模型偏誤是**卡的價位帶的函數**（valuation 模組頂註：平台係數"
+    "在便宜卡上高估 6-8 倍），而 B 的同群鍵不含卡名，分子分母吃到的倍率不同，除不掉。"
+    "反例：真 alpha ＝ 1.000× 的賣家只因為專賣便宜卡就被算成 B ＝ C ＝ 0.169×——"
+    "B 相對 C 的保護是零。修好平台係數的價位帶偏誤、並重新驗證抵消性質之前，"
+    "這個數字不得顯示、不得進任何決策。"
+)
+LENS_C_KNOWN_BROKEN = (
+    "模型有分段偏誤（實測 L3×Mercari 那個切片高估 5.9 倍），任何專賣便宜普卡的"
+    "賣家在這裡都會長得像持續低於市場價——CLAUDE.md 第四節那個事故就是這個數字"
+    "造成的（`ebay:collectiblemore` 模型說 0.57×、同儕說 1.59×，符號相反）。"
 )
 
 #: 方向判定的死區：比值落在 1±2% 內一律算「跟大家差不多」，不參與「方向相反」
@@ -1274,6 +1302,16 @@ class LensView:
     caveats: tuple[str, ...] = ()
     #: 這把尺會不會進分數／監控／通知。**只有 A 是 True**。
     scoring: bool = False
+    #: 這把尺算出來的數字**現在可不可以相信**。`False` ＝ 已知會騙人。
+    #: 與 `scoring` 是兩件不同的事：`scoring` 說「會不會進分數」，`trusted` 說
+    #: 「這個數字本身對不對」。`ok=True` 也可能 `trusted=False`——那代表
+    #: 「算得出來，而且算出來的是錯的」，正是最危險的一種（它有數字、看起來能用）。
+    #: **B 與 C 目前都是 False**（原因見 `known_broken`）。
+    trusted: bool = True
+    #: `trusted=False` 時說明**為什麼**不可信、以及要修好什麼才能改回 True。
+    #: `trusted=False` 而這裡是空字串，等於「有人只是想關掉它」——
+    #: `tests/test_seller_lens_b_quarantine.py` 會擋下來。
+    known_broken: str = ""
 
     @property
     def direction(self) -> str | None:
@@ -1445,7 +1483,29 @@ def _model_norm_lens(
     *,
     sites_without_comps: set[str],
 ) -> LensView:
-    """視角 B：模型正規化。**模型是控制變數，不是真值。**"""
+    """視角 B：模型正規化。**模型是控制變數，不是真值。**
+
+    ⚠️ **這個數字目前不可信（2026-08-06 隔離，`trusted=False`）——先讀完這一段
+    再決定要不要用它。**
+
+    B 的整個正當性建立在「模型偏誤在分子與分母相除時抵消」。獨立審查證明那只對
+    **整片乘同一個常數**的偏誤成立，而本專案模型的偏誤是**卡的價位帶的函數**
+    （`valuation.py` 模組頂註：平台係數是在高價卡上估出來的，套到便宜卡高估
+    6-8 倍）。B 的同群鍵刻意不含卡名（那正是它換來覆蓋率的地方），所以同一格裡
+    混著不同價位帶的卡，分子與分母吃到的倍率**不一樣**，除不掉。
+
+    反例（`tests/test_seller_lens_b_quarantine.py` 已釘住）：一個賣家開的就是
+    市價（**真 alpha ＝ 1.000×**），只因為他專賣便宜卡、而同群其他人賣貴卡，
+    模型對他的卡高估 5.9 倍 → **B ＝ C ＝ 0.169×**。兩件事同時成立：
+
+      1. B 在「組成驅動」的情境下**與 C 完全相同**——它提供的額外保護是 0。
+      2. 錯誤方向是「看起來很划算」（CLAUDE.md 第三節：混源比較的錯總是往這邊
+         倒），所以使用者的直覺攔不下來。
+
+    這支函式**刻意保留不刪**：算式本身在「偏誤真的整片共通」時是對的，修好
+    平台係數的價位帶偏誤之後它就有價值。在那之前它只是參考實作，不是答案。
+    `trusted=False` 由 `build_lenses` 的 `_quarantine` 統一蓋章（單一出口）。
+    """
     label, ruler = LENS_LABEL[LENS_MODEL_NORM], LENS_RULER[LENS_MODEL_NORM]
     usable = [c for c in cohorts if c["ok"] and c["ratio"] and c["ratio"] > 0]
     own_n = sum(c["own_n"] for c in usable)
@@ -1491,9 +1551,11 @@ def _model_norm_lens(
 
     caveats = [
         "⚠️ 模型在這把尺裡是**控制變數不是真值**：分子（這個賣家）與分母"
-        "（同群其他賣家）承受同一個模型偏誤，**群內共通**的那部分在相除時抵消。"
-        "群內**不共通**的偏誤（例如模型只高估這個賣家在賣的那幾張卡）抵消不掉"
-        "——B 不是「不受模型影響」，只是比 C 少受一層。",
+        "（同群其他賣家）只有在吃到**同一個倍率**的模型偏誤時才會相除抵消。"
+        "群內**不共通**的偏誤抵消不掉——而本專案的模型偏誤正是這一種：它是"
+        "**卡的價位帶的函數**，同群鍵又刻意不含卡名，所以只要這個賣家與同群"
+        "其他人賣的卡落在不同價位帶，抵消就不成立（實測反例：B 與 C 的答案"
+        "**完全一樣**，都是 0.169×，而真值是 1.000×）。",
     ]
     if len(usable) > 1:
         per_cohort = "；".join(
@@ -1506,8 +1568,12 @@ def _model_norm_lens(
     if m.site in sites_without_comps:
         caveats.append(
             f"⚠️ comps 表裡一筆 {m.site} 成交都沒有，模型的平台係數對這一站根本"
-            "估不出來——但那是**整站共通**的偏誤，在同群相除時抵消（這正是 B 比 C "
-            "可信的地方）；仍然無法抵消卡與卡之間的差異偏誤"
+            "估不出來——而這個缺口**不保證**在同群相除時抵消。實測（`valuation.py` "
+            "模組頂註）平台係數的錯誤**隨卡的價位帶變化**：同一個係數在高價卡上"
+            "接近對的、套到便宜卡高估 6-8 倍，所以它不是一個「這一站一律乘 K」"
+            "的常數，而是一個隨卡而變的倍率。"
+            "同群鍵不含卡名 → 分子與分母的卡價位帶不同 → 兩邊吃到的倍率不同，"
+            "留在比值裡的是**組成差異**不是賣家的定價偏離"
         )
     if m.model_n < m.n_rows:
         caveats.append(
@@ -1542,11 +1608,9 @@ def _model_abs_lens(
             ),
             detail="模型估不出來的標的不計入（不是當成 1.0×）",
         )
-    caveats = [
-        "⚠️ **這把尺已知會出錯**：模型有分段偏誤（實測 L3×Mercari 那個切片高估 "
-        "5.9 倍），任何專賣便宜普卡的賣家在這裡都會長得像持續低於市場價。"
-        "CLAUDE.md 第四節那個事故就是這個數字造成的。",
-    ]
+    # 「這把尺已知會出錯」那一句由 `_quarantine` 統一蓋（`LENS_C_KNOWN_BROKEN`），
+    # 這裡只放這個賣家專屬的補充，避免同一句話在兩個地方各寫一份然後漂移。
+    caveats: list[str] = []
     if m.site in sites_without_comps:
         caveats.append(
             f"⚠️ comps 表裡**一筆 {m.site} 成交都沒有** → 模型的平台係數對這一站"
@@ -1591,6 +1655,22 @@ def _sign_conflicts(peer: LensView, others: tuple[LensView, ...]) -> tuple[str, 
     return tuple(out)
 
 
+def _quarantine(view: LensView, why: str) -> LensView:
+    """把一把尺蓋上「已知會騙人」的章：`trusted=False` ＋ 原因 ＋ 一條頭條 caveat。
+
+    **單一出口是刻意的**（工程原則 5）：B 與 C 加起來有六個 `return LensView(...)`，
+    在每個點各寫一次 `trusted=False` 遲早會漏一個，而漏掉的那一個正好是「算得出
+    數字」的分支——沒有數字的分支本來就無害。這裡蓋章，就不必記得。
+    """
+    return replace(
+        view,
+        trusted=False,
+        known_broken=why,
+        caveats=(f"⚠️ **這把尺已知會出錯，目前不得使用（trusted=False）**：{why}",)
+        + view.caveats,
+    )
+
+
 def build_lenses(
     m: SellerMetrics,
     *,
@@ -1598,13 +1678,23 @@ def build_lenses(
     params: AlphaParams | None = None,
     sites_without_comps: set[str] | None = None,
 ) -> SellerLenses:
-    """一個賣家的三把尺。**並排，不合成**（見 `SellerLenses` 的 docstring）。"""
+    """一個賣家的三把尺。**並排，不合成**（見 `SellerLenses` 的 docstring）。
+
+    B 與 C 出廠就帶 `trusted=False`（見 `_quarantine`）：C 是老破口（模型分段
+    偏誤），B 是 2026-08-06 新確認的破口（抵消性質不成立，見 `_model_norm_lens`
+    的 docstring）。只有 A 是可信的尺。
+    """
     p = params or AlphaParams()
     sites = sites_without_comps or set()
     peer = _peer_lens(m, p)
     cohort_rows = cohorts.cohorts_of(m.seller_key) if cohorts is not None else []
-    norm = _model_norm_lens(m, cohort_rows, p, sites_without_comps=sites)
-    absolute = _model_abs_lens(m, p, sites_without_comps=sites)
+    norm = _quarantine(
+        _model_norm_lens(m, cohort_rows, p, sites_without_comps=sites),
+        LENS_B_KNOWN_BROKEN,
+    )
+    absolute = _quarantine(
+        _model_abs_lens(m, p, sites_without_comps=sites), LENS_C_KNOWN_BROKEN
+    )
     return SellerLenses(
         seller_key=m.seller_key, peer=peer, model_norm=norm, model_abs=absolute,
         conflicts=_sign_conflicts(peer, (norm, absolute)),
@@ -1621,7 +1711,9 @@ class AlphaReport:
     metrics: dict[str, SellerMetrics] = field(default_factory=dict)
     scores: dict[str, SellerScore] = field(default_factory=dict)
     #: 三個並排的比價視角（A 同儕相對／B 模型正規化／C 模型絕對）。
-    #: **純顯示**：`scores` 一律只讀 A，`ranked()`／`sync_auto_watch` 也是。
+    #: **只有 A 可信**：`scores` 一律只讀 A，`ranked()`／`sync_auto_watch` 也是。
+    #: B／C 兩把尺出廠就帶 `trusted=False`（見 `_quarantine`），**目前連顯示都
+    #: 沒有接上**——`tests/test_seller_lens_b_quarantine.py` 會擋住任何想接的路徑。
     #: 沒帶 `valuator` 跑的話 B／C 會誠實地回「證據不足」，不會是 0。
     lenses: dict[str, SellerLenses] = field(default_factory=dict)
     coverage: dict[str, Any] = field(default_factory=dict)
@@ -1806,6 +1898,8 @@ __all__ = [
     "DIRECTION_FLAT",
     "DIRECTION_PRICIER",
     "LENSES_NOTE",
+    "LENS_B_KNOWN_BROKEN",
+    "LENS_C_KNOWN_BROKEN",
     "LENS_LABEL",
     "LENS_MODEL_ABS",
     "LENS_MODEL_NORM",

@@ -357,6 +357,17 @@ class CompsEngine:
         return report
 
     def load_from_store(self) -> None:
+        """把視窗內的成交讀進記憶體索引。
+
+        ⚠️ **`window_days` 這道視窗對 `sold_at_is_ingest=1` 的列形同虛設**
+        （2026-08-06 實測：Mercari 1046/1046 筆、PayPay 77/563 筆都是入庫時間），
+        它們的時間戳永遠落在最近，所以永遠在視窗內。這裡**刻意不開
+        `real_sold_at_only`**：這批列的**價格**是真的市場成交價，而它們是
+        Mercari 唯一的行情來源，濾掉等於讓 Mercari 沒有行情可比。
+        代價是「過去 N 天」對它們不成立——真正的老資料混在裡面看不出來。
+        要做的是把真實成交時間挖出來（來源頁面沒有，得另尋管道），
+        不是在這裡靜靜地砍掉樣本。
+        """
         if not self.store:
             return
         cutoff = datetime.now(UTC) - timedelta(days=self.window_days)
@@ -392,6 +403,10 @@ class CompsEngine:
             p75_twd=round(_percentile(prices, 75), 0) if prices else None,
             window_days=self.window_days,
             confidence=conf,
+            # 這個排序讀作「時間戳最新的八筆」而**不是**「最近成交的八筆」：
+            # Buyee 系的 sold_at 是入庫時間（見 `load_from_store` 的警告），
+            # 對它們來說這是入庫先後。只當展示用的取樣，不進任何統計
+            # （上面的中位／百分位吃的是全部 rows，與這個排序無關）。
             samples=sorted(rows, key=lambda r: r.get("sold_at", ""), reverse=True)[:8],
         )
 

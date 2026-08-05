@@ -1698,7 +1698,8 @@ function compsTable(rows, stats){
       <div class="cmp" style="margin-bottom:6px">${head}</div>
       <div class="scroll-x"><table>
         <thead><tr><th>可比程度</th><th>成交價</th><th>平台</th><th>稀有度</th><th>分數</th>
-                   <th>成交日</th><th style="text-align:left">標題</th></tr></thead>
+                   <th>成交日<span class="cmp">＊入庫日＝抓到的日期，不是成交日</span></th>
+                   <th style="text-align:left">標題</th></tr></thead>
         <tbody>${rows.map(c => `
           <tr>
             <td style="text-align:left"><span class="tier t${c.tier}">${escapeHtml(c.tier_label)}</span></td>
@@ -1706,7 +1707,9 @@ function compsTable(rows, stats){
             <td>${escapeHtml(c.site_label || c.site || "–")}${c.same_venue === false ? " ⚠️" : ""}</td>
             <td>${escapeHtml(c.rarity || "–")}</td>
             <td>${c.grade ?? "–"}</td>
-            <td>${escapeHtml((c.sold_at || "").slice(0,10) || "–")}</td>
+            <td title="${c.sold_at_is_ingest ? "這不是成交日，是我們抓到它的日期（Buyee 的已售出頁不給成交日）" : ""}">${
+              escapeHtml((c.sold_at || "").slice(0,10) || "–")
+            }${c.sold_at_is_ingest ? '<span class="cmp">＊入庫日</span>' : ""}</td>
             <td class="t">${c.url
               ? `<a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.title)}</a>`
               : escapeHtml(c.title)}</td>

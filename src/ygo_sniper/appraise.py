@@ -825,6 +825,11 @@ class Comparable:
     平台差異改成外顯——`site_label` 標出它成交在哪個平台、`same_venue` 標出
     它跟你要買的那個平台是不是同一個。要看「換算到同一平台之後多少錢」，
     那是模型公允價的工作（estimate.venue_adjusted）。
+
+    `sold_at` 同一套辦法：**它不保證是成交時間**（Buyee 系的已售出頁不給日期，
+    那批列存的是我們的入庫時間——2026-08-06 實測 Mercari 1046/1046 筆），
+    所以 `sold_at_is_ingest` 跟著一起送出去，畫面上要標出來。把入庫日當成交日
+    印給使用者看，是把一個假的事實講得跟真的一樣（CLAUDE.md 第五節）。
     """
 
     price_twd: float
@@ -839,6 +844,9 @@ class Comparable:
     site: str | None = None
     site_label: str = ""
     same_venue: bool | None = None
+    #: True ＝ 上面那個 `sold_at` 是**我們入庫的時間**，不是成交時間。
+    #: 畫面必須把它標出來（`web/static/index.html` 的「成交日」欄）。
+    sold_at_is_ingest: bool = False
 
 
 def _tier_of(
@@ -927,11 +935,17 @@ def collect_comparables(
                 site=row_site,
                 site_label=venue_label(row_site),
                 same_venue=(row_site == venue) if venue else None,
+                sold_at_is_ingest=bool(r.get("sold_at_is_ingest")),
             )
         )
 
     shown: list[Comparable] = []
     for tier in sorted(buckets):
+        # ⚠️ 這個排序**不是**「最近成交的排前面」：Buyee 系的 `sold_at` 是入庫
+        # 時間（2026-08-06 實測 Mercari 100%），所以那些列排的是入庫先後。
+        # 這裡刻意不改排序也不排除它們——可比程度（tier）才是這張表的主軸，
+        # 時間只是同一層內的次要順序，而扔掉 Mercari 等於扔掉最大的一批可比成交。
+        # 承重的防線是**每一列都帶著 `sold_at_is_ingest` 送到畫面上標記**。
         group = sorted(buckets[tier], key=lambda c: (c.sold_at or ""), reverse=True)
         shown.extend(group[: max(0, limit - len(shown))])
         if len(shown) >= limit:
