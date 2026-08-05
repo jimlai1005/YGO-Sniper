@@ -467,7 +467,10 @@ class Store:
         now = _now_iso()
         with self._conn() as c:
             existing = c.execute(
-                "SELECT key, state, note, first_seen FROM signals WHERE key = ?", (key,)
+                "SELECT key, state, note, first_seen, cleared_from, "
+                "COALESCE(restored_count, 0) AS restored_count "
+                "FROM signals WHERE key = ?",
+                (key,),
             ).fetchone()
 
             row = {
@@ -498,6 +501,19 @@ class Store:
                 # 保留人工狀態與筆記 —— 這是狀態機的重點，
                 # 每天重掃不能把你昨天標的「已詢問」洗掉
                 sets = ", ".join(f"{k} = :{k}" for k in row if k != "key")
+                # 唯一的例外：**程式自己**清掉的（cleared_from 非空）標的又上架了，
+                # 把它放回原狀態。這不是覆寫人工決策，是**恢復**人工決策——
+                # 使用者標的是 watching，是我們依 56.5% 誤判率的推論把它移走的。
+                # 使用者手動標的 expired 沒有 cleared_from，走不到這裡。
+                if (
+                    existing["state"] == TriageState.EXPIRED.value
+                    and existing["cleared_from"]
+                ):
+                    row["state"] = existing["cleared_from"]
+                    row["cleared_at"] = None
+                    row["cleared_from"] = None
+                    row["restored_count"] = (existing["restored_count"] or 0) + 1
+                    sets = ", ".join(f"{k} = :{k}" for k in row if k != "key")
                 c.execute(f"UPDATE signals SET {sets} WHERE key = :key", row)
                 return False
 

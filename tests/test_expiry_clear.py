@@ -183,3 +183,107 @@ def test_clear_expired_only_touches_the_named_state(store):
 def test_clear_expired_rejects_unknown_state(store):
     with pytest.raises(ValueError, match="不可清除"):
         store.clear_expired_signals("bought", gone_confidence={"_default": "low"})
+
+
+def _signal_for(key: str, *, site: str = "buyee_yahoo"):
+    """組一個最小可用的 Signal 給 upsert_signal 用。
+
+    `Signal` 的八個欄位全是必填（`domain.py:289-298`），`Listing` 的價格欄位
+    叫 `price` 不是 `price_native`（`domain.py:170`）。
+
+    `key` 必須是 signals 表的主鍵形狀 `site:external_id`（正式庫實測：
+    `buyee_yahoo:n1238185137`）——`upsert_signal` 拿 `Listing.key`
+    （`domain.py:193-194` 現算 `f"{site}:{external_id}"`）去比對既有列，
+    餵裸 key 會**新插一列**而不是走 `existing` 分支，紅線測試
+    `test_manually_expired_is_never_restored` 會因此假性通過。
+    """
+    from ygo_sniper.domain import (
+        CardInfo,
+        CompStats,
+        Currency,
+        Listing,
+        RouteQuote,
+        Signal,
+        Site,
+    )
+
+    prefix = f"{site}:"
+    external_id = key[len(prefix):] if key.startswith(prefix) else key
+    listing = Listing(
+        site=Site(site), external_id=external_id, title=f"卡 {key}",
+        url=f"https://example.test/{key}", price=1000.0, currency=Currency.JPY,
+    )
+    assert listing.key == key, f"測試 key 形狀不對：{listing.key!r} != {key!r}"
+    route = RouteQuote(
+        route="direct", label="直寄", landed_twd=250.0, item_twd=220.0,
+        fee_twd=10.0, shipping_twd=20.0, bundle_size=1,
+    )
+    return Signal(
+        listing=listing,
+        card=CardInfo(),
+        best_route=route,
+        all_routes=[route],
+        comps=CompStats(n=0, median_twd=None, p25_twd=None, p40_twd=None,
+                        p75_twd=None, window_days=90),
+        flags=[],
+        score=50.0,
+        reason="",
+    )
+
+
+def test_cleared_signal_is_restored_when_it_comes_back(store):
+    """清掉的東西又上架 → 自動放回原狀態，並累加誤殺計數。"""
+    key = "buyee_yahoo:gone-1"
+    _insert(store, key)
+    _mark_gone(store, key)
+    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    assert store.get_signal(key)["state"] == TriageState.EXPIRED.value
+
+    store.upsert_signal(_signal_for(key))
+
+    row = store.get_signal(key)
+    assert row["state"] == "watching"
+    assert row["cleared_at"] is None
+    assert row["cleared_from"] is None
+    assert row["restored_count"] == 1
+
+
+def test_manually_expired_is_never_restored(store):
+    """紅線：使用者手動標的 expired 沒有 cleared_from，程式不准動它。"""
+    key = "buyee_yahoo:manual"
+    _insert(store, key, state=TriageState.EXPIRED.value)
+    store.upsert_signal(_signal_for(key))
+    row = store.get_signal(key)
+    assert row["state"] == TriageState.EXPIRED.value
+    assert row["restored_count"] == 0
+    # 走的必須是 existing 分支——多插一列的話上面兩條會假性通過（見 _signal_for）
+    with sqlite3.connect(store.db_path) as c:
+        assert c.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 1
+
+
+def test_restore_counts_accumulate(store):
+    """反覆進出的標的，誤殺計數要累加——它就是這個功能的錯誤率。"""
+    key = "buyee_yahoo:flappy"
+    _insert(store, key)
+    _mark_gone(store, key)
+    for expected in (1, 2):
+        store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+        store.upsert_signal(_signal_for(key))
+        assert store.get_signal(key)["restored_count"] == expected
+        _mark_gone_again(store, key)
+
+
+def _mark_gone_again(store: Store, key: str) -> None:
+    with sqlite3.connect(store.db_path) as c:
+        c.execute(
+            "UPDATE listing_obs SET disappeared_at = ? WHERE key = ?",
+            ("2026-08-05T00:00:00+00:00", key),
+        )
+
+
+def test_normal_upsert_still_preserves_manual_state(store):
+    """既有紅線不能被這次改動弄壞：一般的重掃不覆寫人工狀態。"""
+    key = "buyee_yahoo:asked"
+    _insert(store, key, state="asked_seller")
+    store.upsert_signal(_signal_for(key))
+    assert store.get_signal(key)["state"] == "asked_seller"
