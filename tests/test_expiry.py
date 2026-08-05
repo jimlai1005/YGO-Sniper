@@ -90,3 +90,36 @@ def test_broken_payload_does_not_crash():
     """payload 壞掉不能讓整張卡片消失——回 live，讓它繼續顯示。"""
     assert expiry_status(_row(payload="not json"), now=NOW).kind == "live"
     assert expiry_status(_row(payload=None), now=NOW).kind == "live"
+
+
+def test_confidence_table_is_consulted():
+    row = _row(site="buyee_yahoo", obs_disappeared_at=(NOW - timedelta(hours=2)).isoformat())
+    st = expiry_status(row, now=NOW, gone_confidence={"buyee_yahoo": "medium", "_default": "low"})
+    assert st.confidence == "medium"
+    assert st.note is None          # medium 不加警語
+
+
+def test_unknown_source_falls_back_to_default():
+    row = _row(site="brand_new_site", obs_disappeared_at=(NOW - timedelta(hours=2)).isoformat())
+    st = expiry_status(row, now=NOW, gone_confidence={"buyee_yahoo": "medium", "_default": "low"})
+    assert st.confidence == "low"
+    assert "復活率偏高" in st.note
+
+
+def test_gone_confidence_from_config_reads_scan_block():
+    from ygo_sniper.expiry import gone_confidence_from_config
+
+    class _Cfg:
+        scan = {"gone_confidence": {"buyee_yahoo": "medium", "_default": "low"}}
+
+    assert gone_confidence_from_config(_Cfg())["buyee_yahoo"] == "medium"
+
+
+def test_gone_confidence_defaults_when_config_missing():
+    """設定沒寫時不能炸，也不能假裝有信心——退回全部 low。"""
+    from ygo_sniper.expiry import gone_confidence_from_config
+
+    class _Cfg:
+        scan = {}
+
+    assert gone_confidence_from_config(_Cfg()) == {"_default": "low"}

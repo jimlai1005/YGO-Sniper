@@ -116,3 +116,16 @@ def expiry_status(
         return ExpiryStatus(kind="gone", confidence=confidence, detail=detail, note=note)
 
     return ExpiryStatus(kind="live", confidence="certain", detail="", note=None)
+
+
+def gone_confidence_from_config(cfg: Any) -> dict[str, str]:
+    """從設定取來源信心度表。`cfg.scan` 是原始 dict（`config.py:162`）。
+
+    設定缺漏時退回 `DEFAULT_GONE_CONFIDENCE`——不能因為沒設定就假裝有信心。
+    """
+    table = (getattr(cfg, "scan", None) or {}).get("gone_confidence") or {}
+    if not table:
+        return dict(DEFAULT_GONE_CONFIDENCE)
+    merged = dict(DEFAULT_GONE_CONFIDENCE)
+    merged.update({str(k): str(v) for k, v in table.items()})
+    return merged

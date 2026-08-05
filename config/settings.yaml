@@ -433,6 +433,23 @@ scan:
   # 實測量級約每天 100-300 列、每列約 300 bytes → 一年約 30-100 MB。
   # 180 天足夠回答任何「在架多久」的問題，又不會讓 db 無限長大。設 0 = 不清理。
   listing_obs_retain_days: 180
+  # 「疑似已離場」（listing_obs.disappeared_at）的可信度，依來源分級。
+  # ⚠️ 這些是**實測值**，不是猜的，而且會隨爬蟲改進漂移——要調之前先跑
+  # `ygo-sniper revive-rate` 重新量，不要憑印象改（CLAUDE.md 第七節）。
+  #
+  # 量測定義：分母 = 曾被判離場的列（disappeared_at 非空 OR revived_count > 0），
+  # 分子 = 其中 revived_count > 0 的列。2026-08-06 實測（data/sniper.db，598 列）：
+  #   ebay 66.4% (n=113) / buyee_paypay 70.4% (n=81)
+  #   buyee_yahoo 23.9% (n=67) / buyee_mercari 0% (n=1，樣本不足)
+  #
+  # 分級規則：復活率 < 35% 且 n >= 20 → medium；其餘一律 low。
+  # 沒有任何來源夠格拿 certain——那個等級只給「end_time 已過」的確定事實。
+  gone_confidence:
+    buyee_yahoo: medium
+    buyee_paypay: low
+    ebay: low
+    buyee_mercari: low      # n=1，樣本不足，保守給 low
+    _default: low           # 未列舉的新來源一律 low
 
 # ---------------------------------------------------------------------------
 # 發現管道（source）。與 routes 的 sites（購買路徑）是兩個維度：
