@@ -836,3 +836,124 @@ def test_seller_page_batch_does_not_drive_exit_judgement(store):
     assert report["disappeared"] == 0 and report["window_exit"] == 0
     rows = {r["key"]: r for r in store.listing_obs()}
     assert rows["ebay:2"]["disappeared_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# 9. 雙軌入選（Alpha ∪ Supply Fit）
+#
+# 雞生蛋：Alpha 幾乎只能從成交價算出來（實測可比 sold 439 筆 vs ask 24 筆），
+# 而在架帳要變厚只能靠密集掃賣家庫存——那正是監控名單在做的事。supply 軌
+# 用「值不值得盯」入選來打破它。
+#
+# **淘汰只在同軌內比分數**：Alpha 的 25 分與 Supply 的 70 分是兩把不同的尺，
+# 拿來比大小沒有意義（CLAUDE.md 第三節），而且錯的方向是靜默的——名單看起來
+# 運作正常，只是踢錯人。
+# ---------------------------------------------------------------------------
+from ygo_sniper.seller_alpha import AlphaReport, SellerMetrics, SellerScore  # noqa: E402
+from ygo_sniper.seller_supply import SupplyFit  # noqa: E402
+from ygo_sniper.seller_watch import SOURCE_SUPPLY, sync_auto_watch  # noqa: E402
+
+CHEAP = "buyee_yahoo:cheap"
+BIG = "buyee_yahoo:bigsupply"
+
+
+def _two_track_report():
+    """cheap 有 Alpha 沒 Supply、bigsupply 有 Supply 沒 Alpha——兩軌各一個代表。"""
+    scores = {
+        CHEAP: SellerScore(seller_key=CHEAP, ok=True, reason="同儕相對便宜", total=40.0),
+        BIG: SellerScore(seller_key=BIG, ok=False, reason="證據不足", total=None),
+    }
+    metrics = {k: SellerMetrics(seller_key=k, site="buyee_yahoo", seller_id=k.split(":")[1])
+               for k in scores}
+    report = AlphaReport(metrics=metrics, scores=scores)
+    supply = {
+        CHEAP: SupplyFit(seller_key=CHEAP, site="buyee_yahoo", ok=False,
+                         reason="只有 1 個維度算得出來", total=None),
+        BIG: SupplyFit(seller_key=BIG, site="buyee_yahoo", ok=True,
+                       reason="", total=70.0, n_dimensions_used=3),
+    }
+    return report, supply
+
+
+def test_seller_with_no_alpha_but_high_supply_fit_gets_watched(store):
+    """打破雞生蛋：Alpha 算不出來的高供給賣家必須進得了名單。"""
+    report, supply = _two_track_report()
+    result = sync_auto_watch(store, report, WatchParams(), supply=supply)
+    assert BIG in [a["seller_key"] for a in result["added"]]
+    row = store.get_seller_watch(BIG)
+    assert row["source"] == SOURCE_SUPPLY
+    assert "供給" in row["reason"]
+
+
+def test_watch_reason_distinguishes_the_two_tracks(store):
+    """名單裡必須看得出誰是「便宜」進來的、誰是「值得盯」進來的——
+    否則使用者會以為名單上每個都是便宜賣家。"""
+    report, supply = _two_track_report()
+    sync_auto_watch(store, report, WatchParams(), supply=supply)
+    assert store.get_seller_watch(CHEAP)["source"] == SOURCE_AUTO
+    assert "Alpha" in store.get_seller_watch(CHEAP)["reason"]
+    assert store.get_seller_watch(BIG)["source"] == SOURCE_SUPPLY
+    assert "供給" in store.get_seller_watch(BIG)["reason"]
+
+
+def test_supply_entry_never_evicts_an_alpha_entry(store):
+    """Supply 的 70 分與 Alpha 的 25 分是兩把不同的尺，比大小沒有意義。
+    位子不夠時，假設（supply）不得擠掉實證（alpha）。"""
+    params = WatchParams(max_sellers=1)
+    add_watch(store, CHEAP, source=SOURCE_AUTO, reason="Alpha 25.0 分",
+              params=params, score=25.0)
+    res = add_watch(store, BIG, source=SOURCE_SUPPLY, reason="供給 70.0 分",
+                    params=params, score=70.0)
+    assert res.ok is False              # 被拒絕，不是擠掉 alpha
+    assert res.evicted is None
+    assert store.get_seller_watch(CHEAP)["active"] == 1
+
+
+def test_alpha_entry_evicts_a_supply_entry_without_comparing_scores(store):
+    """反向：實證可以擠掉假設，而且**不比分數**（不同尺）——
+    Alpha 25 分擠得掉 Supply 90 分。"""
+    params = WatchParams(max_sellers=1)
+    add_watch(store, BIG, source=SOURCE_SUPPLY, reason="供給 90.0 分",
+              params=params, score=90.0)
+    res = add_watch(store, CHEAP, source=SOURCE_AUTO, reason="Alpha 25.0 分",
+                    params=params, score=25.0)
+    assert res.ok is True
+    assert res.evicted == BIG
+    assert store.get_seller_watch(BIG)["active"] == 0
+
+
+def test_supply_entry_evicts_only_lower_scoring_supply(store):
+    """同軌內才比分數。"""
+    params = WatchParams(max_sellers=1)
+    add_watch(store, "buyee_yahoo:low", source=SOURCE_SUPPLY, reason="供給 30.0 分",
+              params=params, score=30.0)
+    res = add_watch(store, BIG, source=SOURCE_SUPPLY, reason="供給 70.0 分",
+                    params=params, score=70.0)
+    assert res.ok is True and res.evicted == "buyee_yahoo:low"
+
+
+def test_manual_is_still_never_evicted_by_either_track(store):
+    """既有紅線不得被新軌道破壞。"""
+    params = WatchParams(max_sellers=1)
+    add_watch(store, "ebay:psa", source=SOURCE_MANUAL, reason="使用者指定", params=params)
+    for src, sc in ((SOURCE_AUTO, 99.0), (SOURCE_SUPPLY, 99.0)):
+        res = add_watch(store, f"ebay:x{src}", source=src, reason="x",
+                        params=params, score=sc)
+        assert res.ok is False
+        assert store.get_seller_watch("ebay:psa")["active"] == 1
+
+
+def test_supply_track_respects_its_own_threshold(store):
+    """低於 supply 門檻的不入選，而且不會被 alpha 門檻誤判。"""
+    report, supply = _two_track_report()
+    params = WatchParams(supply_min_score=80.0)      # BIG 是 70 分，不該入選
+    result = sync_auto_watch(store, report, params, supply=supply)
+    assert BIG not in [a["seller_key"] for a in result["added"]]
+
+
+def test_sync_auto_watch_without_supply_argument_still_works(store):
+    """向後相容：既有呼叫端沒傳 supply 時行為不變。"""
+    report, _ = _two_track_report()
+    result = sync_auto_watch(store, report, WatchParams())
+    assert CHEAP in [a["seller_key"] for a in result["added"]]
+    assert BIG not in [a["seller_key"] for a in result["added"]]

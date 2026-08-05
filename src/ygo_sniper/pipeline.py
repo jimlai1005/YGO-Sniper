@@ -462,25 +462,34 @@ class Pipeline:
         return rows
 
     def _sync_auto_watch(self, params) -> dict | None:
-        """分數過門檻的賣家自動入選。**失敗只印警告**（隔離邊界）。
+        """過門檻的賣家自動入選（**兩條軌**）。**失敗只印警告**（隔離邊界）。
+
+        軌 1 Alpha（「比同儕便宜多少」）、軌 2 Supply Fit（「值不值得盯」）。
+        兩軌的分數是兩把不同的尺，**永不互比**——印出來時也要分開講門檻，
+        不要混成一句「X 分 ≥ Y」讓人以為那是同一個量表。
 
         只加不刪：分數會隨樣本上下跳，掉到門檻以下就自動移除的話，賣家會在
         名單上進出，而重新加入會清空 `last_scanned_at`——輪替節奏會被自己的
         分數雜訊打亂。要移除是人工決定（`watch-seller remove`）。
         """
         from .seller_alpha import analyze
+        from .seller_supply import SupplyParams, supply_fit_all
         from .seller_watch import sync_auto_watch
 
         try:
             report = analyze(self.store, cfg=self.cfg)
-            out = sync_auto_watch(self.store, report, params)
+            supply = supply_fit_all(list(report.metrics.values()), params=SupplyParams())
+            out = sync_auto_watch(self.store, report, params, supply=supply)
         except Exception as exc:  # noqa: BLE001 - 隔離邊界，見 docstring
             print(f"[warn] 賣家自動入選失敗，本輪跳過：{type(exc).__name__}: {exc}")
             return None
         for a in out["added"]:
+            supply_track = a.get("track") == "supply"
+            label = "供給軌" if supply_track else "Alpha 軌"
+            floor = params.supply_min_score if supply_track else params.auto_min_score
             print(
-                f"[watch] 自動入選 {a['seller_key']}（{a['score']:.1f} 分 ≥ "
-                f"{params.auto_min_score:g}，批次 {a['batch']}）"
+                f"[watch] 自動入選 {a['seller_key']}（{label} {a['score']:.1f} 分 ≥ "
+                f"{floor:g}，批次 {a['batch']}）"
                 + (f"，淘汰 {a['evicted']}" if a.get("evicted") else "")
             )
         for r in out["rejected"]:

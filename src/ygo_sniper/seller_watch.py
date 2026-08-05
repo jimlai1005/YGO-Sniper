@@ -63,6 +63,18 @@ WATCH_ROTATION_META_KEY = "seller_watch_rotation"
 
 SOURCE_AUTO = "auto"
 SOURCE_MANUAL = "manual"
+#: 第二條自動入選軌（2026-08-05）：Supply Fit（「這賣家值不值得盯」）。
+#: **不與 `SOURCE_AUTO` 共用一把尺**——auto 的 score 是 Seller Alpha（同儕相對
+#: 便宜多少），supply 的 score 是供給契合度（跟便宜與否無關）。存在同一個
+#: `score` 欄位裡是為了 schema 不動，但**跨軌不准比大小**，見 `_evictable`。
+SOURCE_SUPPLY = "supply"
+
+#: 各軌的中文標籤（訊息用；不要在別處手打字串）。
+SOURCE_LABEL: dict[str, str] = {
+    SOURCE_AUTO: "Alpha 軌",
+    SOURCE_SUPPLY: "供給軌",
+    SOURCE_MANUAL: "手動",
+}
 
 #: site → 具備「賣家頁列舉」能力的 source 名稱。實測依據見
 #: reports/seller-page-feasibility.md（eBay `filter=sellers:`、PayPay `/user/{id}`）。
@@ -122,6 +134,9 @@ class WatchParams:
     batches: int = 4
     #: 自動入選的分數門檻。依據見 settings.yaml 的註解。
     auto_min_score: float = 25.0
+    #: **供給軌**的入選門檻（Supply Fit 0-100）。與 `auto_min_score` 是兩把
+    #: 不同的尺，數字大小不可互相比較、也不可互相代入。依據見 settings.yaml。
+    supply_min_score: float = 60.0
     #: 每個賣家每次抓幾頁。1 頁：eBay 一頁 200 筆、PayPay 一頁 100 筆，
     #: 遠大於任何一個賣家的遊戲王在架量（實測 38 筆／人）。
     pages: int = 1
@@ -143,6 +158,7 @@ class WatchParams:
             ("per_seller_interval_minutes", "per_seller_interval_minutes", float, 1.0),
             ("batches", "watch_batches", int, 1),
             ("auto_min_score", "watch_auto_min_score", float, 0.0),
+            ("supply_min_score", "watch_supply_min_score", float, 0.0),
             ("pages", "watch_pages", int, 1),
         ):
             if key not in block:
@@ -207,9 +223,14 @@ def add_watch(
     - 名單已滿：
         * **manual 永不被自動淘汰**（那是使用者明講要追蹤的人）。
         * auto 候選人可以擠掉「分數比它低的 auto」——一個位子給更有證據的那個。
-        * 擠不動（沒有更低分的 auto，或候選人是 manual）→ **拒絕並說明要移除誰**。
+        * auto 擠不掉 auto 時，可以擠掉**任何一個 supply**，且**不比分數**：
+          Alpha 是實證（他確實比同儕便宜），Supply Fit 只是假設（他看起來
+          值得盯），位子不夠時假設讓給實證。兩者的分數是兩把不同的尺。
+        * supply 候選人**只能**擠掉分數更低的 supply（同軌內才比得起來）。
+        * 擠不動（沒有可淘汰對象，或候選人是 manual）→ **拒絕並說明要移除誰**。
           自動幫使用者砍掉一個他手動加的賣家，比拒絕更糟。
-    `score` 只有 auto 帶（manual 一律 None，見模組頂註第 2 點）。
+    `score` 只有 auto／supply 帶（manual 一律 None，見模組頂註第 2 點），
+    **而且兩軌的 score 不同源**：跨軌時只比軌道優先序，不比數字。
     """
     seller_key = (seller_key or "").strip()
     if ":" not in seller_key:
@@ -240,11 +261,8 @@ def add_watch(
             )
         store.deactivate_seller_watch(
             victim["seller_key"],
-            reason=(
-                f"名單已滿（上限 {params.max_sellers}），自身 "
-                f"{float(victim['score']):.1f} 分，被分數更高的 {seller_key}"
-                f"（{float(score):.1f} 分）擠下"
-            ),
+            reason=_evict_reason(victim, params=params, seller_key=seller_key,
+                                 source=source, score=score),
             now=now,
         )
         evicted = victim["seller_key"]
@@ -261,35 +279,118 @@ def add_watch(
     return WatchAddResult(True, seller_key, detail, batch=batch, evicted=evicted)
 
 
+def _track_rows(active: list[dict[str, Any]], track: str) -> list[dict[str, Any]]:
+    return [r for r in active if r.get("source") == track]
+
+
+def _lowest_scored(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """同一軌之內分數最低的那一列（沒有分數的排最前——證據最少的先讓位）。
+
+    只在**單一軌內**呼叫。跨軌排序沒有意義：兩軌的 score 不同源。
+    """
+    if not rows:
+        return None
+    return min(
+        rows,
+        key=lambda r: (
+            float(r["score"]) if r.get("score") is not None else float("-inf"),
+            str(r.get("seller_key") or ""),   # 同分時仍然可預測
+        ),
+    )
+
+
 def _evictable(
     active: list[dict[str, Any]], *, source: str, score: float | None
 ) -> dict[str, Any] | None:
-    """滿了要淘汰誰。找不到就回 None（＝拒絕新增，不硬擠）。"""
-    if source != SOURCE_AUTO or score is None:
-        return None  # manual 候選人不淘汰任何人
-    autos = [
-        r for r in active
-        if r.get("source") == SOURCE_AUTO and r.get("score") is not None
-        and float(r["score"]) < float(score)
+    """滿了要淘汰誰。找不到就回 None（＝拒絕新增，不硬擠）。
+
+    軌道優先序（**跨軌不比分數**，見 CLAUDE.md 第三節）：
+
+    | 候選人 | 可以淘汰 | 不可以淘汰 |
+    |---|---|---|
+    | manual | 誰都不淘汰 | — |
+    | auto   | 分數更低的 auto；沒有就任一 supply（不比分數） | manual |
+    | supply | 只有分數更低的 supply | manual、auto |
+
+    auto 擠 supply 時挑「supply 軌內分數最低的那一個」——那個「最低」是
+    supply **軌內**的排序，從頭到尾沒有拿去跟 auto 的分數比過；這樣做只是
+    為了行為可預測、可測試。
+    """
+    if score is None or source not in (SOURCE_AUTO, SOURCE_SUPPLY):
+        return None  # manual 候選人不淘汰任何人；沒分數的也不淘汰任何人
+    same_track_lower = [
+        r for r in _track_rows(active, source)
+        if r.get("score") is not None and float(r["score"]) < float(score)
     ]
-    if not autos:
-        return None
-    return min(autos, key=lambda r: float(r["score"]))
+    victim = _lowest_scored(same_track_lower)
+    if victim is not None:
+        return victim
+    if source == SOURCE_AUTO:
+        # 實證（Alpha）擠得掉假設（Supply Fit），**不比分數**：Alpha 的 25 分
+        # 與 Supply 的 90 分是兩把不同的尺，比大小沒有意義。
+        return _lowest_scored(_track_rows(active, SOURCE_SUPPLY))
+    return None
+
+
+def _evict_reason(
+    victim: dict[str, Any], *, params: WatchParams, seller_key: str,
+    source: str, score: float | None,
+) -> str:
+    """被淘汰的那一列上留什麼字。**同軌才寫分數比較，跨軌只寫軌道優先序。**
+
+    跨軌時寫「被分數更高的 X 擠下」會憑空製造一個混源比較的說法——
+    留在 db 裡的解釋錯了，比沒有解釋更難發現。
+    """
+    head = f"名單已滿（上限 {params.max_sellers}）"
+    v_score = victim.get("score")
+    v_source = str(victim.get("source") or "")
+    if v_source == source:
+        return (
+            f"{head}，自身 {float(v_score):.1f} 分，被同軌"
+            f"（{SOURCE_LABEL.get(source, source)}）分數更高的 {seller_key}"
+            f"（{float(score):.1f} 分）擠下"
+        )
+    return (
+        f"{head}，被 {SOURCE_LABEL.get(source, source)} 的 {seller_key} 擠下："
+        f"Alpha 是實證（同儕相對確實較便宜）、供給契合只是假設（看起來值得盯），"
+        f"位子不夠時假設讓給實證。**兩軌分數不同源，這裡沒有比大小**"
+    )
+
+
+def _track_census(active: list[dict[str, Any]]) -> str:
+    """名單組成（各軌各幾個）。拒絕訊息與 CLI 共用同一份說法。"""
+    n_manual = len(_track_rows(active, SOURCE_MANUAL))
+    n_auto = len(_track_rows(active, SOURCE_AUTO))
+    n_supply = len(_track_rows(active, SOURCE_SUPPLY))
+    n_other = len(active) - n_manual - n_auto - n_supply
+    parts = [f"manual {n_manual} 個", f"auto／Alpha 軌 {n_auto} 個",
+             f"supply／供給軌 {n_supply} 個"]
+    if n_other:
+        parts.append(f"其他來源 {n_other} 個")
+    return "、".join(parts)
 
 
 def _full_hint(active: list[dict[str, Any]], *, source: str, score: float | None) -> str:
-    n_manual = sum(1 for r in active if r.get("source") == SOURCE_MANUAL)
-    autos = [r for r in active if r.get("source") == SOURCE_AUTO and r.get("score") is not None]
-    lowest = min(autos, key=lambda r: float(r["score"])) if autos else None
+    same_track = [
+        r for r in _track_rows(active, source) if r.get("score") is not None
+    ]
+    lowest = _lowest_scored(same_track)
     if source == SOURCE_MANUAL:
         head = "手動加入不淘汰任何人（manual 永不自動淘汰、auto 也不由手動加入來砍）"
     elif score is None:
         head = "候選人沒有分數，無從比較"
+    elif source == SOURCE_SUPPLY:
+        head = (
+            f"名單上沒有任何分數低於 {score:.1f} 的 supply 賣家，"
+            "而供給軌**不得擠掉 Alpha 軌**（假設不擠實證，兩軌分數也不同源）"
+        )
     else:
-        head = f"名單上沒有任何分數低於 {score:.1f} 的 auto 賣家"
+        head = (
+            f"名單上沒有任何分數低於 {score:.1f} 的 auto 賣家，也沒有任何 supply 可讓位"
+        )
     tail = (
-        f"；名單組成：manual {n_manual} 個、auto {len(active) - n_manual} 個"
-        + (f"，最低分的 auto 是 {lowest['seller_key']}（{float(lowest['score']):.1f} 分）"
+        f"；名單組成：{_track_census(active)}"
+        + (f"，同軌最低分的是 {lowest['seller_key']}（{float(lowest['score']):.1f} 分）"
            if lowest else "")
         + "。要空出位子請先 `ygo-sniper watch-seller remove <key>`"
     )
@@ -303,16 +404,48 @@ def remove_watch(
 
 
 def sync_auto_watch(
-    store: Any, report: Any, params: WatchParams, *, now: str | None = None
+    store: Any, report: Any, params: WatchParams, *,
+    supply: dict[str, Any] | None = None, now: str | None = None,
 ) -> dict[str, Any]:
-    """把分數過門檻的賣家自動加進名單。回傳報告（加了誰、擋在哪裡）。
+    """把過門檻的賣家自動加進名單。**兩條軌道**，回傳報告（加了誰、擋在哪裡）。
+
+    ### 為什麼要第二條軌（2026-08-05）
+    Alpha 幾乎只能從**成交價**算出來（實測可比 sold 439 筆 vs ask 24 筆），
+    而在架帳要變厚只能靠密集掃賣家庫存——那正是監控名單在做的事：
+
+        要有 Alpha 才進名單 → 進名單才長得出在架觀測
+        → 有在架觀測才湊得出同儕 → 湊得出同儕才算得出 Alpha
+
+    supply 軌（Supply Fit，「值不值得盯」）用另一組證據入選來打破這個循環。
+
+    ### 兩軌的分數**永不互比**
+    Alpha 軌先跑（維持既有行為），supply 軌後跑；已在名單上的走 `already`。
+    兩軌的分數存在同一個 `score` 欄位，但由 `source` 區分軌道，淘汰只在同軌內
+    比分數（見 `_evictable`）。回報的 `added` 每一項帶 `track` 讓呼叫端分得出來。
 
     只加不刪：分數會隨每一輪的樣本上下跳，掉到門檻以下就自動移除的話，
     一個賣家會在名單上進進出出，而 `last_scanned_at` 每次重加都會清空
     （見 `store.upsert_seller_watch`）——輪替節奏會被自己的分數雜訊打亂。
     要移除請人工決定（`watch-seller remove`）。
     """
-    out: dict[str, Any] = {"added": [], "already": 0, "rejected": [], "threshold": params.auto_min_score}
+    out: dict[str, Any] = {
+        "added": [], "already": 0, "rejected": [],
+        "threshold": params.auto_min_score,
+        "supply_threshold": params.supply_min_score,
+    }
+
+    def _record(res: WatchAddResult, *, track: str, total: float) -> None:
+        if res.already:
+            out["already"] += 1
+        elif res.ok:
+            out["added"].append({"seller_key": res.seller_key, "score": total,
+                                 "batch": res.batch, "evicted": res.evicted,
+                                 "track": track})
+        else:
+            out["rejected"].append({"seller_key": res.seller_key, "reason": res.reason,
+                                    "track": track})
+
+    # --- 1. Alpha 軌（實證：他比同儕便宜多少）------------------------------
     ranked = report.ranked() if hasattr(report, "ranked") else []
     for score_obj, _metrics in ranked:
         total = score_obj.total
@@ -324,13 +457,31 @@ def sync_auto_watch(
                    f"（{score_obj.reason}）",
             params=params, score=float(total), now=now,
         )
-        if res.already:
-            out["already"] += 1
-        elif res.ok:
-            out["added"].append({"seller_key": res.seller_key, "score": total,
-                                 "batch": res.batch, "evicted": res.evicted})
-        else:
-            out["rejected"].append({"seller_key": res.seller_key, "reason": res.reason})
+        _record(res, track="alpha", total=total)
+
+    # --- 2. 供給軌（假設：他看起來值得盯）----------------------------------
+    # 沒傳 supply 就完全不跑——既有呼叫端的行為一個字都不變。
+    for fit in sorted(
+        (supply or {}).values(),
+        key=lambda f: (-(getattr(f, "total", None) or 0.0), getattr(f, "seller_key", "")),
+    ):
+        total = getattr(fit, "total", None)
+        if not getattr(fit, "ok", False) or total is None:
+            continue
+        if total < params.supply_min_score:
+            continue
+        n_used = getattr(fit, "n_dimensions_used", 0)
+        n_total = getattr(fit, "n_dimensions_total", 5)
+        res = add_watch(
+            store, fit.seller_key, source=SOURCE_SUPPLY,
+            reason=(
+                f"自動入選（供給軌）：供給契合 {total:.1f} 分 ≥ "
+                f"門檻 {params.supply_min_score:g}（{n_used}/{n_total} 維度）"
+                "——尚未有 Alpha 證據，盯著累積在架觀測"
+            ),
+            params=params, score=float(total), now=now,
+        )
+        _record(res, track="supply", total=total)
     return out
 
 
@@ -479,7 +630,9 @@ def build_notify_context(
 __all__ = [
     "SELLER_PAGE_SOURCE",
     "SOURCE_AUTO",
+    "SOURCE_LABEL",
     "SOURCE_MANUAL",
+    "SOURCE_SUPPLY",
     "UNSUPPORTED_SITE_NOTE",
     "WATCH_ROTATION_META_KEY",
     "SellerNotifyContext",
