@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from .config import Config
-from .domain import CardInfo, CompStats, Listing
+from .domain import CardInfo, CompStats, Listing, SaleKind
 from .parsers import is_candidate, normalize, parse_card
 
 _TOKEN_RE = re.compile(r"[ぁ-んァ-ヶ一-龯A-Za-z0-9]+")
@@ -49,6 +49,114 @@ def card_signature(title: str, info: CardInfo) -> str:
         if t not in _STOP and len(t) >= 2 and not t.isdigit()
     ]
     return f"{'-'.join(tokens[:3])}|{grade_part}"
+
+
+# ---------------------------------------------------------------------------
+# 成交型態（sale_kind）：競標結標 vs 定價成交
+# ---------------------------------------------------------------------------
+#: **平台上根本沒有競標機制**的站台。這是比逐筆旗標更硬的事實，所以它先判：
+#: Mercari 與 Yahoo!フリマ（PayPay）只有「賣家開價、買家按下去」一種成交方式。
+#: 2026-08-06 對帳過沒有衝突——快取的 closedsearch 快照裡 2,553 筆
+#: `isFleamarketItem=True` 的標的 `isFixedPrice` **全部**是 True（2553/2553）。
+NO_AUCTION_SITES: frozenset[str] = frozenset({
+    "buyee_mercari", "buyee_paypay", "mercari_tw",
+})
+
+
+def sale_kind_for(site: str | None, raw: Mapping | None = None) -> SaleKind:
+    """這個價格是**買家喊上去的**還是**賣家開的**。判定只有這一處。
+
+    證據順序（強→弱），拿不到證據就是 `UNKNOWN`：
+
+    1. **平台事實**（`NO_AUCTION_SITES`）——那些站台不存在競標，不需要逐筆證據。
+    2. **來源逐筆旗標** `raw["is_fixed_price"]`（`yahoo_closed` 從 closedsearch
+       的 `isFixedPrice` 帶回來：False＝競標落札、True＝一口價即決）。
+    3. **eBay 的 `buyingOptions`**——兩種都有的站台必須看逐筆欄位。純 AUCTION
+       ＝競標；含 FIXED_PRICE（含「競標帶 BIN」）＝我們取的是 BIN 價，屬定價
+       （與 `sources.ebay.read_price` 的判準同一套，見該檔頂註的對照表）。
+    4. 其他 → `UNKNOWN`。**絕不猜 `FIXED`**：猜錯的方向是「這個賣家好便宜」，
+       使用者的直覺攔不下來（本專案第三節）。
+    """
+    if (site or "") in NO_AUCTION_SITES:
+        return SaleKind.FIXED
+    raw = raw or {}
+    flag = raw.get("is_fixed_price")
+    if isinstance(flag, bool):
+        return SaleKind.FIXED if flag else SaleKind.AUCTION
+    opts = raw.get("buyingOptions")
+    if isinstance(opts, (list, tuple, set, frozenset)):
+        names = {str(o) for o in opts}
+        if "FIXED_PRICE" in names:
+            return SaleKind.FIXED
+        if "AUCTION" in names:
+            return SaleKind.AUCTION
+    return SaleKind.UNKNOWN
+
+
+def sale_kind_of(listing: Listing) -> SaleKind:
+    """`Listing` → 成交型態。旗標抽不到一律 `UNKNOWN`（不猜）。"""
+    return sale_kind_for(listing.site.value, listing.raw)
+
+
+def _external_id_of(url: str | None) -> str:
+    """comps 的 `url` → 站台的商品 ID（尾段）。
+
+    三條路徑實測都是「ID 在最後一段」：
+    `buyee.jp/item/yahoo/auction/p1229439831`、
+    `buyee.jp/paypayfleamarket/item/z654154608`、`buyee.jp/mercari/item/m19094616319`。
+    """
+    return (url or "").rstrip("/").rsplit("/", 1)[-1]
+
+
+def backfill_sale_kind(
+    store, evidence: Mapping[str, bool] | None = None, *, dry_run: bool = False
+) -> dict:
+    """把既有 comps 的 `sale_kind` 補起來。**只吃證據，冪等，不增不減列。**
+
+    `evidence` 是「站台商品 ID → isFixedPrice」（來源：
+    `sources.yahoo_closed.sale_flags_from_cache`，走生產解析路徑挖快取快照）。
+    查不到證據的列**一律 `unknown`**——不准用「多數是競標所以猜競標」這種推論，
+    那是拿統計當個案證據，錯了完全看不出來。
+
+    寫入規則（冪等的來源）：
+    - 還沒有值（NULL／空字串）→ 寫。
+    - 已經是 `unknown`、而這次算得出真實型態 → **升級**。第一次跑的時候快取
+      剛好被清，這批就會永遠卡在 unknown，而且完全看不出來。
+    - 已經是 `auction`／`fixed` → 一律不碰（證據消失不該把已知抹成未知）。
+
+    回傳逐站逐型態的帳（`by_site_kind`）與實際寫入列數（`updated`）。
+    """
+    evidence = evidence or {}
+    rows = store.comps_by(limit=1_000_000)
+    pending: list[tuple[int, str]] = []
+    by_site_kind: dict[tuple[str, str], int] = {}
+    unchanged = 0
+    for r in rows:
+        site = str(r.get("site") or "")
+        flag = evidence.get(_external_id_of(r.get("url")))
+        kind = sale_kind_for(site, {"is_fixed_price": flag} if isinstance(flag, bool) else {})
+        current = (r.get("sale_kind") or "").strip()
+        # 只有「還沒有值」與「已經是 unknown」兩種狀態可以被這次的結果蓋過
+        writable = current in ("", SaleKind.UNKNOWN.value)
+        if writable and kind.value != current:
+            pending.append((int(r["id"]), kind.value))
+            final = kind.value
+        else:
+            unchanged += 1
+            final = current or kind.value
+        by_site_kind[(site, final)] = by_site_kind.get((site, final), 0) + 1
+    if pending and not dry_run:
+        store.set_sale_kinds(pending)
+    return {
+        "rows": len(rows),
+        "updated": len(pending),
+        "unchanged": unchanged,
+        "with_evidence": sum(
+            1 for r in rows if isinstance(evidence.get(_external_id_of(r.get("url"))), bool)
+        ),
+        "by_site_kind": by_site_kind,
+        "dry_run": dry_run,
+    }
 
 
 def _reason_bucket(why: str) -> str:
@@ -188,6 +296,10 @@ class CompsEngine:
         也沒有），但對 Yahoo 落札相場（視窗 180 天、comps 視窗 90 天）就會把
         半年前的成交蓋成今天的行情。時間戳與視窗必須同基準（工程原則 1）。
 
+        `sale_kind` 同時落下去（2026-08-06）：競標結標與定價成交是兩種語意，
+        來源早就把 `isFixedPrice` 帶回來了，只是入庫時被丟掉——於是下游拿
+        「別人搶出來的落札價」當「賣家開的價」比，量到的是熱度不是定價行為。
+
         **退回 now() 的那一批一律標 `sold_at_is_ingest=1`**（2026-08-02）。
         沒有這個旗標，下游分不出「這是成交時間」與「這是我們抓到的時間」，
         於是 90 天視窗對那批資料形同虛設、時間切分變成偽裝的平台切分。
@@ -221,6 +333,10 @@ class CompsEngine:
                     # 0 = sold_at 是來源給的真實成交時間；1 = 是我們入庫的時間。
                     # 下游任何用到時間的查詢都必須看這一欄（見 store.load_comps）。
                     "sold_at_is_ingest": 0 if has_real_time else 1,
+                    #: **這筆是「買家搶到多高」還是「賣家開多少」**（見 `sale_kind_for`）。
+                    #: 兩者不可混池：Seller Alpha 的同儕比對拿它當鍵的一部分。
+                    #: 抽不到證據就是 `unknown`，而 `unknown` 不進任何比較。
+                    "sale_kind": sale_kind_of(lst).value,
                     "confidence": "high",
                     "rarity": info.rarity,
                     "grader": info.grader.value,

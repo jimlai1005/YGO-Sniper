@@ -22,6 +22,7 @@ from .config import load_config
 from .costs import breakeven_table
 from .fx import FxRates
 from .pipeline import Pipeline
+from .seller_alpha import SALE_AUCTION, SALE_FIXED, SALE_KIND_LABEL, SALE_UNKNOWN
 from .seller_links import seller_page_url
 from .store import Store
 
@@ -682,6 +683,50 @@ def backfill_sold_at():
 
 
 @app.command()
+def backfill_sale_kind(
+    dry_run: bool = typer.Option(False, help="只算不寫"),
+):
+    """回填 comps 的 `sale_kind`（競標結標／定價成交／型態未知）。**冪等**。
+
+    為什麼要分：ヤフオク落札價反映**買家搶到多高**（賣家只設了開始価格），
+    フリマ／Mercari／一口價即決反映**賣家開多少**。Seller Alpha 問的是後者，
+    兩者混池量到的是熱度不是定價行為，而且方向永遠是「這個賣家好便宜」。
+
+    證據只有兩種，**沒有猜的**：`data/cache` 的 closedsearch 快照
+    （`auctionId → isFixedPrice`，走生產解析路徑）＋平台事實（Mercari 與
+    Yahoo!フリマ 沒有競標機制）。查不到證據的一律 `unknown`，而 `unknown`
+    不進任何同儕比較——寧可少幾筆可比，不要拿落札價當賣家的定價。
+    """
+    from .comps import backfill_sale_kind as _backfill
+    from .sources.yahoo_closed import sale_flags_from_cache
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    flags = sale_flags_from_cache(cfg.cache_dir)
+    console.print(
+        f"[dim]快取證據：{len(flags)} 個商品 ID（來源 {cfg.cache_dir}）[/dim]"
+    )
+    rep = _backfill(store, flags, dry_run=dry_run)
+    tag = "[yellow]dry-run，未寫入[/yellow] " if dry_run else ""
+    console.print(
+        f"{tag}comps {rep['rows']} 列：寫入 {rep['updated']}、"
+        f"沿用既有值 {rep['unchanged']}（其中 {rep['with_evidence']} 列有逐筆證據）"
+    )
+    t = Table(title="回填後的成交型態（逐站）")
+    for col in ("site", "sale_kind", "筆數"):
+        t.add_column(col, justify="right" if col == "筆數" else "left")
+    for (site, kind), n in sorted(rep["by_site_kind"].items()):
+        t.add_row(site, f"{kind}（{SALE_KIND_LABEL.get(kind, kind)}）", str(n))
+    console.print(t)
+    unknown = sum(n for (_s, k), n in rep["by_site_kind"].items() if k == SALE_UNKNOWN)
+    if unknown:
+        console.print(
+            f"[yellow]⚠️ {unknown} 筆查不出型態——它們不進同儕比較（證據不足就不比，"
+            "不是當成定價）。快取被清掉的舊成交補不回來是正常的。[/yellow]"
+        )
+
+
+@app.command()
 def backfill_sellers(
     dry_run: bool = typer.Option(False, help="只算不寫"),
 ):
@@ -787,6 +832,32 @@ def _print_alpha_coverage(rep) -> None:
         "只比得到「同稀有度×同分數」層級——那一層量到的是卡種組合不是賣家定價，"
         "一律不計分。[/dim]"
     )
+    # **成交型態要單獨講一句**：可比數會因為分池而下降，不講清楚的話
+    # 「修好了」與「壞了」在畫面上長得一模一樣（本專案第五節）。
+    kinds = c.get("comparable_sale_kind") or {}
+    unknown_rows = c.get("rows_sale_kind_unknown", 0)
+    console.print(
+        f"[bold]成交型態[/bold]（同型態才互比）：可比的 {c['comparable_items']} 筆裡，"
+        f"競標結標 [bold]{kinds.get(SALE_AUCTION, 0)}[/bold] 筆／"
+        f"定價（含在架定價與定價成交）[bold]{kinds.get(SALE_FIXED, 0)}[/bold] 筆。"
+    )
+    console.print(
+        "[dim]  為什麼分開：**競標結標價反映買家搶到多高，不是賣家開多低**"
+        "（賣家只設了開始価格，最終那個數字是市場喊出來的）。"
+        "拿它跟一口價／フリマ定價混在一起比，量到的是熱度不是定價行為。[/dim]"
+    )
+    if unknown_rows:
+        console.print(
+            f"[yellow]  ⚠️ 另有 {unknown_rows} 筆成交查不出型態，完全不進比較"
+            "（證據不足就不比）。補證據：`ygo-sniper backfill-sale-kind`[/yellow]"
+        )
+    by_site = c.get("sold_sale_kind_by_site") or {}
+    if by_site:
+        console.print(
+            "[dim]  成交列逐站×型態："
+            + "、".join(f"{k}×{v}" for k, v in sorted(by_site.items()))
+            + "[/dim]"
+        )
     console.print(
         f"[bold]賣家[/bold]：{c['sellers_total']} 個有觀測，"
         f"[green]{c['sellers_scored']}[/green] 個達門檻"

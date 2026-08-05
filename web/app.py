@@ -778,6 +778,10 @@ def _metrics_brief(m) -> dict:
         "n_ask": m.n_ask,
         "n_sold": m.n_sold,
         "n_bid_excluded": m.n_bid_excluded,
+        # 成交型態查不出來的列（不進任何比較）。少掉的可比數要有名字，
+        # 不然「可比只有 2 筆」看起來會像壞掉而不是像證據不足。
+        "n_sale_kind_unknown": m.n_sale_kind_unknown,
+        "sale_kind_counts": dict(m.sale_kind_counts),
         "n_comparable": m.n_comparable,
         "n_distinct_cards": m.n_distinct_cards,
         "discount_ratio_median": m.discount_ratio_median,
@@ -854,7 +858,7 @@ def seller_detail(seller_key: str, items: int = 40, peers: int = 3):
     shown = sorted(
         m.items, key=lambda i: (not i.scoring, i.peer is None, i.ratio or 0)
     )[:items]
-    from ygo_sniper.seller_alpha import BASIS_LABEL
+    from ygo_sniper.seller_alpha import basis_kind_label
 
     def _item(i):
         return {
@@ -862,7 +866,10 @@ def seller_detail(seller_key: str, items: int = 40, peers: int = 3):
             "title": i.row.title,
             "url": i.row.url,
             "basis": i.row.basis,
-            "basis_label": BASIS_LABEL.get(i.row.basis, i.row.basis),
+            # ⚠️ 標籤帶著成交型態（「成交價（競標結標）」vs「成交價（定價成交）」）：
+            # 同儕列表如果混了型態，使用者要**在畫面上看得出來**，不是靠相信我們。
+            "sale_kind": i.row.sale_kind,
+            "basis_label": basis_kind_label(i.row.basis, i.row.sale_kind),
             "price_twd": i.row.price_twd,
             "source_table": i.row.source_table,
             "scoring": i.scoring,
@@ -880,7 +887,7 @@ def seller_detail(seller_key: str, items: int = 40, peers: int = 3):
                 "sources": [
                     {"price_twd": p.price_twd, "title": p.title,
                      "seller_key": p.seller_key, "table": p.source_table,
-                     "basis_label": BASIS_LABEL.get(p.basis, p.basis)}
+                     "basis_label": basis_kind_label(p.basis, p.sale_kind)}
                     for p in i.peer.sources[:peers]
                 ],
             },

@@ -96,6 +96,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .cards import CardIndex, extract_title_codes
+from .domain import SaleKind
 
 # ---------------------------------------------------------------------------
 # 價格基準（basis）
@@ -131,6 +132,68 @@ def basis_of(price_kind: str | None) -> str:
     認錯一個競標出價的代價是憑空長出一個假折價。
     """
     return _PRICE_KIND_BASIS.get((price_kind or "").strip(), BASIS_BID)
+
+
+# ---------------------------------------------------------------------------
+# 成交型態（sale_kind）：`basis` 之下的第二個「同一把尺」維度
+# ---------------------------------------------------------------------------
+#: 同一個 `sold` 基準裡還混著兩種語意（2026-08-06 修正）：
+#:
+#: - **競標結標**（ヤフオク落札）＝ 買家搶到多高。賣家只設了開始価格，
+#:   最終那個數字是**市場喊出來的**，不是他的定價決定。
+#: - **定價成交**（Yahoo!フリマ／Mercari／ヤフオク一口價即決）＝ 賣家開多少。
+#:
+#: 這個榜問的是「這個賣家開的價比同儕低多少」，所以兩者不可互為同儕。
+#: 實測動機：468 個計分點裡 251 筆是競標結標（53.6%）；13 筆 Yahoo 一口價
+#: 標的的 24 個同儕裡有 22 筆是競標結標——賣家自己開的一口價被拿去跟市場
+#: 搶出來的價比，靠 winsorize 才沒把分數炸掉（ratio 3.61／15.29／82.32）。
+SALE_AUCTION = SaleKind.AUCTION.value
+SALE_FIXED = SaleKind.FIXED.value
+#: 拿不到證據。**不進任何比較**（既不當標的也不當同儕）——與「湊不到同儕
+#: 就拒答」同一個哲學。把它當 `fixed` 才是靜默失敗。
+SALE_UNKNOWN = SaleKind.UNKNOWN.value
+
+SALE_KIND_LABEL: dict[str, str] = {
+    SALE_AUCTION: "競標結標",
+    SALE_FIXED: "定價",
+    SALE_UNKNOWN: "型態未知",
+}
+
+#: 進得了折價指標的成交型態。
+SCORING_SALE_KINDS: tuple[str, ...] = (SALE_AUCTION, SALE_FIXED)
+
+
+def sale_kind_of_price_kind(price_kind: str | None) -> str:
+    """在架列的 `price_kind` → 成交型態。
+
+    在架帳沒有「成交」，但**價格怎麼形成的**這個問題一樣成立：一口價／
+    定價是賣家開的（`fixed`），競標中出價是買家喊的（`auction`）。
+    對不上任何一種就是 `unknown`——與 `basis_of` 的保守預設同向
+    （那種列的 basis 也已經被判成競標中出價，本來就不進指標）。
+    """
+    kind = (price_kind or "").strip()
+    if kind in ("buyout", "fixed"):
+        return SALE_FIXED
+    if kind == "current_bid":
+        return SALE_AUCTION
+    return SALE_UNKNOWN
+
+
+def basis_kind_label(basis: str, sale_kind: str) -> str:
+    """畫面用的一句話標籤：**看得出來這筆在跟哪一池比**。
+
+    只有 `sold` 需要展開（`ask` 本來就全是賣家開的價）：
+    「成交價（競標結標）」與「成交價（定價成交）」在畫面上長得不一樣，
+    使用者才看得出同儕列表裡有沒有混池。
+    """
+    base = BASIS_LABEL.get(basis, basis)
+    if basis != BASIS_SOLD:
+        return base
+    if sale_kind == SALE_AUCTION:
+        return f"{base}（競標結標）"
+    if sale_kind == SALE_FIXED:
+        return f"{base}（定價成交）"
+    return f"{base}（型態未知・不計分）"
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +327,13 @@ class MarketRow:
     basis: str
     price_twd: float
     title: str
+    #: **這個價格是買家喊上去的還是賣家開的**（`SALE_AUCTION`／`SALE_FIXED`／
+    #: `SALE_UNKNOWN`）。`basis` 之下的第二個同源維度，一樣進同儕鍵。
+    #:
+    #: 預設 `SALE_FIXED` ＝「賣家開的價」：在架列（listing_obs）全部屬於這種。
+    #: **成交列一律在 `market_rows_from_store` 明確指定**，db 欄位讀不到值就是
+    #: `SALE_UNKNOWN`——沒有任何一條路徑會讓一筆成交安靜地預設成定價。
+    sale_kind: str = SALE_FIXED
     seller_key: str | None = None
     card_name: str | None = None
     edition: str = EDITION_OTHER
@@ -350,6 +420,7 @@ def market_rows_from_store(
                 key=str(r.get("key") or ""),
                 site=site,
                 basis=basis_of(r.get("price_kind")),
+                sale_kind=sale_kind_of_price_kind(r.get("price_kind")),
                 price_twd=price,
                 title=title,
                 seller_key=f"{site}:{sid}" if (site and sid) else None,
@@ -377,6 +448,10 @@ def market_rows_from_store(
                 key=f"comps:{r.get('id')}",
                 site=site,
                 basis=BASIS_SOLD,
+                #: 欄位是 NULL（回填前的舊列）→ `SALE_UNKNOWN`，**不是** `fixed`。
+                #: 這是整條路徑上唯一「沒有值」會出現的地方，也是最容易安靜
+                #: 出錯的地方：猜 fixed 會把一批落札價塞進定價池（見 SALE_UNKNOWN）。
+                sale_kind=str(r.get("sale_kind") or SALE_UNKNOWN),
                 price_twd=price,
                 title=title,
                 seller_key=f"{site}:{sid}" if (site and sid) else None,
@@ -421,16 +496,25 @@ class PeerMatch:
 
 
 def _tier_key(row: MarketRow, tier: str) -> tuple[Any, ...] | None:
+    """同儕鍵。回 None ＝ **這一列不進這個層級的池**（既不當標的也不當同儕）。
+
+    `sale_kind` 是 `basis` 之下的第二個同源維度：競標結標只跟競標結標比、
+    定價成交只跟定價成交比。型態未知的列直接退出所有層級——沒有證據就不
+    參與比較，把它塞進 `fixed` 那一池才是靜默失敗（見 `SALE_UNKNOWN`）。
+    """
+    if row.sale_kind not in SCORING_SALE_KINDS:
+        return None
     if tier == TIER_STRICT:
         if not row.card_name:
             return None
-        return (row.basis, row.site, row.card_name, row.edition,
+        return (row.basis, row.sale_kind, row.site, row.card_name, row.edition,
                 row.rarity, row.grader, row.grade)
     if tier == TIER_CARD:
         if not row.card_name:
             return None
-        return (row.basis, row.site, row.card_name, row.edition, row.grader, row.grade)
-    return (row.basis, row.site, row.rarity, row.grader, row.grade)
+        return (row.basis, row.sale_kind, row.site, row.card_name, row.edition,
+                row.grader, row.grade)
+    return (row.basis, row.sale_kind, row.site, row.rarity, row.grader, row.grade)
 
 
 class PeerIndex:
@@ -611,10 +695,15 @@ class SellerMetrics:
     n_ask: int = 0
     n_sold: int = 0
     n_bid_excluded: int = 0          # 競標中出價，刻意不入指標
+    #: 成交型態未知（回填不到證據）的列數。**這些列不進任何比較**，
+    #: 所以它們要在畫面上有名字——不然「可比數少了」看起來會像壞掉。
+    n_sale_kind_unknown: int = 0
     n_comparable: int = 0            # 有同儕、且層級可計分的筆數
     n_distinct_cards: int = 0        # 上一項涵蓋幾張相異卡（收縮用的有效 n）
     tier_counts: dict[str, int] = field(default_factory=dict)
     basis_counts: dict[str, int] = field(default_factory=dict)
+    #: 這個賣家的列在四種型態上的分布（競標結標／定價／型態未知）。
+    sale_kind_counts: dict[str, int] = field(default_factory=dict)
     #: 同儕來自幾個相異賣家。**1 ＝ 這個折價其實是一次 1v1 比價**（對方偏貴
     #: 就會讓整個分數是假的），必須在畫面上講出來，見 `SellerScore.caveats`。
     peer_seller_pool: int = 0
@@ -690,6 +779,12 @@ def seller_metrics(
     m.n_ask = m.basis_counts.get(BASIS_ASK, 0)
     m.n_sold = m.basis_counts.get(BASIS_SOLD, 0)
     m.n_bid_excluded = m.basis_counts.get(BASIS_BID, 0)
+    m.sale_kind_counts = dict(Counter(i.row.sale_kind for i in items))
+    #: 只算**成交列**的未知：在架列的型態由 price_kind 決定，未知的那些
+    #: 已經被算進 n_bid_excluded（basis 也是未知 → 競標），重複計會誤導。
+    m.n_sale_kind_unknown = sum(
+        1 for i in items if i.row.basis == BASIS_SOLD and i.row.sale_kind == SALE_UNKNOWN
+    )
     m.tier_counts = dict(Counter(i.peer.tier for i in items if i.peer))
 
     comparable = [i for i in items if i.scoring]
@@ -891,12 +986,18 @@ def score_seller(m: SellerMetrics, params: AlphaParams | None = None) -> SellerS
             "——同一張卡刊三次不算三個證據"
         )
     if missing:
-        detail = ""
+        parts: list[str] = []
         if m.n_bid_excluded:
-            detail = (
-                f"（另有 {m.n_bid_excluded} 筆是競標中出價，"
-                "刻意不入指標：那是市場當下的出價，不是賣家的定價決定）"
+            parts.append(
+                f"另有 {m.n_bid_excluded} 筆是競標中出價，"
+                "刻意不入指標：那是市場當下的出價，不是賣家的定價決定"
             )
+        if m.n_sale_kind_unknown:
+            parts.append(
+                f"另有 {m.n_sale_kind_unknown} 筆成交查不出型態（競標結標／定價成交），"
+                "不進比較——證據補得回來就會自動計入（`ygo-sniper backfill-sale-kind`）"
+            )
+        detail = f"（{'；'.join(parts)}）" if parts else ""
         return SellerScore(
             seller_key=m.seller_key,
             ok=False,
@@ -1154,10 +1255,28 @@ def coverage_report(
         "rows_scoring_basis": len(scoring_rows),
         "rows_bid_excluded": sum(1 for r in seller_rows if r.basis == BASIS_BID),
         "rows_no_card_name": sum(1 for r in scoring_rows if not r.card_name),
+        #: **成交型態的分解**（工程原則 1：說得出這些數字是幾把尺量出來的）。
+        #: 競標結標與定價成交各自成池，型態未知的完全不進比較——三個數字
+        #: 分開報，覆蓋率下降時看得出來是「修好了」還是「壞了」。
+        "rows_sale_kind": dict(Counter(r.sale_kind for r in scoring_rows)),
+        "rows_sale_kind_unknown": sum(
+            1 for r in scoring_rows if r.sale_kind == SALE_UNKNOWN
+        ),
         "comparable_items": len(comparable),
         "comparable_rate": (len(comparable) / len(scoring_rows)) if scoring_rows else 0.0,
         "tier_counts": dict(Counter(i.peer.tier for i in comparable if i.peer)),
         "basis_counts": dict(Counter(i.row.basis for i in comparable)),
+        #: 有算出同儕折價的那些列，各是哪一種型態撐出來的。
+        "comparable_sale_kind": dict(Counter(i.row.sale_kind for i in comparable)),
+        #: 逐站 × 逐型態（成交列）。哪一站的證據補不回來，這裡看得見。
+        "sold_sale_kind_by_site": {
+            f"{site}:{kind}": n
+            for (site, kind), n in sorted(
+                Counter(
+                    (r.site, r.sale_kind) for r in rows if r.basis == BASIS_SOLD
+                ).items()
+            )
+        },
         "stratum_only_items": len(stratum_only),
         "min_comparable": params.min_comparable,
         "min_distinct_cards": params.min_distinct_cards,
@@ -1205,7 +1324,12 @@ __all__ = [
     "BASIS_LABEL",
     "BASIS_SOLD",
     "PERSISTENCE_MIN_DAYS",
+    "SALE_AUCTION",
+    "SALE_FIXED",
+    "SALE_KIND_LABEL",
+    "SALE_UNKNOWN",
     "SCORING_BASES",
+    "SCORING_SALE_KINDS",
     "SCORING_TIERS",
     "TIER_CARD",
     "TIER_LABEL",
@@ -1221,8 +1345,10 @@ __all__ = [
     "SellerMetrics",
     "SellerScore",
     "analyze",
+    "basis_kind_label",
     "basis_of",
     "build_seller_items",
+    "sale_kind_of_price_kind",
     "coverage_report",
     "edition_of",
     "market_rows_from_store",

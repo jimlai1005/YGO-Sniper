@@ -99,6 +99,13 @@ Vol.6，正中目標輪廓。它要擋的現代稀有度用 `プリズマティ�
 | 套利路徑 | 日本境內價差 vs 貨在台灣 | 國際運費付兩次，價差蒸發 |
 | 幣別 markup | eBay 台幣（要套）vs Mercari 台灣台幣（不套） | 判準不是幣別，是「會不會以外幣請款」 |
 | 價格上限 | 日圓算出的上限套到 eBay 的美元／台幣 | 過濾條件整個錯位 |
+| 成交型態混池 | 競標結標價（買家搶到多高）vs 定價成交（賣家開多少） | 排行榜第 5 名的 60.6 分**三個計分點全是混池** |
+
+第七項（2026-08-06）值得單獨記：`basis="sold"` 看起來已經是「同一把尺」了，
+但那一桶裡混著**兩種價格形成機制**——ヤフオク落札價是買家喊上去的（賣家只設了
+開始価格），フリマ／Mercari／一口價即決才是賣家開的。實測 468 個計分點裡 251 筆
+是競標結標（53.6%）。修法：`comps.sale_kind`（`auction`／`fixed`／`unknown`）
+進同儕鍵，`unknown` 完全不進比較。**「同源」要問到機制那一層，不是問到欄位名為止。**
 
 **症狀的共同點：混源比較的錯誤方向通常是「看起來很划算」**，所以它不會被使用者
 的直覺攔下來，只會被對帳攔下來。
@@ -216,7 +223,7 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 1308 passed，2026-08-05 實測）
+make test                      # pytest（目前 1339 passed，2026-08-06 實測）
 ygo-sniper daily               # 掃描＋推播（launchd 排程跑這個）
 ygo-sniper scan --dry-run      # 只掃不寫庫
 ygo-sniper serve               # dashboard → http://127.0.0.1:8321
@@ -226,6 +233,7 @@ ygo-sniper sellers --rank      # Seller Alpha 排行榜
 ygo-sniper seller <key>        # 單一賣家 drill-down
 ygo-sniper watch-seller list   # 監控名單
 ygo-sniper coverage-groups     # 分群覆蓋率（調門檻前必跑）
+ygo-sniper backfill-sale-kind  # 回填 comps 成交型態（競標結標／定價成交），冪等
 ygo-sniper corpus-diff         # 全語料雙向比對（改過濾／解析規則前後必跑，見第一節）
 ygo-sniper venue-study         # 平台價差研究
 make schedule / make unschedule # launchd 排程（分時段，一天 15 個觸發點）

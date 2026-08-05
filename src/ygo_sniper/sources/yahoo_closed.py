@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -107,6 +108,45 @@ def to_utc_iso(end_time: str | None) -> str | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC).isoformat()
+
+
+def sale_flags_from_cache(cache_dir: Path) -> dict[str, bool]:
+    """從快取的 closedsearch 快照挖出 `auctionId → isFixedPrice`（回填證據）。
+
+    為什麼證據挖得回來：`CachedFetcher` 把每次抓到的原始頁面存成
+    `data/cache/<hash>.html`，而 closedsearch 的 `__NEXT_DATA__` 裡每筆商品
+    都帶著 `isFixedPrice`（False＝競標落札、True＝一口價即決）。入庫時這個
+    欄位被丟掉了，但**原始頁還在**——2026-08-06 實測 495 個快照回接出
+    8,489 個 ID，正式庫 957 筆 buyee_yahoo 成交裡 954 筆有證據。
+
+    解析走 `YahooClosedSource._listing_node`（＝生產路徑），不另寫一套 regex：
+    另寫一套會跟生產解析器漂移，而漂移之後回填出來的型態是錯的、看起來卻很
+    正常（本專案第六節：測試路徑必須等於生產路徑）。
+
+    不是 closedsearch 的快取檔（搜尋頁、商品頁、其他站台）自然解不出節點，
+    直接跳過——這裡不做健康判定，因為「這個檔案不是 closedsearch」是常態。
+    """
+    flags: dict[str, bool] = {}
+    for path in sorted(Path(cache_dir).glob("*.html")):
+        try:
+            html = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        # 先用便宜的字串檢查擋掉九成檔案：BeautifulSoup 解 340KB × 1200 個檔案
+        # 要好幾分鐘，而其中絕大多數根本不是 closedsearch。
+        if "__NEXT_DATA__" not in html or "isFixedPrice" not in html:
+            continue
+        node = YahooClosedSource._listing_node(html)
+        if not node:
+            continue
+        for it in node.get("items") or []:
+            if not isinstance(it, dict):
+                continue
+            aid = it.get("auctionId")
+            fixed = it.get("isFixedPrice")
+            if aid and isinstance(fixed, bool):
+                flags[str(aid)] = fixed
+    return flags
 
 
 class YahooClosedSource:

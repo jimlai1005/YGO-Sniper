@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .domain import Signal, TriageState
+from .domain import SaleKind, Signal, TriageState
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -276,6 +276,18 @@ _COMPS_ATTR_COLUMNS: dict[str, str] = {
     #: 且混淆 ID 跨日穩定 26/26——見 reports/seller-id-availability.md）。
     #: 折價歷史因此有主人：同一賣家「持續低於行情成交」才看得出來。
     "seller_id": "TEXT",
+    #: **這個價格是買家喊上去的還是賣家開的**（`domain.SaleKind`：
+    #: `auction`／`fixed`／`unknown`）。2026-08-06 加入。
+    #:
+    #: 診斷：`sold` 這一桶混著兩種語意——ヤフオク落札價反映**買家搶到多高**
+    #: （賣家只設了開始価格），フリマ／Mercari／一口價即決反映**賣家開多少**。
+    #: Seller Alpha 問的是後者，拿前者當同儕量到的是熱度不是定價行為，而且
+    #: 方向永遠是「這個賣家好便宜」。實測 468 個計分點裡 251 筆是競標結標，
+    #: 而 13 筆 Yahoo 一口價標的的同儕有 22/24 筆是競標結標——已經在混池。
+    #:
+    #: NULL ＝ 還沒回填的舊列，下游一律讀成 `unknown`（**不准當成 `fixed`**）。
+    #: 回填見 `comps.backfill_sale_kind` / CLI `backfill-sale-kind`。
+    "sale_kind": "TEXT",
 }
 
 #: save_comps 寫入的欄位（不含 id）。順序即 INSERT 的欄位順序。
@@ -716,6 +728,19 @@ class Store:
                     for sig, lst in index.items() for r in lst if r.get("seller_id")
                 ],
             )
+            # sale_kind 同一個道理，只是它的「還沒有值」多一種寫法：`unknown`
+            # ＝「當時查不到證據」。重掃碰到同一筆時如果這次**有**證據，就升級；
+            # 已經是 auction／fixed 的一律不碰。不補的話那批列會永遠卡在
+            # unknown（＝永遠不進同儕比較），而且完全看不出來。
+            c.executemany(
+                "UPDATE comps SET sale_kind = ? WHERE signature = ? AND url = ?"
+                " AND (sale_kind IS NULL OR sale_kind = '' OR sale_kind = 'unknown')",
+                [
+                    (str(r["sale_kind"]), sig, r.get("url"))
+                    for sig, lst in index.items() for r in lst
+                    if r.get("sale_kind") and r["sale_kind"] != SaleKind.UNKNOWN.value
+                ],
+            )
             for site, sid in sellers:
                 self._upsert_seller(c, site, sid, stamp=stamp)
 
@@ -806,6 +831,24 @@ class Store:
         """
         with self._conn() as c:
             cur = c.execute(_BACKFILL_SOLD_AT_PROVENANCE_SQL)
+            return cur.rowcount or 0
+
+    def set_sale_kinds(self, pairs: Iterable[tuple[int, str]]) -> int:
+        """把 `comps.sale_kind` 寫進指定的列（id → 型態），回傳實際改動列數。
+
+        **只寫「還沒有值」或「已經是 unknown」的列**——判斷邏輯在
+        `comps.backfill_sale_kind`（單一判定處），這裡的 WHERE 條件是同一條
+        規則的結構性複述：已經有明確型態的列，任何重跑都不得把它抹掉。
+        """
+        rows = [(kind, int(rid)) for rid, kind in pairs]
+        if not rows:
+            return 0
+        with self._conn() as c:
+            cur = c.executemany(
+                "UPDATE comps SET sale_kind = ? WHERE id = ?"
+                " AND (sale_kind IS NULL OR sale_kind = '' OR sale_kind = 'unknown')",
+                rows,
+            )
             return cur.rowcount or 0
 
     def comps_provenance(self) -> dict[str, Any]:

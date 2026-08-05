@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import pytest
@@ -25,6 +26,9 @@ from ygo_sniper.seller_alpha import (
     BASIS_BID,
     BASIS_SOLD,
     PERSISTENCE_MIN_DAYS,
+    SALE_AUCTION,
+    SALE_FIXED,
+    SALE_UNKNOWN,
     SCORING_TIERS,
     TIER_STRATUM,
     TIER_STRICT,
@@ -560,3 +564,136 @@ def test_sold_and_ask_never_share_a_peer_pool_even_with_history():
 
     assert index.match(ask) is None
     assert index.match(sold) is None
+
+
+# ---------------------------------------------------------------------------
+# 7. 成交型態（sale_kind）：競標結標 ≠ 定價成交（2026-08-06）
+#
+# `sold` 這一桶原本混著兩種語意：ヤフオク落札價是**買家搶到多高**，
+# フリマ／Mercari／一口價是**賣家開多少**。Seller Alpha 問的是後者，
+# 拿前者當同儕量到的是熱度不是定價行為——而且方向是「這個賣家好便宜」。
+# ---------------------------------------------------------------------------
+def _sold_row(price, seller, kind, **kw):
+    r = row(price=price, seller=seller, basis=BASIS_SOLD, site="buyee_yahoo", **kw)
+    return dataclasses.replace(r, sale_kind=kind)
+
+
+def test_auction_closes_never_compare_against_fixed_price_sales():
+    """實測動機：13 筆 Yahoo 一口價的標的，同儕 24 筆裡有 22 筆是競標結標。"""
+    rows = [
+        _sold_row(800, "target", SALE_FIXED),
+        _sold_row(2000, "a", SALE_AUCTION),
+        _sold_row(2200, "b", SALE_AUCTION),
+    ]
+    m = metrics_for(rows, "buyee_yahoo:target")
+    assert m.items[0].peer is None
+    assert m.n_comparable == 0
+
+
+def test_fixed_price_sales_compare_against_fixed_price_sales():
+    rows = [
+        _sold_row(800, "target", SALE_FIXED),
+        _sold_row(2000, "a", SALE_AUCTION),
+        _sold_row(1000, "b", SALE_FIXED),
+    ]
+    m = metrics_for(rows, "buyee_yahoo:target")
+    assert m.items[0].ratio == pytest.approx(0.8)     # 只跟同型態的 1000 比
+
+
+def test_auction_closes_compare_against_auction_closes():
+    rows = [
+        _sold_row(800, "target", SALE_AUCTION),
+        _sold_row(1000, "a", SALE_AUCTION),
+        _sold_row(5000, "b", SALE_FIXED),
+    ]
+    m = metrics_for(rows, "buyee_yahoo:target")
+    assert m.items[0].ratio == pytest.approx(0.8)
+
+
+def test_unknown_sale_kind_is_neither_scored_nor_used_as_a_peer():
+    """證據不足就不給分——與「湊不到同儕就拒答」同一個哲學。
+
+    **`unknown` 不准被當成 `fixed`**：那會讓一筆沒有證據的成交安靜地
+    變成同儕，而混池的錯誤方向永遠是「看起來很划算」。
+    """
+    rows = [
+        _sold_row(800, "target", SALE_UNKNOWN),
+        _sold_row(1000, "a", SALE_FIXED),
+        _sold_row(1000, "b", SALE_UNKNOWN),
+        _sold_row(900, "victim", SALE_FIXED),
+    ]
+    target = metrics_for(rows, "buyee_yahoo:target")
+    assert target.items[0].peer is None, "unknown 不當標的"
+    assert target.n_sale_kind_unknown == 1
+
+    victim = metrics_for(rows, "buyee_yahoo:victim")
+    assert victim.items[0].peer is not None
+    assert victim.items[0].peer.peer_n == 1, "unknown 不當同儕（只剩 a 那筆）"
+    assert victim.items[0].peer.peer_median_twd == pytest.approx(1000.0)
+
+
+def test_ask_rows_are_seller_set_prices_and_still_pair_up():
+    """在架定價本來就是「賣家開的價」，加了這個維度不該影響 ask 那一池。"""
+    rows = [row(price=800, seller="target"), row(price=1000, seller="a")]
+    m = metrics_for(rows, "ebay:target")
+    assert m.items[0].ratio == pytest.approx(0.8)
+
+
+def test_market_rows_from_store_never_guesses_a_missing_sale_kind(tmp_path):
+    """db 欄位是 NULL（回填前的舊列）→ `unknown`，**不是** `fixed`。
+
+    這是整條路徑上唯一會出現「沒有值」的地方，也是最容易靜默出錯的地方。
+    """
+    import sqlite3
+
+    from ygo_sniper.seller_alpha import market_rows_from_store
+    from ygo_sniper.store import Store
+
+    db = tmp_path / "rows.db"
+    Store(db)
+    with sqlite3.connect(db) as c:
+        c.execute(
+            "INSERT INTO comps (signature, title, url, site, sold_at, price_twd,"
+            " sale_kind, seller_id) VALUES"
+            " ('S1','t','u1','buyee_yahoo','2026-03-01T00:00:00+00:00',100,NULL,'s1')"
+        )
+        c.execute(
+            "INSERT INTO comps (signature, title, url, site, sold_at, price_twd,"
+            " sale_kind, seller_id) VALUES"
+            " ('S2','t','u2','buyee_yahoo','2026-03-01T00:00:00+00:00',100,'auction','s1')"
+        )
+        c.execute(
+            "INSERT INTO listing_obs (key, site, title, url, price_twd, price_kind,"
+            " seller_id, first_seen) VALUES"
+            " ('k1','ebay','t','u3',100,'buyout','s2','2026-03-01T00:00:00+00:00')"
+        )
+    rows = market_rows_from_store(Store(db), None)
+    by_key = {r.key: r for r in rows}
+    assert [r.sale_kind for r in rows if r.source_table == "comps"].count(SALE_UNKNOWN) == 1
+    assert SALE_AUCTION in [r.sale_kind for r in rows]
+    assert by_key["k1"].sale_kind == SALE_FIXED, "在架定價＝賣家開的價"
+
+
+def test_coverage_reports_the_sale_kind_split():
+    """覆蓋率必須說得出「競標結標 N 筆／定價成交 M 筆」——不然使用者只會看到
+    可比數變少，卻不知道是修好了還是壞了。"""
+    from ygo_sniper.seller_alpha import AlphaReport, coverage_report
+
+    rows = [
+        _sold_row(800, "target", SALE_AUCTION),
+        _sold_row(1000, "a", SALE_AUCTION),
+        _sold_row(900, "b", SALE_FIXED),
+        _sold_row(950, "c", SALE_FIXED),
+        _sold_row(950, "d", SALE_UNKNOWN),
+    ]
+    peers = PeerIndex(rows)
+    items = build_seller_items(rows, peers)
+    rep = AlphaReport(params=AlphaParams())
+    for key, its in items.items():
+        rep.metrics[key] = seller_metrics(key, its)
+        rep.scores[key] = score_seller(rep.metrics[key])
+    cov = coverage_report(rows, rep, AlphaParams())
+
+    assert cov["rows_sale_kind"] == {SALE_AUCTION: 2, SALE_FIXED: 2, SALE_UNKNOWN: 1}
+    assert cov["rows_sale_kind_unknown"] == 1
+    assert cov["comparable_sale_kind"] == {SALE_AUCTION: 2, SALE_FIXED: 2}
