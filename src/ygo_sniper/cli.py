@@ -727,6 +727,53 @@ def backfill_sale_kind(
 
 
 @app.command()
+def dedupe_comps(
+    dry_run: bool = typer.Option(False, help="只算不寫，也不受先前的標記影響"),
+):
+    """把 comps 裡「同一實體商品跨 Yahoo 家族同時出品」的重複成交標記出來。
+
+    日本賣家可以把同一件實體商品同時掛在ヤフオク!（buyee_yahoo）與
+    Yahoo!フリマ／PayPay フリマ（buyee_paypay）——賣掉一邊，另一邊自動下架。
+    後果：同一筆實體成交在 comps 出現兩次，那張卡的同儕中位數被自己汙染
+    （同一個價格算了兩票）。
+
+    判準很嚴（寧可漏抓，不可誤殺真成交，見 CLAUDE.md 第一節）：兩邊分屬
+    buyee_yahoo／buyee_paypay（跨公司一律不判）、原幣金額完全相同、
+    成交時間相差 60 分鐘內、標題正規化後逐字相同、已解析的卡片屬性不衝突。
+    每一組都印出來——沒有這張表就等於靜默過濾。
+
+    **只標記（`comps.dup_of_id`），不刪除任何列**。留 buyee_yahoo、標記
+    buyee_paypay 那一側：ヤフオク的 `sold_at` 100% 是真實成交時間。
+    """
+    from .comps import mark_dual_listing_duplicates
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    rep = mark_dual_listing_duplicates(store, dry_run=dry_run)
+    tag = "[yellow]dry-run，未寫入[/yellow] " if dry_run else ""
+    console.print(
+        f"{tag}comps {rep['rows']} 列（{rep['candidates']} 列尚未標記、"
+        f"參與這次偵測）：判出 {len(rep['matches'])} 組同時出品重複"
+    )
+    if not rep["matches"]:
+        console.print("[dim]沒有找到符合判準的重複組——量很小是正常的，"
+                       "判準本來就設計成寧可漏抓。[/dim]")
+        return
+    t = Table(title="同時出品重複（留 buyee_yahoo，標記 buyee_paypay）")
+    for col in ("keep_id", "dup_id", "price_native", "delta_min", "sold_at (keep／dup)", "title"):
+        t.add_column(col)
+    for m in rep["matches"]:
+        t.add_row(
+            str(m["keep_id"]), str(m["dup_id"]),
+            f"{m['price_native']:.0f} {m['currency']}",
+            f"{m['delta_minutes']:.1f}",
+            f"{m['keep_sold_at']}\n{m['dup_sold_at']}",
+            m["title"][:60],
+        )
+    console.print(t)
+
+
+@app.command()
 def backfill_sellers(
     dry_run: bool = typer.Option(False, help="只算不寫"),
 ):

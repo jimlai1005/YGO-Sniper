@@ -445,6 +445,12 @@ def market_rows_from_store(
             )
         )
     for r in store.comps_by(limit=limit):
+        # 同時出品去重（comps.dup_of_id）：這一列是「同一實體商品跨 Yahoo 家族
+        # 同時出品」被判掉的那一邊，真正的成交由 dup_of_id 指到的那一列代表。
+        # 不跳過的話同一筆成交會算兩票，同儕中位數被自己汙染（工程原則 1）。
+        # 只標記不刪除，所以這裡的 skip 隨時可撤回——見 comps.mark_dual_listing_duplicates。
+        if r.get("dup_of_id") is not None:
+            continue
         price = _f(r.get("price_twd"))
         if price is None:
             continue

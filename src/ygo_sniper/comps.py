@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import re
 import statistics
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from .config import Config
 from .domain import CardInfo, CompStats, Listing, SaleKind
@@ -106,6 +107,131 @@ def _external_id_of(url: str | None) -> str:
     `buyee.jp/paypayfleamarket/item/z654154608`、`buyee.jp/mercari/item/m19094616319`。
     """
     return (url or "").rstrip("/").rsplit("/", 1)[-1]
+
+
+# ---------------------------------------------------------------------------
+# 同時出品去重（comps.dup_of_id）
+# ---------------------------------------------------------------------------
+#: 日本賣家可以把同一件實體商品同時掛在ヤフオク!與 Yahoo!フリマ（PayPay）——
+#: 賣掉一邊，另一邊自動下架。**只有這兩站可能是同一實體商品**：跨公司
+#: （Mercari／eBay）不存在這種同時出品機制，一律不判重複。
+_DUAL_LISTING_SITES: frozenset[str] = frozenset({"buyee_yahoo", "buyee_paypay"})
+
+#: 同時出品的成交時間窗（分鐘）。2026-08-05 全語料掃描（2,566 筆 comps）：
+#: 真案例（同商品、同原幣金額、標題逐字相同）時間差 26.2 分鐘；同一次掃描
+#: 找到的次接近候選（同價格但**不同卡**）時間差 157.1 分鐘。60 分鐘落在兩者
+#: 正中間，給真案例 2.3 倍餘裕、離最近的假候選還有 2.6 倍空間——調這個數字
+#: 不會讓已知的任何一組候選變動判定。
+_DUAL_LISTING_WINDOW_MINUTES = 60.0
+
+#: 兩邊都有值卻衝突就不判重（防禦性檢查，正常情況下標題逐字相同時這些欄位
+#: 本來就該一致——這裡是防漏網，不是主要判準）。
+_DUAL_LISTING_IDENTITY_FIELDS: tuple[str, ...] = (
+    "card_name", "set_code", "rarity", "grader", "grade",
+)
+
+
+def _parse_sold_at(value: Any) -> datetime | None:
+    """`comps.sold_at` → 帶時區的 datetime。解析不出來回 None（呼叫端不猜）。"""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def find_dual_listing_duplicates(rows: Iterable[Mapping]) -> list[dict]:
+    """把 `rows`（comps 原始列）裡「同一實體商品跨 Yahoo 家族同時出品」的
+    重複成交抓出來。**純函式，不碰 db**——寫入是另一步（`mark_dual_listing_duplicates`）。
+
+    判準（全部同時成立，任一項有疑慮就不判重——寧可漏抓，不可誤殺真成交，
+    見本專案 CLAUDE.md 第一節）：
+
+    1. 一邊 `buyee_yahoo`、一邊 `buyee_paypay`（`_DUAL_LISTING_SITES`）。
+       跨公司（Mercari／eBay）一律不判——同時出品不可能跨公司。
+    2. `price_native` 與 `currency` 完全相同——原幣同額，不是換算後湊巧撞上
+       （工程原則 1：混源比較會產生無聲的誤判）。
+    3. `sold_at` 相差在 `_DUAL_LISTING_WINDOW_MINUTES` 分鐘內。
+    4. 標題正規化（`parsers.normalize`）後逐字相同——同一份刊登文案，
+       是全部判準裡最強的單一訊號。
+    5. 已解析的卡片屬性（`_DUAL_LISTING_IDENTITY_FIELDS`）沒有任何一項衝突
+       （防禦性複查；標題相同時這些欄位本來就該一致）。
+
+    留哪筆：一律留 `buyee_yahoo`——那一站的 `sold_at` 100% 是真實成交時間，
+    `buyee_paypay` 混著入庫時間（見 `store._COMPS_ATTR_COLUMNS` 的
+    `sold_at_is_ingest` 註記）。回傳的每一組都帶著判定依據，方便人工複核。
+    """
+    yahoo = [r for r in rows if r.get("site") == "buyee_yahoo"]
+    paypay = [r for r in rows if r.get("site") == "buyee_paypay"]
+    matches: list[dict] = []
+    for y in yahoo:
+        y_price = y.get("price_native")
+        y_title = y.get("title")
+        y_sold = _parse_sold_at(y.get("sold_at"))
+        if y_price is None or not y_title or y_sold is None:
+            continue
+        y_norm = normalize(y_title)
+        for p in paypay:
+            if p.get("price_native") != y_price:
+                continue
+            if not (y.get("currency") or "") or (p.get("currency") or "") != (y.get("currency") or ""):
+                continue
+            p_title = p.get("title")
+            if not p_title or normalize(p_title) != y_norm:
+                continue
+            p_sold = _parse_sold_at(p.get("sold_at"))
+            if p_sold is None:
+                continue
+            delta_minutes = abs((y_sold - p_sold).total_seconds()) / 60.0
+            if delta_minutes > _DUAL_LISTING_WINDOW_MINUTES:
+                continue
+            conflict = any(
+                y.get(f) is not None and p.get(f) is not None and y.get(f) != p.get(f)
+                for f in _DUAL_LISTING_IDENTITY_FIELDS
+            )
+            if conflict:
+                continue
+            matches.append({
+                "keep_id": y.get("id"),
+                "dup_id": p.get("id"),
+                "keep_site": "buyee_yahoo",
+                "dup_site": "buyee_paypay",
+                "price_native": y_price,
+                "currency": y.get("currency"),
+                "delta_minutes": round(delta_minutes, 1),
+                "keep_sold_at": y.get("sold_at"),
+                "dup_sold_at": p.get("sold_at"),
+                "title": y_title,
+                "keep_url": y.get("url"),
+                "dup_url": p.get("url"),
+            })
+    return matches
+
+
+def mark_dual_listing_duplicates(store, *, dry_run: bool = False) -> dict:
+    """對 `store` 裡的既有 comps 跑 `find_dual_listing_duplicates`，把結果寫進
+    `comps.dup_of_id`。**不刪除任何列**——標記可以撤回，刪除不可逆。
+
+    已經標記過的列不再參與偵測（既不當 keep 也不當 dup 的候選）：避免重跑時
+    同一組重複配對，也避免鏈狀誤標（A 標成 B 的重複、B 又被標成 C 的重複）。
+    這使得整支函式**冪等**：第二次起 `matches` 必為空。
+
+    回傳每一組的完整判定依據（`matches`），供 CLI 印出來給人看——沒有這個
+    列表就等於靜默過濾（本專案第一節）。
+    """
+    rows = store.comps_by(limit=1_000_000)
+    candidates = [r for r in rows if r.get("dup_of_id") is None]
+    matches = find_dual_listing_duplicates(candidates)
+    if matches and not dry_run:
+        store.mark_comps_duplicates([(m["dup_id"], m["keep_id"]) for m in matches])
+    return {
+        "rows": len(rows),
+        "candidates": len(candidates),
+        "matches": matches,
+        "dry_run": dry_run,
+    }
 
 
 def backfill_sale_kind(

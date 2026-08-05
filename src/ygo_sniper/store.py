@@ -288,6 +288,19 @@ _COMPS_ATTR_COLUMNS: dict[str, str] = {
     #: NULL ＝ 還沒回填的舊列，下游一律讀成 `unknown`（**不准當成 `fixed`**）。
     #: 回填見 `comps.backfill_sale_kind` / CLI `backfill-sale-kind`。
     "sale_kind": "TEXT",
+    #: **這一列是不是「同時出品」的重複成交**——指向被保留的那一列的 `id`。
+    #: 2026-08-06 加入。日本賣家可以把同一件實體商品同時掛在ヤフオク!與
+    #: Yahoo!フリマ（PayPay），賣掉一邊另一邊自動下架；後果是同一筆實體成交
+    #: 在 comps 出現兩次，同儕中位數被自己汙染（同一個價格算了兩票）。
+    #:
+    #: NULL ＝ 不是重複（含全部尚未偵測過的舊列——**不是重複的預設值也是
+    #: NULL**，跟「還沒判斷」share 同一個值是刻意的：下游的判斷永遠是
+    #: `IS NOT NULL` 才跳過，多一個「未知」狀態只會讓人忘記處理它）。
+    #: 非 NULL ＝ 這一列**不參與**同儕比較與計分，真正的成交由 `dup_of_id`
+    #: 指到的那一列代表。**只標記，不刪除**——刪除不可逆，標記可以撤回，
+    #: 而且保留原始列才查得出判錯（本專案第一節）。
+    #: 判定見 `comps.find_dual_listing_duplicates` / CLI `dedupe-comps`。
+    "dup_of_id": "INTEGER",
 }
 
 #: save_comps 寫入的欄位（不含 id）。順序即 INSERT 的欄位順序。
@@ -847,6 +860,24 @@ class Store:
             cur = c.executemany(
                 "UPDATE comps SET sale_kind = ? WHERE id = ?"
                 " AND (sale_kind IS NULL OR sale_kind = '' OR sale_kind = 'unknown')",
+                rows,
+            )
+            return cur.rowcount or 0
+
+    def mark_comps_duplicates(self, pairs: Iterable[tuple[int, int]]) -> int:
+        """把 `comps.dup_of_id` 寫進指定的列（dup_id → keep_id），回傳實際改動列數。
+
+        **只寫還沒有標記的列**——判斷邏輯在 `comps.find_dual_listing_duplicates`
+        （單一判定處），這裡的 WHERE 條件只是同一條規則的結構性複述：已經標記
+        過的列，任何重跑都不得再改（避免鏈狀重標，也讓整條流程冪等）。
+        **不刪除任何列**——標記可以撤回，刪除不可逆。
+        """
+        rows = [(int(keep_id), int(dup_id)) for dup_id, keep_id in pairs]
+        if not rows:
+            return 0
+        with self._conn() as c:
+            cur = c.executemany(
+                "UPDATE comps SET dup_of_id = ? WHERE id = ? AND dup_of_id IS NULL",
                 rows,
             )
             return cur.rowcount or 0
