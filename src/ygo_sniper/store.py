@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain import SaleKind, Signal, TriageState
+from .expiry import expiry_status
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -1716,6 +1717,58 @@ class Store:
                 (TriageState.EXPIRED.value, TriageState.NEW.value, cutoff),
             )
             return cur.rowcount
+
+    #: 允許被「清除已離場」動作碰到的狀態。清單刻意很短——
+    #: bought/skipped 是終點站，in_bundle 是進行中的湊單，都不該被批次清掉。
+    CLEARABLE_STATES = (
+        TriageState.WATCHING.value,
+        TriageState.ASKED_SELLER.value,
+        TriageState.OFFER_SENT.value,
+    )
+
+    # ------------------------------------------------------------------
+    def clear_expired_signals(
+        self, state: str, *, gone_confidence: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        """把某個狀態底下已離場的標的移到 expired，回傳清了哪些。
+
+        與 `expire_stale_signals` 的差別：那支是排程自動跑、只敢動 `state='new'`；
+        這支是**使用者按按鈕**觸發的，所以可以動人工狀態——但也因此一定要記下
+        `cleared_from`，讓 `upsert_signal` 在標的重新上架時把它放回原位。
+
+        判定沿用 `expiry.expiry_status`（唯一真相來源），不在這裡重寫一套 SQL 條件：
+        判準散成兩份，遲早會漂移成兩種答案。
+
+        回傳 `{"cleared": int, "keys": [...], "by_source": {site: n}}`——
+        照 `purge_signals` 的慣例回 dict 而不是單一 int，呼叫端要能把細節印給使用者看。
+        """
+        if state not in self.CLEARABLE_STATES:
+            raise ValueError(
+                f"不可清除的狀態 {state}；可清除：{list(self.CLEARABLE_STATES)}"
+            )
+        rows = self.list_signals(state=state, limit=100_000)
+        doomed = [
+            r for r in rows
+            if expiry_status(r, gone_confidence=gone_confidence).kind != "live"
+        ]
+        if not doomed:
+            return {"cleared": 0, "keys": [], "by_source": {}}
+
+        now = _now_iso()
+        keys = [r["key"] for r in doomed]
+        by_source: dict[str, int] = {}
+        for r in doomed:
+            site = str(r.get("site") or "unknown")
+            by_source[site] = by_source.get(site, 0) + 1
+
+        marks = ",".join("?" * len(keys))
+        with self._conn() as c:
+            c.execute(
+                f"UPDATE signals SET state = ?, cleared_at = ?, cleared_from = ? "
+                f"WHERE key IN ({marks})",
+                [TriageState.EXPIRED.value, now, state, *keys],
+            )
+        return {"cleared": len(keys), "keys": keys, "by_source": by_source}
 
     def all_signal_titles(self) -> list[dict[str, Any]]:
         """每一筆訊號的 (key, site, title, state)。重跑解析判準用。"""

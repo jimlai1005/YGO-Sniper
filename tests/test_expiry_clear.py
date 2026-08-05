@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from ygo_sniper.domain import TriageState
 from ygo_sniper.store import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,3 +142,44 @@ def test_list_signals_without_obs_row_is_fine(store):
     rows = store.list_signals(state="watching")
     assert [r["key"] for r in rows] == ["solo"]
     assert rows[0]["obs_disappeared_at"] is None
+
+
+def test_clear_expired_moves_gone_rows_to_expired(store):
+    _insert(store, "gone-1")
+    _mark_gone(store, "gone-1")
+    _insert(store, "live-1")
+
+    result = store.clear_expired_signals(
+        "watching", gone_confidence={"_default": "low"}
+    )
+
+    assert result["cleared"] == 1
+    assert result["keys"] == ["gone-1"]
+    assert result["by_source"] == {"buyee_yahoo": 1}
+    assert store.get_signal("gone-1")["state"] == TriageState.EXPIRED.value
+    assert store.get_signal("gone-1")["cleared_from"] == "watching"
+    assert store.get_signal("gone-1")["cleared_at"] is not None
+    assert store.get_signal("live-1")["state"] == "watching"
+
+
+def test_clear_expired_is_idempotent(store):
+    _insert(store, "gone-1")
+    _mark_gone(store, "gone-1")
+    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    again = store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    assert again["cleared"] == 0
+    assert again["keys"] == []
+
+
+def test_clear_expired_only_touches_the_named_state(store):
+    """清觀察中不能順手把已購買的也清掉。"""
+    _insert(store, "bought-1", state="bought")
+    _mark_gone(store, "bought-1")
+    result = store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    assert result["cleared"] == 0
+    assert store.get_signal("bought-1")["state"] == "bought"
+
+
+def test_clear_expired_rejects_unknown_state(store):
+    with pytest.raises(ValueError, match="不可清除"):
+        store.clear_expired_signals("bought", gone_confidence={"_default": "low"})
