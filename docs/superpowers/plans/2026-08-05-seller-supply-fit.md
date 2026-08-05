@@ -81,21 +81,43 @@
 
 權重來自使用者提供的表，扣掉「平均低於市場價格幅度」（那是 Alpha 本身，不進 Supply Fit），並新增 D5「供給規模」。**這些權重是起點不是結論**——Task 7 會實測分佈後回頭校準。
 
-| 維度 | 來源欄位 | 權重 | 可得條件 | 方向 |
-|---|---|---|---|---|
-| D1 `sold_depth` 歷史成交深度 | `n_sold` | 25 | `n_sold >= 1`；站台拿不到成交（eBay）→ 不可得 | 越大越好 |
-| D2 `grade_profile` 分數輪廓 | `grade_mix` | 15 | `sum(grade_mix.values()) >= 3` | 8/9 分佔比越高越好 |
-| D3 `series_focus` 系列集中度 | `series_top1_share` | 10 | `series_known_n >= 3` | 越集中越好 |
-| D4 `listing_rhythm` 上架時段可預測性 | `listing_hour_hist` | 5 | `sum(hist.values()) >= 5` | 越集中越好 |
-| D5 `supply_scale` 供給規模 | `n_rows` | 25 | 恆可得 | 越大越好 |
+> **2026-08-05 修正（Task 2b）**：原本 D1 用 `n_sold`、D5 用 `n_rows`，實測發現
+> `corr(n_sold, n_rows) = 0.989`、**87% 的賣家兩者是同一個數字**（多數賣家只出現在
+> 成交帳、從沒被看到在架，所以 `n_ask = 0` → `n_rows == n_sold`）。而 65% 的賣家
+> 恰好只有這兩個維度可得——那不是「2 個維度」，是同一訊號算兩次、加權 50 分，
+> 還會在畫面上顯示「2/5 維度」誇大證據強度。這是 CLAUDE.md 第三節的變種。
+> 修法：合併為單一 `supply_depth`（量「多少」），新增 `persistence`（量「多久」，
+> 實測 `corr(observation_span_days, n_rows) = 0.521`，是獨立資訊）。
 
-**D1 為什麼是 25**：使用者原表給「賣家歷史成交數」25%，保留。語意是「他是持續經營的專業戶，不是一次性清倉」。
+| 維度 | 來源欄位 | 權重 | 可得條件 | 方向 | 實測可得數 |
+|---|---|---|---|---|---|
+| D1 `supply_depth` 供給深度 | `n_rows` | 40 | 恆可得 | 越大越好 | 360/360 |
+| D2 `persistence` 持續性 | `observation_span_days` | 20 | `> 0` | 越大越好 | 132/360 |
+| D3 `grade_profile` 分數輪廓 | `grade_mix` | 20 | `sum(values) >= 3` | 8-9 分佔比越高越好 | 92/360 |
+| D4 `series_focus` 系列集中度 | `series_top1_share` | 15 | `series_known_n >= 3` | 越集中越好 | 31/360 |
+| D5 `listing_rhythm` 上架時段可預測性 | `listing_hour_hist` | 5 | `sum(values) >= 5` | 越集中越好 | 56/360 |
 
-**D2 為什麼是 8/9 分越高越好**（這是假設，要寫在 docstring 裡）：PSA10 溢價高、7 以下品相風險大，8/9 是性價比帶。判定用分數值而非機構：把 `grade_mix` 的 key（形如 `"PSA 8"` / `"ARS 9"` / `"PSA 10"`）拆出數值，計 `8.0 <= g <= 9.5` 的佔比。**不要只認 PSA**——`grade_mix` 裡 ARS 佔比很高（實測有賣家 121 筆全 ARS10）。
+可得維度數分佈（實測 360 個賣家）：`{1: 223, 2: 45, 3: 28, 4: 46, 5: 18}`
+→ **≥2 個維度的有 137 個、≥3 個的有 92 個**（現行 Alpha 只有 34 個）。
 
-**D4 的語意是排程用途不是品質**：他固定在某個時段上架 → 我們可以在那之前排掃描。權重 5，訊號最弱，docstring 要註明「這個維度衡量的是可預測性，不是賣家好壞」。
+**D1 的權重 40 是 25+25 合併後再打折**：原本使用者表給「賣家歷史成交數」25、我加的
+「供給規模」25，合併後不給 50——因為重複計算本身就是要修的問題，給 50 等於把錯誤
+的權重保留下來。語意是「我們觀測到這賣家有多少貨」。
 
-**D5 是本計劃新增的**（使用者原表沒有）。理由：「值不值得盯」最直接的判準就是他會不會持續產出符合年代輪廓的貨。實測 `ebay:psa` 的 `n_rows=117`、中位數賣家只有 1-2 列——這個維度的區辨力最強。權重比照 D1。
+**D1 只能站內比**：`n_rows` 的組成隨站台而異——buyee_yahoo/paypay 的列多半來自挖回來的
+成交帳（跨 182 天），eBay 的列只有在架（3.2 天）。跨站可比性由站內百分位負責。
+
+**D2 為什麼獨立**：`n_rows` 量的是「多少」、跨度量的是「多久」，實測相關性只有 0.52。
+而使用者原表「賣家歷史成交數」想表達的語意其實是「持續經營 vs 一次性清倉」——
+**那本來就是時間的事不是筆數的事**，D2 才是直接量到它的維度。
+跨度可以直接信任：入庫時間戳（非真實時間）已在 `SellerMetrics` 算跨度時排除
+（`n_fake_timestamps` 欄位，[seller_alpha.py:643-644](../../../src/ygo_sniper/seller_alpha.py)）。
+
+**D3 為什麼是 8/9 分越高越好**（這是假設，要寫在 docstring 裡）：PSA10 溢價高、7 以下品相風險大，8/9 是性價比帶。判定用分數值而非機構：把 `grade_mix` 的 key（形如 `"PSA 8"` / `"ARS 9"` / `"PSA 10"`）拆出數值，計 `8.0 <= g <= 9.5` 的佔比。**不要只認 PSA**——`grade_mix` 裡 ARS 佔比很高（實測有賣家 121 筆全 ARS10）。
+
+**D5 的語意是排程用途不是品質**：他固定在某個時段上架 → 我們可以在那之前排掃描。權重 5，訊號最弱，docstring 要註明「這個維度衡量的是可預測性，不是賣家好壞」。
+
+**D1 與 D2 都不在使用者原表裡**（原表是「賣家歷史成交數 25%」）。理由：「值不值得盯」最直接的判準是他有多少貨（D1）以及他是不是持續在供貨（D2）。實測 `ebay:psa` 的 `n_rows=117`、中位數賣家只有 1-2 列——D1 的區辨力最強。
 
 **用 `n_rows` 而不是「件/週」的原因（必須寫進 docstring）**：在架帳全域跨度只有 3.2 天、20% 的零可比賣家 `observation_span_days` 是 0，除以一個接近 0 的跨度會產生垃圾速率。所以 Phase 1 用**累積觀測量**，並在 caveat 明說「這是累積量不是速率，速率要等在架帳長厚」。
 
@@ -199,6 +221,13 @@ git commit -m "feat(seller): SupplyDimension 可得性宣告"
 ---
 
 ## Task 2: 五個維度的計算
+
+> **⚠️ 本節已於 2026-08-05 被 Task 2b 取代（commit `7d19eb8`）。** 下面的 `dim_sold_depth`
+> / `dim_supply_scale` / `SITES_WITHOUT_SOLD_HISTORY` 已從程式碼移除，改為
+> `dim_supply_depth` + `dim_persistence`（原因見上方維度表的修正說明）。
+> **實際落地的是 `src/ygo_sniper/seller_supply.py` 現況**，本節保留作為決策軌跡。
+> 未被取代、仍然有效的是 `dim_grade_profile` / `dim_series_focus` / `dim_listing_rhythm`
+> 三節的規格。
 
 **Files:**
 - Modify: `src/ygo_sniper/seller_supply.py`
@@ -315,18 +344,31 @@ from ygo_sniper.seller_supply import SupplyParams, supply_fit_all
 
 
 def test_score_is_renormalised_over_available_dimensions_only():
-    """eBay 賣家拿不到成交數（權重 25）→ 剩下 75 的權重要重新正規化到 100，
-    不是讓他直接損失 25 分。"""
+    """跨度 0（persistence 20 分）與系列不明（series_focus 15 分）都不可得
+    → 剩下 65 的權重要重新正規化到 100，不是讓他直接損失 35 分。"""
     ms = [metrics(seller_key=f"ebay:s{i}", site="ebay", n_rows=i * 10,
+                  observation_span_days=0.0,          # persistence 不可得
                   grade_mix={"PSA 8": i, "PSA 10": 1},
                   listing_hour_hist={20: 5, 21: 1}) for i in range(1, 12)]
     out = supply_fit_all(ms, params=SupplyParams())
     top = out[ms[-1].seller_key]
     assert top.ok is True
-    assert top.n_dimensions_used == 3        # sold_depth 與 series_focus 都不可得
+    assert top.n_dimensions_used == 3        # persistence 與 series_focus 都不可得
     assert top.n_dimensions_total == 5
     assert 0.0 <= top.total <= 100.0
-    assert any("sold_depth" in x for x in top.missing)
+    assert any("persistence" in x for x in top.missing)
+
+
+def test_supply_depth_alone_is_never_enough():
+    """supply_depth 恆可得——如果它單獨就能給分數，那 223 個只有它的賣家
+    會全部拿到「分數」，但那其實只是「我們手上有幾列資料」的排名。"""
+    ms = [metrics(seller_key=f"ebay:s{i}", site="ebay", n_rows=i)
+          for i in range(1, 12)]           # 其餘四個維度全不可得
+    out = supply_fit_all(ms, params=SupplyParams())
+    for fit in out.values():
+        assert fit.ok is False
+        assert fit.total is None           # 不是 0
+        assert fit.n_dimensions_used == 1
 
 
 def test_site_with_too_few_sellers_is_not_ranked():
@@ -364,10 +406,10 @@ Expected: FAIL — `ImportError: cannot import name 'supply_fit_all'`
 @dataclass(slots=True)
 class SupplyParams:
     weights: dict[str, float] = field(default_factory=lambda: {
-        "sold_depth": 25.0,
-        "supply_scale": 25.0,
-        "grade_profile": 15.0,
-        "series_focus": 10.0,
+        "supply_depth": 40.0,
+        "persistence": 20.0,
+        "grade_profile": 20.0,
+        "series_focus": 15.0,
         "listing_rhythm": 5.0,
     })
     #: 站內賣家數少於這個值就不排名——百分位在小樣本裡沒有意義。
