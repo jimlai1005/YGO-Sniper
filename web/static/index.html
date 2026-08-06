@@ -652,6 +652,63 @@ function auctionFiltersConflict(filterMode, hideAuction){
 }
 /* ==== SIGNAL-FILTER-LOGIC:END ======================================= */
 
+/* ==== EXPIRY-BANNER-LOGIC:BEGIN ===================================== *
+ * 待清筆數。純函式，被 tests/test_expiry_banner.py 抽出來丟進 node 跑。
+ *
+ * **必須跟後端真的會清的那一批同源**：`clear_expired_signals` 自己重查整個
+ * 分頁（`min_score=0`、不套任何前端篩選），所以這裡一律數 `allItems`
+ * （這個分頁的全部），不是 `shownItems`（篩選後、且競標視圖已把已結標的移出）。
+ *
+ * 數 shown 的後果實測過：開著「🔨 只看競標」按下清除，確認框說「將清除 2 筆」，
+ * 後端實際改了 6 列。那個數字是使用者按下去之前**唯一的反悔依據**
+ * （CLAUDE.md 第三節：要比較／並列的兩個數字必須是同一把尺量的）。
+ *
+ * 差額要**講出來**，不能只把數字換掉了事——使用者得知道他要清的東西比畫面上
+ * 看得到的多幾筆，否則只是換成另一個他無法核對的數字。
+ * ------------------------------------------------------------------- */
+
+/* 與後端 Store.CLEARABLE_STATES 對齊（tests/test_expiry_banner.py 釘住）。 */
+const CLEARABLE_STATES = ["watching", "asked_seller", "offer_sent"];
+
+/* 「這一筆算不算待清」只有一份定義，來自後端的 expiry 物件（expiry.py）。
+   沒有 expiry 欄位的舊回應一律**不算**——不確定時偏向不清除。 */
+const isExpiredItem = it => !!(it && it.expiry && it.expiry.kind !== "live");
+
+/** 回 {count, hidden, sources} 或 null（不顯示 banner）。
+    count = 整個分頁的待清筆數（＝後端會清的筆數）
+    hidden = 其中被目前篩選／視圖藏起來、畫面上看不到的筆數 */
+function expiryBanner(state, allItems, shownItems){
+  if(!CLEARABLE_STATES.includes(state)) return null;
+  const all = (allItems || []).filter(isExpiredItem);
+  if(!all.length) return null;
+  const visible = (shownItems || []).filter(isExpiredItem).length;
+  const bySrc = {};
+  for(const i of all){ const s = i.site || "?"; bySrc[s] = (bySrc[s]||0)+1; }
+  const sources = Object.entries(bySrc).sort((a,b) => b[1]-a[1])
+    .map(([s,n]) => `${s} ${n}`).join("、");
+  return {count: all.length, hidden: Math.max(all.length - visible, 0), sources};
+}
+/* ==== EXPIRY-BANNER-LOGIC:END ======================================= */
+
+/** 在架狀態徽章。判定來自後端 expiry.py（唯一真相來源），前端只負責畫。
+    舊回應沒有 expiry 欄位時回空字串，不讓卡片壞掉。
+
+    **兩種卡片共用這一份**：競標卡曾經完全沒有這兩個徽章，於是「已離場」
+    在競標視圖裡看不到，按鈕卻照樣會清掉它——看不到就不該被清掉。 */
+function expiryBadges(it){
+  const xp = it.expiry || null;
+  return {
+    xp: isExpiredItem(it)
+      ? `<span class="xp ${xp.kind}${xp.confidence === "low" ? " low" : ""}"${
+          xp.note ? ` title="${escapeHtml(xp.note)}"` : ""}>${escapeHtml(xp.detail)}</span>`
+      : "",
+    // 自動還原過的：讓「誤殺又被救回來」這件事看得見，不是只有統計數字。
+    back: it.restored_count > 0
+      ? `<span class="xp back" title="這筆被清除過 ${it.restored_count} 次，後來又上架了">已復活</span>`
+      : "",
+  };
+}
+
 /* ==== AUCTION-VIEW-LOGIC:BEGIN ====================================== *
  * 競標視圖的可行動性排序。這一段是**純函式**，不碰 DOM、不讀全域狀態，
  * 時間與門檻一律由參數傳進來——因為它被 tests/test_auction_view.py 抽出來
@@ -877,18 +934,9 @@ function card(it){
     ? `<span class="badge on">🔥 觸發</span>`
     : `<span class="badge">候選</span>`;
 
-  // 在架狀態徽章。判定來自後端 expiry.py（唯一真相來源），前端只負責畫。
-  // 舊回應沒有 expiry 欄位時整段跳過，不讓卡片壞掉。
-  const xp = it.expiry || null;
-  const gone = xp && xp.kind !== "live";
-  const xpBadge = gone
-    ? `<span class="xp ${xp.kind}${xp.confidence === "low" ? " low" : ""}"${
-        xp.note ? ` title="${escapeHtml(xp.note)}"` : ""}>${escapeHtml(xp.detail)}</span>`
-    : "";
-  // 自動還原過的：讓「誤殺又被救回來」這件事看得見，不是只有統計數字。
-  const backBadge = it.restored_count > 0
-    ? `<span class="xp back" title="這筆被清除過 ${it.restored_count} 次，後來又上架了">已復活</span>`
-    : "";
+  const gone = isExpiredItem(it);
+  const badges = expiryBadges(it);
+  const xpBadge = badges.xp, backBadge = badges.back;
 
   return `
   <article class="card ${hot?'hot':''} ${trig?'trig':''} ${gone?'expired':''}">
@@ -1189,28 +1237,43 @@ async function setState(key, state){
 function askClearExpired(){
   const b = document.getElementById("xp-banner");
   const n = b.dataset.count, src = b.dataset.sources;
+  const hidden = Number(b.dataset.hidden || 0);
   // 已出價的標的消失，很可能代表**你標下了**——歸宿應該是「已購買」而不是
   // 「已過期」，而且自動還原救不了這種情況（標下的東西不會再出現在搜尋結果）。
   const warn = currentState === "offer_sent"
     ? `<div style="margin-top:10px;color:var(--warn)">
          已出價的標的消失可能代表你標下了，請先確認再清除。</div>`
     : "";
+  // 差額必須說出來：後端清的是**整個分頁**，不是畫面上這幾張卡。
+  const hid = hidden
+    ? `<div style="margin-top:8px;color:var(--warn)">
+         其中 <b>${hidden}</b> 筆被目前的篩選隱藏，畫面上看不到。</div>`
+    : "";
   document.getElementById("xp-confirm-body").innerHTML =
-    `將清除 <b>${n}</b> 筆（${src}）
+    `將清除 <b>${n}</b> 筆（${escapeHtml(src)}）${hid}
      <div style="margin-top:8px;color:var(--dim)">
        → 移到「已過期」分頁，可隨時查看<br>
        → 若重新上架會自動放回原分頁
      </div>${warn}`;
-  document.getElementById("xp-confirm").style.display = "flex";
+  const dlg = document.getElementById("xp-confirm");
+  // 把「這個框在講哪個分頁」記在框上。clearExpired() 送的是這個值而不是
+  // 按下當下的 currentState——框開著時切分頁再按確認，清掉的會是另一個分頁，
+  // 而框上寫的筆數與來源全是前一個分頁的（配合「已出價」那一格，正好落在
+  // 最不該誤清的地方：清錯了自動還原永遠救不回來）。
+  dlg.dataset.state = currentState;
+  dlg.style.display = "flex";
 }
 
 async function clearExpired(){
-  document.getElementById("xp-confirm").style.display = "none";
+  const dlg = document.getElementById("xp-confirm");
+  dlg.style.display = "none";
+  const state = dlg.dataset.state;
+  if(!state){ toast("清除失敗：不知道要清哪個分頁"); return; }
   try{
     const r = await api("/api/signals/clear-expired", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({state: currentState}),
+      body:JSON.stringify({state}),
     });
     toast(`已清除 ${r.cleared} 筆 → 已過期分頁`);
     loadAll();
@@ -1367,23 +1430,22 @@ function renderSignals(res){
   const noP = res && res.p_worth_known != null && res.p_worth_known < items.length
     ? ` · <span class="hid">${items.length - res.p_worth_known} 筆無 P 值（不受 P 篩選影響）</span>` : "";
 
-  // 待清筆數：只算目前分頁看得到的，且只在可清除的三個分頁顯示。
-  const CLEARABLE = ["watching", "asked_seller", "offer_sent"];
-  const expiredItems = CLEARABLE.includes(currentState)
-    ? shown.filter(i => i.expiry && i.expiry.kind !== "live")
-    : [];
+  // 待清筆數：數的是 `items`（整個分頁）而不是 `shown`——後端清的就是整個分頁。
+  // 判斷本身在 expiryBanner()（純函式，有 node 測試）。
+  const xp = expiryBanner(currentState, items, shown);
   const banner = document.getElementById("xp-banner");
-  if(expiredItems.length){
-    const bySrc = {};
-    for(const i of expiredItems){ const s = i.site || "?"; bySrc[s] = (bySrc[s]||0)+1; }
+  if(xp){
     // site 來自 db，照本檔慣例一律 escape 再進 innerHTML。目前它只會是我們
     // 自己的來源鍵（buyee_paypay…），但「這個值今天很乾淨」不是不 escape 的理由。
-    const parts = Object.entries(bySrc).sort((a,b) => b[1]-a[1])
-      .map(([s,n]) => `${escapeHtml(s)} ${n}`).join("、");
+    // dataset 存**原字串**、兩個顯示點各自 escape 一次——存 escape 過的值
+    // 會在確認框裡二次跳脫（`&` 顯示成 `&amp;`）。
+    const hid = xp.hidden
+      ? ` · <span class="hid">其中 <b>${xp.hidden}</b> 筆被目前篩選隱藏</span>` : "";
     document.getElementById("xp-banner-text").innerHTML =
-      `<b>${expiredItems.length}</b> 筆疑似已離場（${parts}）`;
-    banner.dataset.count = expiredItems.length;
-    banner.dataset.sources = parts;
+      `<b>${xp.count}</b> 筆疑似已離場（${escapeHtml(xp.sources)}）${hid}`;
+    banner.dataset.count = xp.count;
+    banner.dataset.hidden = xp.hidden;
+    banner.dataset.sources = xp.sources;
     banner.style.display = "";
   } else {
     banner.style.display = "none";
@@ -1500,13 +1562,17 @@ function auctionCard(it){
   const range = b && b.conservative_fair_twd
     ? `${nt(b.conservative_fair_twd)} – ${nt(b.interval_hi_twd)}` : "不提供";
 
+  // 離場／已復活徽章與觀察中分頁共用同一份（expiryBadges）：競標視圖以前
+  // 完全看不到它們，而清除按鈕照樣會把這些標的清掉——看不到就不該被清掉。
+  const xpb = expiryBadges(it);
+
   return `
-  <article class="card ${canBid ? "hot" : ""} tier-${tier}">
+  <article class="card ${canBid ? "hot" : ""} tier-${tier} ${isExpiredItem(it) ? "expired" : ""}">
     ${shot(it.image_url, it.title)}
     <div class="body">
       <h3 class="title">
         <a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
-        <span class="badge">🔨 競標中</span>${tierChip(tier)}${bucketChip(it)}</h3>
+        <span class="badge">🔨 競標中</span>${tierChip(tier)}${bucketChip(it)}${xpb.xp}${xpb.back}</h3>
       <div class="bid-row">
         <span>目前出價 <b>${cash(cur)}</b>${
           it.payload?.listing?.bids != null ? `（${it.payload.listing.bids} 次出價）` : ""}</span>
@@ -2480,6 +2546,9 @@ document.querySelectorAll(".tab").forEach(btn => {
   btn.onclick = () => {
     document.querySelectorAll(".tab").forEach(b => b.classList.remove("on"));
     btn.classList.add("on");
+    // 換分頁＝那個確認框描述的東西已經不成立了，關掉它。
+    // 留著的話使用者可能在新分頁按下「清除」，而框上的筆數與來源是舊分頁的。
+    document.getElementById("xp-confirm").style.display = "none";
     if(btn.dataset.view){        // 賣家視圖：換版面，不動 currentState
       setView(btn.dataset.view);
       return;

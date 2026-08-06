@@ -823,6 +823,7 @@ class Pipeline:
         expired = 0
         obs_report: dict = {}
         obs_pruned = 0
+        restored: dict = {"restored": 0, "keys": []}
         if not dry_run:
             for sig in signals:
                 if self.store.upsert_signal(sig):
@@ -833,6 +834,20 @@ class Pipeline:
             # 在架觀測帳：signals 每輪 upsert 覆寫，回答不了「在架多久、何時消失」。
             # 這張表是那個問題的唯一資料來源，所以每輪都要落，不管有沒有訊號。
             obs_report = self.store.record_listing_scan(obs_batches)
+            # 「清除已離場」的防線：我們清掉、但這一輪又被看到的標的放回原狀態。
+            # **必須排在 record_listing_scan 之後**——那裡才是清掉
+            # `disappeared_at` 的地方，放前面的話還原永遠慢一輪。
+            # 放在 prune_listing_obs 之前也是刻意的：還原要看得到觀測列。
+            restored = self.store.restore_revived_signals()
+            if restored["restored"]:
+                # 還原＝這個功能自己誤殺了幾筆。安靜地放回去，使用者就永遠不知道
+                # 判定有多不準（CLAUDE.md 第五節：靜默失敗是頭號敵人）。
+                shown = ", ".join(restored["keys"][:5])
+                more = "…" if restored["restored"] > 5 else ""
+                print(
+                    f"[expiry] 誤殺自癒：{restored['restored']} 筆重新上架，"
+                    f"已放回原分頁（{shown}{more}）"
+                )
             obs_pruned = self.store.prune_listing_obs(
                 int(self.cfg.scan.get("listing_obs_retain_days", 0) or 0)
             )
@@ -872,6 +887,9 @@ class Pipeline:
             "listing_obs": obs_report,
             # 賣家輪替監控這一輪做了什麼（哪一批、掃了誰、跳過誰為什麼）。
             "seller_watch": watch_report,
+            # 「清除已離場」的誤殺自癒帳：這一輪放回去幾筆、哪幾筆。
+            # 與 `expired` 是**相反方向**的兩件事，不可合併成一個數字。
+            "restored": restored,
             "listing_obs_pruned": obs_pruned,
             "fx_source": self.fx.source,
             # 每個發現管道的健康摘要（JSON-friendly；Phase 4 告警與 summary 用）

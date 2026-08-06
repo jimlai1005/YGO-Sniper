@@ -97,6 +97,15 @@ def expiry_status(
 
     end_time = _parse_iso(_end_time_of(row))
     if end_time is not None and end_time <= now:
+        if row.get("state") == "offer_sent":
+            # 你出過價的東西**幾乎一定是競標**，而競標的正常結局就是走到這一支
+            # （不是 disappeared）。提醒只寫在下面那一支的話，最需要它的這一類
+            # 反而只看得到中性的「已結標」。
+            # 這是唯一「清錯了無法自癒」的類別：真的標下的標的不會再出現在搜尋
+            # 結果，自動還原永遠救不回來（設計文件第 6 節第 6 點）。
+            return ExpiryStatus(
+                kind="ended", confidence="certain", detail="已結標 · 確認是否標下？"
+            )
         return ExpiryStatus(kind="ended", confidence="certain", detail="已結標")
 
     disappeared = _parse_iso(row.get("obs_disappeared_at"))

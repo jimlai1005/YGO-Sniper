@@ -381,6 +381,21 @@ UPDATE comps
 """
 
 
+#: 一句 SQL 最多塞幾個 key 進 `WHERE key IN (?,?,…)`。
+#:
+#: SQLite 的 host parameter 上限（SQLITE_MAX_VARIABLE_NUMBER）在本機這版是
+#: 32766，超過就整支 `OperationalError: too many SQL variables`——**一筆都不會
+#: 被處理**，而使用者只會看到「清除失敗」。批次寫入那一側的取數上限卻是
+#: `limit=100_000`：兩個上限對不起來就是一顆定時炸彈（某來源整站被擋、或
+#: listing_obs 累積後一次大清就會踩到）。分批做，別讓它有機會炸。
+_SQL_KEY_CHUNK = 500
+
+
+def _key_chunks(keys: list[str]) -> Iterator[list[str]]:
+    for i in range(0, len(keys), _SQL_KEY_CHUNK):
+        yield keys[i : i + _SQL_KEY_CHUNK]
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -467,9 +482,7 @@ class Store:
         now = _now_iso()
         with self._conn() as c:
             existing = c.execute(
-                "SELECT key, state, note, first_seen, cleared_from, "
-                "COALESCE(restored_count, 0) AS restored_count "
-                "FROM signals WHERE key = ?",
+                "SELECT key, state, note, first_seen FROM signals WHERE key = ?",
                 (key,),
             ).fetchone()
 
@@ -499,21 +512,16 @@ class Store:
 
             if existing:
                 # 保留人工狀態與筆記 —— 這是狀態機的重點，
-                # 每天重掃不能把你昨天標的「已詢問」洗掉
+                # 每天重掃不能把你昨天標的「已詢問」洗掉。**沒有例外。**
+                #
+                # 「被清除的標的又上架了要放回去」曾經掛在這裡當窄例外，那是錯的：
+                # 這支的觸發條件是「有人寫了一筆 Signal」，不是「標的回來了」。
+                # `recalc-bids --apply`（取 state="all"）與 `resolve-grades --apply`
+                # （`WHERE grade IS NULL`，無 state 過濾）都會對 expired 列重跑
+                # upsert，每跑一次就假還原一次、`restored_count` +1，而 listing_obs
+                # 從頭到尾都說它不在架上——那個計數正是印給使用者看的誤殺率。
+                # 還原改由 `restore_revived_signals()` 負責，判準是觀測證據。
                 sets = ", ".join(f"{k} = :{k}" for k in row if k != "key")
-                # 唯一的例外：**程式自己**清掉的（cleared_from 非空）標的又上架了，
-                # 把它放回原狀態。這不是覆寫人工決策，是**恢復**人工決策——
-                # 使用者標的是 watching，是我們依 56.5% 誤判率的推論把它移走的。
-                # 使用者手動標的 expired 沒有 cleared_from，走不到這裡。
-                if (
-                    existing["state"] == TriageState.EXPIRED.value
-                    and existing["cleared_from"]
-                ):
-                    row["state"] = existing["cleared_from"]
-                    row["cleared_at"] = None
-                    row["cleared_from"] = None
-                    row["restored_count"] = (existing["restored_count"] or 0) + 1
-                    sets = ", ".join(f"{k} = :{k}" for k in row if k != "key")
                 c.execute(f"UPDATE signals SET {sets} WHERE key = :key", row)
                 return False
 
@@ -664,12 +672,30 @@ class Store:
         return dict(r) if r else None
 
     def update_state(self, key: str, state: str, note: str | None = None) -> None:
+        """改狀態，並把清除標記一併歸零。
+
+        **使用者手動改狀態 = 重新接管這一筆**，程式不該再記著它曾被自動清過。
+        `cleared_at` / `cleared_from` 描述的是「程式做了什麼」；人一旦動手，
+        那段歷史就不再有效力。
+
+        留著會怎樣（實測過的路徑）：程式清掉 → 使用者拉回觀察中 → 幾天後使用者
+        **自己**標成「已過期」→ 這筆仍帶著 `cleared_from`，於是還原機制認得它，
+        把使用者的決定改回 watching。沒有 log、沒有 toast，外顯與「這個分頁本來
+        就有這筆」一模一樣（CLAUDE.md 第五節）。
+
+        `restored_count` **不歸零**：那是這個功能自己的錯誤帳本，不是狀態。
+        """
         with self._conn() as c:
             if note is None:
-                c.execute("UPDATE signals SET state = ? WHERE key = ?", (state, key))
+                c.execute(
+                    "UPDATE signals SET state = ?, cleared_at = NULL, "
+                    "cleared_from = NULL WHERE key = ?",
+                    (state, key),
+                )
             else:
                 c.execute(
-                    "UPDATE signals SET state = ?, note = ? WHERE key = ?",
+                    "UPDATE signals SET state = ?, note = ?, cleared_at = NULL, "
+                    "cleared_from = NULL WHERE key = ?",
                     (state, note, key),
                 )
 
@@ -1763,6 +1789,9 @@ class Store:
                 f"不可清除的狀態 {state}；可清除：{list(self.CLEARABLE_STATES)}"
             )
         rows = self.list_signals(state=state, limit=100_000)
+        # `confidence` 刻意不參與這個判斷：清除是**使用者按下按鈕的動作選擇**
+        # （設計文件 3.1），信心度的去處是徽章文案與確認框的警語，不是這裡的
+        # 布林值。要改成「low 不進批次清除」是設計變更，不是 bug 修正。
         doomed = [
             r for r in rows
             if expiry_status(r, gone_confidence=gone_confidence).kind != "live"
@@ -1777,14 +1806,73 @@ class Store:
             site = str(r.get("site") or "unknown")
             by_source[site] = by_source.get(site, 0) + 1
 
-        marks = ",".join("?" * len(keys))
         with self._conn() as c:
-            c.execute(
-                f"UPDATE signals SET state = ?, cleared_at = ?, cleared_from = ? "
-                f"WHERE key IN ({marks})",
-                [TriageState.EXPIRED.value, now, state, *keys],
-            )
+            for chunk in _key_chunks(keys):
+                marks = ",".join("?" * len(chunk))
+                # `AND state = ?`：讀（list_signals）與寫之間狀態可能被改
+                # （正式庫每 30 分鐘有排程在寫，dashboard 也隨時能按）。
+                # 少了這道護欄會蓋掉新狀態，還記下一個錯的 cleared_from。
+                c.execute(
+                    f"UPDATE signals SET state = ?, cleared_at = ?, cleared_from = ? "
+                    f"WHERE key IN ({marks}) AND state = ?",
+                    [TriageState.EXPIRED.value, now, state, *chunk, state],
+                )
         return {"cleared": len(keys), "keys": keys, "by_source": by_source}
+
+    # ------------------------------------------------------------------
+    def restore_revived_signals(self) -> dict[str, Any]:
+        """把「我們清掉、但後來真的又出現在架上」的標的放回原狀態。
+
+        這是清除功能的防線（實測 `disappeared_at` 誤判率 56.5%，靠人工發現
+        誤殺等於沒有防線）。**觸發條件是觀測證據，不是「有人寫了 Signal」**：
+
+        1. `state='expired' AND cleared_from IS NOT NULL` —— 是我們清掉的
+           （使用者自己標的 expired 沒有 `cleared_from`，`update_state` 也會把
+           人工接管過的列的標記清乾淨）。
+        2. **有 listing_obs 觀測列**（INNER JOIN）——沒有觀測列是「我們不知道」，
+           不是「它回來了」。`prune_listing_obs` 刪掉舊觀測列之後，LEFT JOIN
+           會讓那些列的 `disappeared_at` 也是 NULL，那是同一個「讀不到 ≠ 有結論」
+           的陷阱換一個方向重演。
+        3. `disappeared_at IS NULL` —— 離場標記被 `_upsert_listing_obs` 清掉了，
+           也就是這一輪掃描真的又看到它。
+        4. 最後再過一次 `expiry_status`，**與清除共用同一個判準**。少了這一條，
+           一個「已結標但還留在搜尋結果裡」的競標會被清掉 → 立刻還原 →
+           再被清掉，無限打轉；判準散成兩份就會給出兩種答案。
+
+        呼叫位置很關鍵：必須排在 `record_listing_scan` **之後**（那裡才是清掉
+        `disappeared_at` 的地方），否則還原永遠慢一輪。
+
+        回傳 `{"restored": int, "keys": [...]}`——照 `purge_signals` 的慣例回
+        dict，呼叫端要能把細節印出來（還原這件事必須看得見，CLAUDE.md 第五節）。
+        """
+        q = (
+            "SELECT s.*, o.disappeared_at AS obs_disappeared_at, "
+            "o.window_exit_at AS obs_window_exit_at, "
+            "COALESCE(o.revived_count, 0) AS obs_revived_count "
+            "FROM signals s JOIN listing_obs o ON o.key = s.key "
+            "WHERE s.state = ? AND s.cleared_from IS NOT NULL "
+            "AND o.disappeared_at IS NULL"
+        )
+        with self._conn() as c:
+            rows = [dict(r) for r in c.execute(q, (TriageState.EXPIRED.value,))]
+        back = [r for r in rows if expiry_status(r).kind == "live"]
+        if not back:
+            return {"restored": 0, "keys": []}
+
+        keys = [r["key"] for r in back]
+        with self._conn() as c:
+            for chunk in _key_chunks(keys):
+                marks = ",".join("?" * len(chunk))
+                # `state = cleared_from` 逐列取自己的原狀態；WHERE 重覆一次
+                # 守衛條件（讀寫之間使用者可能已經自己動過這一筆）。
+                c.execute(
+                    f"UPDATE signals SET state = cleared_from, cleared_at = NULL, "
+                    f"cleared_from = NULL, "
+                    f"restored_count = COALESCE(restored_count, 0) + 1 "
+                    f"WHERE key IN ({marks}) AND state = ? AND cleared_from IS NOT NULL",
+                    [*chunk, TriageState.EXPIRED.value],
+                )
+        return {"restored": len(keys), "keys": keys}
 
     # ------------------------------------------------------------------
     def revive_rate_by_source(self) -> dict[str, dict[str, float]]:

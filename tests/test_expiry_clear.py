@@ -5,6 +5,7 @@
 """
 
 import importlib
+import json
 import sqlite3
 import sys
 from dataclasses import replace
@@ -79,6 +80,32 @@ def _mark_gone(store: Store, key: str, when: str = "2026-08-05T00:00:00+00:00",
             (key, site, f"卡 {key}", f"https://example.test/{key}",
              "2026-08-01T00:00:00+00:00", when, 3, when),
         )
+
+
+def _rescan(store: Store, key: str, *, site: str = "buyee_yahoo") -> dict:
+    """跑一輪**真的**掃描：這一輪有看到這筆標的。
+
+    直接 `UPDATE listing_obs SET disappeared_at = NULL` 也能造出同樣的狀態，
+    但那樣測到的就不是 `_upsert_listing_obs` 真的會做的事（CLAUDE.md 第六節：
+    測試路徑必須等於生產路徑）。還原的唯一觸發點就是這條路徑，測試也走它。
+    """
+    return store.record_listing_scan(
+        [
+            {
+                "source": "test",
+                "site": site,
+                "healthy": True,
+                "rows": [
+                    {
+                        "key": key,
+                        "site": site,
+                        "title": f"卡 {key}",
+                        "url": f"https://example.test/{key}",
+                    }
+                ],
+            }
+        ]
+    )
 
 
 @pytest.fixture
@@ -235,14 +262,24 @@ def _signal_for(key: str, *, site: str = "buyee_yahoo"):
 
 
 def test_cleared_signal_is_restored_when_it_comes_back(store):
-    """清掉的東西又上架 → 自動放回原狀態，並累加誤殺計數。"""
+    """清掉的東西**真的又出現在架上** → 自動放回原狀態，並累加誤殺計數。
+
+    「回來了」的定義只有一個：`listing_obs` 的離場標記被清掉——也就是
+    `record_listing_scan` 這一輪真的又看到它。判定與清除同源（`expiry_status`），
+    兩份條件遲早會漂移成兩種答案。
+    """
     key = "buyee_yahoo:gone-1"
     _insert(store, key)
     _mark_gone(store, key)
     store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
     assert store.get_signal(key)["state"] == TriageState.EXPIRED.value
 
-    store.upsert_signal(_signal_for(key))
+    # 還沒被看到 → 一筆都不還原
+    assert store.restore_revived_signals() == {"restored": 0, "keys": []}
+    assert store.get_signal(key)["state"] == TriageState.EXPIRED.value
+
+    _rescan(store, key)                       # 這一輪真的又掃到它
+    assert store.restore_revived_signals() == {"restored": 1, "keys": [key]}
 
     row = store.get_signal(key)
     assert row["state"] == "watching"
@@ -251,17 +288,141 @@ def test_cleared_signal_is_restored_when_it_comes_back(store):
     assert row["restored_count"] == 1
 
 
+def test_bare_upsert_never_restores_a_cleared_signal(store):
+    """還原的前提是**觀測證據**，不是「有人寫了一筆 Signal」。
+
+    `recalc-bids --apply` 與 `resolve-grades --apply` 都會對 expired 列重跑
+    `upsert_signal`（前者取 `state="all"`、後者 `WHERE grade IS NULL` 無 state
+    過濾）。還原掛在 upsert 上的話，它們每跑一次 `restored_count` 就 +1，
+    而 `listing_obs` 從頭到尾都說這筆不在架上。
+
+    那個計數是 `expiry-stats` 印給使用者看的**誤殺率**，並且要他據此調
+    `gone_confidence`——分子被灌水的指標比沒有指標更糟。
+    """
+    key = "buyee_yahoo:gone-1"
+    _insert(store, key)
+    _mark_gone(store, key)
+    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+
+    for _ in range(4):
+        store.upsert_signal(_signal_for(key))
+
+    row = store.get_signal(key)
+    assert row["state"] == TriageState.EXPIRED.value
+    assert row["cleared_from"] == "watching"
+    assert row["restored_count"] == 0
+    assert store.expiry_stats()["restored_total"] == 0
+    # 判定沒有跟著變：listing_obs 仍然記著它離場
+    assert store.list_signals(state="expired")[0]["obs_disappeared_at"] is not None
+
+
+def test_restore_is_idempotent(store):
+    """還原完就不再符合條件（cleared_from 已清空），重跑回 0。"""
+    key = "buyee_yahoo:gone-1"
+    _insert(store, key)
+    _mark_gone(store, key)
+    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    _rescan(store, key)
+    assert store.restore_revived_signals()["restored"] == 1
+    assert store.restore_revived_signals() == {"restored": 0, "keys": []}
+
+
+def test_restore_needs_an_observation_row(store):
+    """沒有觀測列 ≠ 標的回來了。
+
+    `prune_listing_obs` 會把過保留期的觀測列刪掉；LEFT JOIN 之後那些列的
+    `disappeared_at` 也是 NULL，但那是「我們不知道」不是「它回來了」。
+    讀不到 ≠ 東西回來了——與「讀不到 ≠ 東西不見了」同一條原則。
+    """
+    key = "buyee_yahoo:pruned"
+    _insert(store, key)
+    _mark_gone(store, key)
+    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    with sqlite3.connect(store.db_path) as c:
+        c.execute("DELETE FROM listing_obs WHERE key = ?", (key,))
+
+    assert store.restore_revived_signals() == {"restored": 0, "keys": []}
+    assert store.get_signal(key)["state"] == TriageState.EXPIRED.value
+
+
+def test_ended_auction_is_not_restored_just_because_it_is_still_listed(store):
+    """結標的競標常常還留在搜尋結果裡（有觀測列、沒有離場標記）。
+
+    還原只看 `disappeared_at IS NULL` 的話，它會被清掉 → 立刻還原 →
+    下次又被清掉，無限打轉；那正是 flip-flop 換一個入口重演。
+    所以還原與清除共用**同一個判準**（`expiry_status`），不是兩套條件。
+    """
+    key = "buyee_yahoo:ended-1"
+    _insert(store, key, payload=json.dumps(
+        {"listing": {"end_time": "2026-01-01T00:00:00+00:00"}}
+    ))
+    _rescan(store, key)                       # 有觀測列、從沒被判離場
+    cleared = store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    assert cleared["cleared"] == 1            # end_time 已過 → 確定事實
+
+    assert store.restore_revived_signals() == {"restored": 0, "keys": []}
+    assert store.get_signal(key)["state"] == TriageState.EXPIRED.value
+
+
 def test_manually_expired_is_never_restored(store):
     """紅線：使用者手動標的 expired 沒有 cleared_from，程式不准動它。"""
     key = "buyee_yahoo:manual"
     _insert(store, key, state=TriageState.EXPIRED.value)
+    _rescan(store, key)                       # 就算它好端端在架上也一樣
     store.upsert_signal(_signal_for(key))
+    store.restore_revived_signals()
     row = store.get_signal(key)
     assert row["state"] == TriageState.EXPIRED.value
     assert row["restored_count"] == 0
     # 走的必須是 existing 分支——多插一列的話上面兩條會假性通過（見 _signal_for）
     with sqlite3.connect(store.db_path) as c:
         assert c.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 1
+
+
+def test_user_expire_after_a_program_clear_is_not_reverted(store):
+    """紅線（本次修正的核心）：程式清過一次的標的，使用者拉回觀察中、
+    幾天後自己標成 expired——那是**使用者的決定**，掃描不准把它改回去。
+
+    `cleared_from` 記的是「程式做了什麼」。人一旦動手接管這一筆，那段歷史
+    就不該再有效力；否則使用者自己標的 expired 會被靜默改回 watching，
+    沒有 log、沒有 toast，外顯與「這個分頁本來就有這筆」一模一樣。
+    """
+    key = "buyee_yahoo:tug-of-war"
+    _insert(store, key)
+    _mark_gone(store, key)
+    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+
+    store.update_state(key, "watching")                 # 使用者不同意，拉回來
+    assert store.get_signal(key)["cleared_from"] is None
+    assert store.get_signal(key)["cleared_at"] is None
+    store.update_state(key, TriageState.EXPIRED.value)  # 幾天後自己放棄
+
+    # 下一輪掃描做的全部事情
+    _rescan(store, key)
+    store.upsert_signal(_signal_for(key))
+    store.restore_revived_signals()
+
+    row = store.get_signal(key)
+    assert row["state"] == TriageState.EXPIRED.value
+    assert row["restored_count"] == 0
+
+
+def test_update_state_clears_the_clear_marks(store):
+    """使用者手動改狀態 = 重新接管這一筆，清除標記要一起歸零。"""
+    key = "buyee_yahoo:taken-over"
+    _insert(store, key)
+    _mark_gone(store, key)
+    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    assert store.get_signal(key)["cleared_from"] == "watching"
+
+    store.update_state(key, "watching", note="我再看看")
+
+    row = store.get_signal(key)
+    assert row["cleared_from"] is None
+    assert row["cleared_at"] is None
+    assert row["note"] == "我再看看"
+    # 誤殺計數是帳本，不歸零——它記的是「這個功能錯過幾次」
+    assert row["restored_count"] == 0
 
 
 def test_restore_counts_accumulate(store):
@@ -271,7 +432,8 @@ def test_restore_counts_accumulate(store):
     _mark_gone(store, key)
     for expected in (1, 2):
         store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
-        store.upsert_signal(_signal_for(key))
+        _rescan(store, key)
+        assert store.restore_revived_signals()["restored"] == 1
         assert store.get_signal(key)["restored_count"] == expected
         _mark_gone_again(store, key)
 
@@ -282,6 +444,47 @@ def _mark_gone_again(store: Store, key: str) -> None:
             "UPDATE listing_obs SET disappeared_at = ? WHERE key = ?",
             ("2026-08-05T00:00:00+00:00", key),
         )
+
+
+def test_clear_expired_survives_more_keys_than_sqlite_takes_host_params(store):
+    """`WHERE key IN (?,?,…)` 的參數上限是 SQLITE_MAX_VARIABLE_NUMBER（32766），
+    而取資料那一側寫的是 `limit=100_000`——兩個上限對不起來就是一顆定時炸彈。
+
+    超過就整支 `OperationalError: too many SQL variables`，一筆都清不掉。
+    觸發情境：某來源整站被擋、或 `listing_obs` 累積後一次大清。
+    """
+    n = 33_000
+    rows = [
+        (f"buyee_yahoo:bulk-{i}", "buyee_yahoo", f"bulk-{i}", f"卡 {i}",
+         f"https://example.test/{i}", 50.0, "watching", "[]", "{}",
+         "2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00")
+        for i in range(n)
+    ]
+    with sqlite3.connect(store.db_path) as c:
+        c.executemany(
+            "INSERT INTO signals (key, site, external_id, title, url, score, state,"
+            " flags, payload, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        c.executemany(
+            "INSERT INTO listing_obs (key, site, title, url, first_seen, last_seen,"
+            " seen_count, disappeared_at) VALUES (?,?,?,?,?,?,?,?)",
+            [(r[0], "buyee_yahoo", r[3], r[4], "2026-08-01T00:00:00+00:00",
+              "2026-08-05T00:00:00+00:00", 3, "2026-08-05T00:00:00+00:00")
+             for r in rows],
+        )
+
+    result = store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    assert result["cleared"] == n
+    with sqlite3.connect(store.db_path) as c:
+        assert c.execute(
+            "SELECT COUNT(*) FROM signals WHERE state = 'expired'"
+        ).fetchone()[0] == n
+
+    # 還原走同一個分批路徑，同樣不能在同一個上限上炸掉
+    with sqlite3.connect(store.db_path) as c:
+        c.execute("UPDATE listing_obs SET disappeared_at = NULL")
+    assert store.restore_revived_signals()["restored"] == n
 
 
 def test_normal_upsert_still_preserves_manual_state(store):
@@ -323,7 +526,8 @@ def test_expiry_stats_reports_cleared_and_restored(store):
     _insert(store, "buyee_yahoo:gone-2")
     _mark_gone(store, "buyee_yahoo:gone-2")
     store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
-    store.upsert_signal(_signal_for("buyee_yahoo:gone-1"))      # 誤殺，自己回來了
+    _rescan(store, "buyee_yahoo:gone-1")                        # 誤殺，自己回來了
+    store.restore_revived_signals()
 
     stats = store.expiry_stats()
     assert stats["cleared_now"] == 1               # gone-2 還在 expired
@@ -413,3 +617,83 @@ def test_clear_expired_endpoint_rejects_bad_state(client):
     r = c.post("/api/signals/clear-expired", json={"state": "bought"})
     assert r.status_code == 400
     assert "可清除" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 掃描流程：還原必須真的被接進去（不是「有一支方法可以呼叫」）
+# ---------------------------------------------------------------------------
+class _OneListingSource:
+    """永遠回同一筆在架標的的假來源（骨架照 tests/test_scan_status.py:130-140）。"""
+
+    name = "src_b"
+    site = None          # __init__ 填（避免 import 順序綁在 class body）
+    supports_sold = False
+
+    def __init__(self, listings, site):
+        self.listings = listings
+        self.site = site
+
+    def search(self, keyword, **_kw):
+        return list(self.listings)
+
+
+def test_scan_restores_a_cleared_signal_that_is_back_on_the_shelf(
+    monkeypatch, tmp_path, cfg
+):
+    """端到端：清除 → 標的重新出現 → **跑一輪掃描** → 自動回到觀察中。
+
+    呼叫位置是承重的：還原必須排在 `record_listing_scan` **之後**，
+    因為那裡才是清掉 `disappeared_at`／累加 `revived_count` 的地方。
+    排在它前面的話還原永遠慢一輪，而症狀是「有時候會回來、有時候不會」。
+    """
+    import dataclasses
+
+    from conftest import FakeFx, make_listing
+
+    import ygo_sniper.pipeline as pipeline_mod
+    from ygo_sniper.domain import Site
+
+    listings = [make_listing(
+        price=1500, site=Site.BUYEE_YAHOO, external_id="b1",
+        title="遊戯王 青眼の白龍 初期 PSA10 極美品",
+    )]
+    test_cfg = dataclasses.replace(
+        cfg,
+        root=tmp_path,                     # db/cache 全落 tmp
+        watchlist={
+            **cfg.watchlist,
+            "queries": [{"name": "t", "keyword": "遊戯王 PSA", "sources": ["src_b"]}],
+            "comps_queries": {},
+        },
+        sources={},                        # 不跑 canary
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "build_sources",
+        lambda _cfg, _f=None: {"src_b": _OneListingSource(listings, Site.BUYEE_YAHOO)},
+    )
+    monkeypatch.setattr(pipeline_mod, "FxRates", lambda _cfg: FakeFx())
+    pipe = pipeline_mod.Pipeline(test_cfg)
+    key = f"{Site.BUYEE_YAHOO.value}:b1"
+    try:
+        pipe.scan(skip_comps=True)
+        # 承重的斷言，不是裝飾：沒落庫的話後面每一條都會假性通過
+        assert pipe.store.get_signal(key), "第一輪掃描沒有把標的寫進 signals"
+
+        pipe.store.update_state(key, "watching")
+        _mark_gone_again(pipe.store, key)          # 某一輪沒看到它 → 判離場
+        pipe.store.clear_expired_signals(
+            "watching", gone_confidence={"_default": "low"}
+        )
+        assert pipe.store.get_signal(key)["state"] == TriageState.EXPIRED.value
+
+        result = pipe.scan(skip_comps=True)        # 它又出現在搜尋結果裡
+
+        row = pipe.store.get_signal(key)
+        assert row["state"] == "watching"
+        assert row["restored_count"] == 1
+        assert row["cleared_from"] is None
+        # 還原這件事要**看得見**（CLAUDE.md 第五節），所以也進掃描報告
+        assert result["restored"]["restored"] == 1
+        assert result["restored"]["keys"] == [key]
+    finally:
+        pipe.close()

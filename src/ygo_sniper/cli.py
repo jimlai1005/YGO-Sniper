@@ -2892,11 +2892,15 @@ def _print_scan(r: dict) -> None:
         if r.get("keep_all") and "triggered" in r else ""
     )
     expired = f"｜過期 {r['expired']}" if r.get("expired") else ""
+    # 「還原」是清除功能自己的誤殺自癒——與「過期」方向相反，分開印不合成。
+    # 安靜地把標的放回去，使用者就永遠不知道離場判定有多不準（第五節）。
+    n_restored = (r.get("restored") or {}).get("restored") or 0
+    restored = f"｜還原 {n_restored}" if n_restored else ""
     console.print(
         f"\n掃描 [bold]{r['scanned']}[/bold] 筆 → "
         f"符合年代 [bold]{r['candidates']}[/bold] → "
         f"訊號 [bold]{r['signals']}[/bold]{trig}"
-        f"（新 {r.get('new', 0)}）｜行情 +{r['comps_added']}{expired}"
+        f"（新 {r.get('new', 0)}）｜行情 +{r['comps_added']}{expired}{restored}"
     )
     # 在架觀測帳的落帳。**「判定消失」與「擠出觀測窗」必須分開印**：
     # 兩者都是「這輪沒看到」，但只有前者能當成交的 proxy（見 store.record_listing_scan）。

@@ -223,7 +223,7 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 1432 passed，2026-08-06 實測）
+make test                      # pytest（目前 1453 passed，2026-08-06 實測）
 ygo-sniper daily               # 掃描＋推播（launchd 排程跑這個）
 ygo-sniper scan --dry-run      # 只掃不寫庫
 ygo-sniper serve               # dashboard → http://127.0.0.1:8321

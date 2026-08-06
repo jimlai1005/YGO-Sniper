@@ -191,19 +191,46 @@ WHERE s.score >= ? ...
 
 ### 4.4 自動還原（本設計的防線）
 
-`upsert_signal`（`store.py:425`）的 `if existing:` 分支加一個**窄例外**：
+> ⚠️ **2026-08-06 修正（獨立審查 finding #1／#2）**：本節原本的設計已被推翻，
+> 下面先記原設計、再記為什麼錯與實際做法。**實作以「修正後」那段為準。**
 
-```
-若 existing.state == 'expired' AND existing.cleared_from IS NOT NULL:
-    state          = existing.cleared_from
-    cleared_at     = NULL
-    cleared_from   = NULL
-    restored_count = restored_count + 1
-```
+**原設計（已廢棄）**：`upsert_signal` 的 `if existing:` 分支加一個窄例外——
+`state == 'expired' AND cleared_from IS NOT NULL` 就放回 `cleared_from`。
+理由寫的是「`cleared_from` 非空只可能由本功能寫入，使用者手動標的 `expired`
+沒有 `cleared_from`」。
 
-其餘情況維持現狀（不覆寫 `state` 與 `note`）。
+**為什麼錯（兩個獨立的洞，都已實跑重現）**：
 
-**為什麼這不違反 `store.py:459-463` 的紅線**：那條紅線保護的是「使用者的人工決策」。`cleared_from` 非空**只可能**由本功能的清除動作寫入——使用者手動標的 `expired` 沒有 `cleared_from`，完全不受影響。還原的目標也正是使用者原本標的狀態，是在**恢復**人工決策而非覆蓋。
+1. **觸發條件量錯了東西**。掛在 `upsert_signal` 上等於「有人寫了一筆 Signal」
+   就還原，而不是「標的回來了」。`recalc-bids --apply`（取 `state="all"`）與
+   `resolve-grades --apply`（`WHERE grade IS NULL`，無 state 過濾）都會對
+   expired 列重跑 upsert：實測連跑四圈 `restored_count` 變成 4，而
+   `listing_obs.disappeared_at` 從頭到尾都在，`expiry_status` 仍判 `gone`。
+   於是它會被 banner 再列出來、再被清一次——flip-flop。更糟的是
+   `expiry-stats` 把這個被灌水的數字當「誤殺率」印給使用者，並要他據此調
+   `gone_confidence`（分子與分母不同源，CLAUDE.md 第三節）。
+2. **「只可能由本功能寫入」不成立**。`update_state` 從不清 `cleared_at` /
+   `cleared_from`，所以被程式清過一次的標的永久帶著 `cleared_from`。使用者
+   把它拉回 watching、幾天後**自己**標成 expired，守衛就又成立了——下一輪
+   掃描把使用者的決定靜默改回 watching，零告警。
+
+**修正後的做法**：
+
+- `upsert_signal` **拿掉整個還原分支**，回到「不覆寫人工狀態，沒有例外」。
+- `update_state` 一併把 `cleared_at` / `cleared_from` 設回 NULL——
+  **使用者手動改狀態＝重新接管這一筆**，程式不該再記著它曾被自動清過
+  （`restored_count` 不歸零，那是錯誤帳本不是狀態）。
+- 新增 `Store.restore_revived_signals() -> {"restored": n, "keys": [...]}`：
+  條件是 `state='expired' AND cleared_from IS NOT NULL`
+  **AND 有 listing_obs 觀測列（INNER JOIN）AND `disappeared_at IS NULL`**
+  ——「回來了」的定義只有一個：離場標記被 `_upsert_listing_obs` 清掉。
+  沒有觀測列是「我們不知道」不是「它回來了」（`prune_listing_obs` 刪掉舊列
+  之後 LEFT JOIN 也會給 NULL）。最後再過一次 `expiry_status`，與清除**同源**
+  ——少了這一條，「已結標但還留在搜尋結果裡」的競標會被清掉→立刻還原→
+  再被清掉，同一個 flip-flop 換入口重演。
+- `pipeline.scan` 在 `record_listing_scan` **之後**呼叫它（那裡才是清掉
+  `disappeared_at` 的地方，放前面還原永遠慢一輪），還原筆數印出來並進
+  掃描報告的 `restored` 欄（還原必須看得見，CLAUDE.md 第五節）。
 
 ### 4.5 可觀測性（對抗「誤殺是靜默的」）
 
@@ -284,6 +311,8 @@ WHERE s.score >= ? ...
 9. 清除寫入 `cleared_at` / `cleared_from`，state 變 `expired`
 10. **自動還原**：清除後 `upsert_signal` 同一個 key → 回到 `cleared_from`，`restored_count` +1，`cleared_*` 清空
 11. **手動標的 `expired`（`cleared_from IS NULL`）不被自動還原**——這是紅線測試
+    （2026-08-06 補強：**被程式清過、使用者拉回、再由使用者自己標成 expired**
+    的那條路徑也要測——原本的測試只涵蓋「從沒被清過」的列，擋不住它）
 12. `list_signals` 的 JOIN 不讓 `listing_obs` 的同名欄位覆蓋 signals 的值（兩表有 11 個同名欄位，含 `last_seen` / `landed_twd` / `grade`）
 13. `POST /api/signals/clear-expired` 冪等：連按兩次第二次回 `cleared: 0`
 14. 不合法的 state 回 400

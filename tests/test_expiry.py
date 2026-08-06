@@ -75,6 +75,20 @@ def test_offer_sent_gets_different_wording():
     assert "標下" in expiry_status(row, now=NOW).detail
 
 
+def test_offer_sent_ended_auction_also_asks_whether_you_won():
+    """已出價的東西**幾乎一定是競標**，而競標的正常結局是走 `ended` 這一支。
+
+    提醒只寫在 `gone` 那一支的話，最需要它的那一類反而看不到中性的「已結標」，
+    而這是唯一「清錯了無法自癒」的類別——真的標下的標的不會再出現在搜尋結果，
+    自動還原永遠救不回來（設計文件第 6 節第 6 點）。
+    """
+    row = _row(state="offer_sent", payload=_payload_with_end("2026-08-06T11:00:00+00:00"))
+    st = expiry_status(row, now=NOW)
+    assert st.kind == "ended"           # 判定不變：結標仍是確定事實
+    assert st.confidence == "certain"
+    assert "標下" in st.detail
+
+
 def test_live_status_has_empty_detail():
     st = expiry_status(_row(), now=NOW)
     assert st == ExpiryStatus(kind="live", confidence="certain", detail="", note=None)
