@@ -1376,8 +1376,10 @@ function renderSignals(res){
   if(expiredItems.length){
     const bySrc = {};
     for(const i of expiredItems){ const s = i.site || "?"; bySrc[s] = (bySrc[s]||0)+1; }
+    // site 來自 db，照本檔慣例一律 escape 再進 innerHTML。目前它只會是我們
+    // 自己的來源鍵（buyee_paypay…），但「這個值今天很乾淨」不是不 escape 的理由。
     const parts = Object.entries(bySrc).sort((a,b) => b[1]-a[1])
-      .map(([s,n]) => `${s} ${n}`).join("、");
+      .map(([s,n]) => `${escapeHtml(s)} ${n}`).join("、");
     document.getElementById("xp-banner-text").innerHTML =
       `<b>${expiredItems.length}</b> 筆疑似已離場（${parts}）`;
     banner.dataset.count = expiredItems.length;
