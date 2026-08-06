@@ -223,7 +223,7 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 1339 passed，2026-08-06 實測）
+make test                      # pytest（目前 1432 passed，2026-08-06 實測）
 ygo-sniper daily               # 掃描＋推播（launchd 排程跑這個）
 ygo-sniper scan --dry-run      # 只掃不寫庫
 ygo-sniper serve               # dashboard → http://127.0.0.1:8321
@@ -236,6 +236,8 @@ ygo-sniper coverage-groups     # 分群覆蓋率（調門檻前必跑）
 ygo-sniper backfill-sale-kind  # 回填 comps 成交型態（競標結標／定價成交），冪等
 ygo-sniper corpus-diff         # 全語料雙向比對（改過濾／解析規則前後必跑，見第一節）
 ygo-sniper venue-study         # 平台價差研究
+ygo-sniper revive-rate         # 離場判定的復活率（調 gone_confidence 前必跑）
+ygo-sniper expiry-stats        # 清除功能自己的誤殺率（清掉的有幾成又回來了）
 make schedule / make unschedule # launchd 排程（分時段，一天 15 個觸發點）
 ```
 
