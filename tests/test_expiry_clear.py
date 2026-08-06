@@ -15,10 +15,37 @@ import pytest
 
 from ygo_sniper.domain import TriageState
 from ygo_sniper.store import Store
+from ygo_sniper.verify_departed import VerifyResult
 
 ROOT = Path(__file__).resolve().parents[1]
 
 NEW_COLUMNS = ("cleared_at", "cleared_from", "restored_count")
+
+LOW = {"_default": "low"}
+
+
+def _verifier(verdicts: dict[str, str]):
+    """key → verdict 的假驗證器，並記錄呼叫。
+
+    沒列在表裡的 key 被驗證就直接 KeyError——測試裡不准有未預期的驗證
+    （ended 與 live 的列**不該**花驗證流量）。
+    """
+
+    def _v(key: str, url: str) -> VerifyResult:
+        _v.calls.append((key, url))
+        return VerifyResult(key, verdicts[key], "test")
+
+    _v.calls = []
+    return _v
+
+
+def _sold_verifier():
+    """所有 gone 候選一律回 SOLD——給只關心「有實證就清」的測試用。"""
+
+    def _v(key: str, url: str) -> VerifyResult:
+        return VerifyResult(key, "SOLD", "test")
+
+    return _v
 
 
 def _legacy_db(path: Path) -> None:
@@ -174,45 +201,147 @@ def test_list_signals_without_obs_row_is_fine(store):
     assert rows[0]["obs_disappeared_at"] is None
 
 
-def test_clear_expired_moves_gone_rows_to_expired(store):
-    _insert(store, "gone-1")
-    _mark_gone(store, "gone-1")
-    _insert(store, "live-1")
+def test_gone_rows_are_not_cleared_without_a_verifier(store):
+    """安全預設（2026-08-07 事故的修法核心）：沒有驗證器就只清事實（ended），
+    gone **推論**一筆都不清。忘記接 verifier 的呼叫端自動退到安全行為，
+    而不是退回舊的推論清除——那個舊行為一鍵誤清了 43 筆（誤殺率 100%）。"""
+    _insert(store, "buyee_yahoo:gone-1")
+    _mark_gone(store, "buyee_yahoo:gone-1")
+
+    result = store.clear_expired_signals("watching", gone_confidence=LOW)
+
+    assert result["cleared"] == 0
+    assert result["keys"] == []
+    # 沒被驗證的 gone 候選要**看得見**（skipped），不是消失在回報裡
+    assert result["by_verdict"]["skipped"] == 1
+    assert store.get_signal("buyee_yahoo:gone-1")["state"] == "watching"
+
+
+def test_clear_expired_moves_verified_gone_rows_to_expired(store):
+    """gone 候選逐筆開頁驗證，只清拿到實證的（SOLD／DELISTED）。"""
+    _insert(store, "buyee_yahoo:gone-1")
+    _mark_gone(store, "buyee_yahoo:gone-1")
+    _insert(store, "buyee_yahoo:gone-2")
+    _mark_gone(store, "buyee_yahoo:gone-2")
+    _insert(store, "buyee_yahoo:live-1")
+    verifier = _verifier(
+        {"buyee_yahoo:gone-1": "SOLD", "buyee_yahoo:gone-2": "DELISTED"}
+    )
 
     result = store.clear_expired_signals(
-        "watching", gone_confidence={"_default": "low"}
+        "watching", gone_confidence=LOW, verifier=verifier
+    )
+
+    assert result["cleared"] == 2
+    assert sorted(result["keys"]) == ["buyee_yahoo:gone-1", "buyee_yahoo:gone-2"]
+    assert result["by_source"] == {"buyee_yahoo": 2}
+    assert result["by_verdict"] == {
+        "ended": 0, "sold": 1, "delisted": 1,
+        "still_live": 0, "unverifiable": 0, "skipped": 0,
+    }
+    for key in ("buyee_yahoo:gone-1", "buyee_yahoo:gone-2"):
+        row = store.get_signal(key)
+        assert row["state"] == TriageState.EXPIRED.value
+        assert row["cleared_from"] == "watching"
+        assert row["cleared_at"] is not None
+    # live 的列不花驗證流量，也不被清
+    assert store.get_signal("buyee_yahoo:live-1")["state"] == "watching"
+    assert sorted(k for k, _ in verifier.calls) == [
+        "buyee_yahoo:gone-1", "buyee_yahoo:gone-2",
+    ]
+
+
+def test_still_live_gone_row_is_revived_not_cleared(store):
+    """STILL_LIVE 順手修帳：頁面實證比掃描推論權威——
+    `disappeared_at` 清掉、`revived_count` +1（那是推論規則自己的錯誤率帳本）。"""
+    key = "buyee_yahoo:phantom"
+    _insert(store, key)
+    _mark_gone(store, key)
+
+    result = store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_verifier({key: "STILL_LIVE"})
+    )
+
+    assert result["cleared"] == 0
+    assert result["by_verdict"]["still_live"] == 1
+    assert result["still_live_keys"] == [key]
+    assert store.get_signal(key)["state"] == "watching"
+    with sqlite3.connect(store.db_path) as c:
+        gone, revived = c.execute(
+            "SELECT disappeared_at, revived_count FROM listing_obs WHERE key = ?",
+            (key,),
+        ).fetchone()
+    assert gone is None
+    assert revived == 1
+
+
+def test_unverifiable_gone_row_is_left_untouched(store):
+    """被擋／逾時／不支援的站：讀不到 ≠ 賣光。不清、不修帳、計數回報。"""
+    key = "buyee_yahoo:blocked"
+    _insert(store, key)
+    _mark_gone(store, key, when="2026-08-05T00:00:00+00:00")
+
+    result = store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_verifier({key: "UNVERIFIABLE"})
+    )
+
+    assert result["cleared"] == 0
+    assert result["by_verdict"]["unverifiable"] == 1
+    assert store.get_signal(key)["state"] == "watching"
+    with sqlite3.connect(store.db_path) as c:
+        gone, revived = c.execute(
+            "SELECT disappeared_at, revived_count FROM listing_obs WHERE key = ?",
+            (key,),
+        ).fetchone()
+    # 原封不動：離場推論保留（下次還會再驗），帳本不動
+    assert gone == "2026-08-05T00:00:00+00:00"
+    assert revived == 0
+
+
+def test_ended_rows_clear_without_verification(store):
+    """`end_time` 已過是事實，不花驗證流量——verifier 完全不被呼叫。"""
+    _insert(store, "buyee_yahoo:ended-1", payload=json.dumps(
+        {"listing": {"end_time": "2026-01-01T00:00:00+00:00"}}
+    ))
+    verifier = _verifier({})          # 誰被驗證誰就 KeyError
+
+    result = store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=verifier
     )
 
     assert result["cleared"] == 1
-    assert result["keys"] == ["gone-1"]
-    assert result["by_source"] == {"buyee_yahoo": 1}
-    assert store.get_signal("gone-1")["state"] == TriageState.EXPIRED.value
-    assert store.get_signal("gone-1")["cleared_from"] == "watching"
-    assert store.get_signal("gone-1")["cleared_at"] is not None
-    assert store.get_signal("live-1")["state"] == "watching"
+    assert result["keys"] == ["buyee_yahoo:ended-1"]
+    assert result["by_verdict"]["ended"] == 1
+    assert verifier.calls == []
 
 
 def test_clear_expired_is_idempotent(store):
-    _insert(store, "gone-1")
-    _mark_gone(store, "gone-1")
-    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
-    again = store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    _insert(store, "buyee_yahoo:gone-1")
+    _mark_gone(store, "buyee_yahoo:gone-1")
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
+    again = store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
     assert again["cleared"] == 0
     assert again["keys"] == []
 
 
 def test_clear_expired_only_touches_the_named_state(store):
-    """清觀察中不能順手把已購買的也清掉。"""
-    _insert(store, "bought-1", state="bought")
-    _mark_gone(store, "bought-1")
-    result = store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    """清觀察中不能順手把已購買的也清掉——就算驗證說它真的賣掉了。"""
+    _insert(store, "buyee_yahoo:bought-1", state="bought")
+    _mark_gone(store, "buyee_yahoo:bought-1")
+    result = store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
     assert result["cleared"] == 0
-    assert store.get_signal("bought-1")["state"] == "bought"
+    assert store.get_signal("buyee_yahoo:bought-1")["state"] == "bought"
 
 
 def test_clear_expired_rejects_unknown_state(store):
     with pytest.raises(ValueError, match="不可清除"):
-        store.clear_expired_signals("bought", gone_confidence={"_default": "low"})
+        store.clear_expired_signals("bought", gone_confidence=LOW)
 
 
 def _signal_for(key: str, *, site: str = "buyee_yahoo"):
@@ -271,7 +400,9 @@ def test_cleared_signal_is_restored_when_it_comes_back(store):
     key = "buyee_yahoo:gone-1"
     _insert(store, key)
     _mark_gone(store, key)
-    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
     assert store.get_signal(key)["state"] == TriageState.EXPIRED.value
 
     # 還沒被看到 → 一筆都不還原
@@ -302,7 +433,9 @@ def test_bare_upsert_never_restores_a_cleared_signal(store):
     key = "buyee_yahoo:gone-1"
     _insert(store, key)
     _mark_gone(store, key)
-    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
 
     for _ in range(4):
         store.upsert_signal(_signal_for(key))
@@ -321,7 +454,9 @@ def test_restore_is_idempotent(store):
     key = "buyee_yahoo:gone-1"
     _insert(store, key)
     _mark_gone(store, key)
-    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
     _rescan(store, key)
     assert store.restore_revived_signals()["restored"] == 1
     assert store.restore_revived_signals() == {"restored": 0, "keys": []}
@@ -337,7 +472,9 @@ def test_restore_needs_an_observation_row(store):
     key = "buyee_yahoo:pruned"
     _insert(store, key)
     _mark_gone(store, key)
-    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
     with sqlite3.connect(store.db_path) as c:
         c.execute("DELETE FROM listing_obs WHERE key = ?", (key,))
 
@@ -357,7 +494,8 @@ def test_ended_auction_is_not_restored_just_because_it_is_still_listed(store):
         {"listing": {"end_time": "2026-01-01T00:00:00+00:00"}}
     ))
     _rescan(store, key)                       # 有觀測列、從沒被判離場
-    cleared = store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    # 刻意不給 verifier：ended 是事實，安全預設下也照清
+    cleared = store.clear_expired_signals("watching", gone_confidence=LOW)
     assert cleared["cleared"] == 1            # end_time 已過 → 確定事實
 
     assert store.restore_revived_signals() == {"restored": 0, "keys": []}
@@ -390,7 +528,9 @@ def test_user_expire_after_a_program_clear_is_not_reverted(store):
     key = "buyee_yahoo:tug-of-war"
     _insert(store, key)
     _mark_gone(store, key)
-    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
 
     store.update_state(key, "watching")                 # 使用者不同意，拉回來
     assert store.get_signal(key)["cleared_from"] is None
@@ -412,7 +552,9 @@ def test_update_state_clears_the_clear_marks(store):
     key = "buyee_yahoo:taken-over"
     _insert(store, key)
     _mark_gone(store, key)
-    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
     assert store.get_signal(key)["cleared_from"] == "watching"
 
     store.update_state(key, "watching", note="我再看看")
@@ -431,7 +573,9 @@ def test_restore_counts_accumulate(store):
     _insert(store, key)
     _mark_gone(store, key)
     for expected in (1, 2):
-        store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+        store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
         _rescan(store, key)
         assert store.restore_revived_signals()["restored"] == 1
         assert store.get_signal(key)["restored_count"] == expected
@@ -474,7 +618,9 @@ def test_clear_expired_survives_more_keys_than_sqlite_takes_host_params(store):
              for r in rows],
         )
 
-    result = store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    result = store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
     assert result["cleared"] == n
     with sqlite3.connect(store.db_path) as c:
         assert c.execute(
@@ -525,7 +671,9 @@ def test_expiry_stats_reports_cleared_and_restored(store):
     _mark_gone(store, "buyee_yahoo:gone-1")
     _insert(store, "buyee_yahoo:gone-2")
     _mark_gone(store, "buyee_yahoo:gone-2")
-    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
     _rescan(store, "buyee_yahoo:gone-1")                        # 誤殺，自己回來了
     store.restore_revived_signals()
 
@@ -587,25 +735,35 @@ def test_signals_api_carries_expiry(client):
     assert by_key["buyee_yahoo:live-1"]["expiry"]["kind"] == "live"
 
 
-def test_clear_expired_endpoint(client):
+_ENDED_PAYLOAD = json.dumps({"listing": {"end_time": "2026-01-01T00:00:00+00:00"}})
+
+
+def test_clear_expired_endpoint_without_verifier_only_clears_ended(client):
+    """端點目前沒接 verifier（背景驗證是後續 task）——安全預設必須生效：
+    只清 ended（事實），gone 推論原地保留、以 skipped 回報。
+    這正是事故的修法：忘記（或還沒）接驗證器的呼叫端不准退回推論清除。"""
     c, app_mod = client
     _insert(app_mod.store, "buyee_yahoo:gone-1")
     _mark_gone(app_mod.store, "buyee_yahoo:gone-1")
+    _insert(app_mod.store, "buyee_yahoo:ended-1", payload=_ENDED_PAYLOAD)
     _insert(app_mod.store, "buyee_yahoo:live-1")
 
     r = c.post("/api/signals/clear-expired", json={"state": "watching"})
     assert r.status_code == 200
     body = r.json()
     assert body["cleared"] == 1
-    assert body["keys"] == ["buyee_yahoo:gone-1"]
+    assert body["keys"] == ["buyee_yahoo:ended-1"]
     assert body["by_source"] == {"buyee_yahoo": 1}
+    assert body["by_verdict"]["ended"] == 1
+    assert body["by_verdict"]["skipped"] == 1
+    assert app_mod.store.get_signal("buyee_yahoo:gone-1")["state"] == "watching"
+    assert app_mod.store.get_signal("buyee_yahoo:live-1")["state"] == "watching"
 
 
 def test_clear_expired_endpoint_is_idempotent(client):
     """清完就不在原 state，重按第二次回 cleared: 0（工程原則二）。"""
     c, app_mod = client
-    _insert(app_mod.store, "buyee_yahoo:gone-1")
-    _mark_gone(app_mod.store, "buyee_yahoo:gone-1")
+    _insert(app_mod.store, "buyee_yahoo:ended-1", payload=_ENDED_PAYLOAD)
     c.post("/api/signals/clear-expired", json={"state": "watching"})
     body = c.post("/api/signals/clear-expired", json={"state": "watching"}).json()
     assert body["cleared"] == 0
@@ -682,7 +840,7 @@ def test_scan_restores_a_cleared_signal_that_is_back_on_the_shelf(
         pipe.store.update_state(key, "watching")
         _mark_gone_again(pipe.store, key)          # 某一輪沒看到它 → 判離場
         pipe.store.clear_expired_signals(
-            "watching", gone_confidence={"_default": "low"}
+            "watching", gone_confidence=LOW, verifier=_sold_verifier()
         )
         assert pipe.store.get_signal(key)["state"] == TriageState.EXPIRED.value
 

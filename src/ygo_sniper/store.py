@@ -1770,19 +1770,39 @@ class Store:
 
     # ------------------------------------------------------------------
     def clear_expired_signals(
-        self, state: str, *, gone_confidence: dict[str, str] | None = None
+        self,
+        state: str,
+        *,
+        gone_confidence: dict[str, str] | None = None,
+        verifier: Any = None,
     ) -> dict[str, Any]:
-        """把某個狀態底下已離場的標的移到 expired，回傳清了哪些。
+        """把某個狀態底下**有離場實證**的標的移到 expired，回傳清了哪些。
 
         與 `expire_stale_signals` 的差別：那支是排程自動跑、只敢動 `state='new'`；
         這支是**使用者按按鈕**觸發的，所以可以動人工狀態——但也因此一定要記下
         `cleared_from`，讓 `upsert_signal` 在標的重新上架時把它放回原位。
 
-        判定沿用 `expiry.expiry_status`（唯一真相來源），不在這裡重寫一套 SQL 條件：
-        判準散成兩份，遲早會漂移成兩種答案。
+        兩段式（2026-08-07 事故的修法——`disappeared_at` 推論一鍵誤清 43 筆，
+        誤殺率 100%，改為**驗證取代推論**）：
 
-        回傳 `{"cleared": int, "keys": [...], "by_source": {site: n}}`——
-        照 `purge_signals` 的慣例回 dict 而不是單一 int，呼叫端要能把細節印給使用者看。
+        - `ended`（end_time 已過）→ 直接清。事實，不花驗證流量。
+        - `gone`（離場**推論**）→ 逐筆交給 `verifier(key, url)` 開商品頁驗證
+          （回 `verify_departed.VerifyResult`），只清 `res.clears` 為真的
+          （SOLD／DELISTED——分類表寫死在 VerifyResult，這裡不自己記）。
+          `STILL_LIVE` 是推論的誤判：不清，順手把 `listing_obs.disappeared_at`
+          清掉、`revived_count += 1`——頁面實證比掃描推論權威，帳本立刻修正。
+          `UNVERIFIABLE`（被擋／逾時／不支援的站）**絕不當成已離場**：
+          讀不到 ≠ 賣光，原封不動、計數回報。
+        - `verifier=None` → gone 候選**一筆都不清**（安全預設）：忘記接驗證器
+          的呼叫端自動退到只清事實，而不是退回出事故的推論清除；
+          被跳過的筆數以 `by_verdict["skipped"]` 大聲回報。
+
+        候選判定沿用 `expiry.expiry_status`（唯一真相來源），不在這裡重寫一套
+        SQL 條件：判準散成兩份，遲早會漂移成兩種答案。
+
+        回傳 `{"cleared", "keys", "by_source", "by_verdict": {"ended", "sold",
+        "delisted", "still_live", "unverifiable", "skipped"}, "still_live_keys"}`
+        ——照 `purge_signals` 的慣例回 dict，呼叫端要能把細節印給使用者看。
         """
         if state not in self.CLEARABLE_STATES:
             raise ValueError(
@@ -1791,13 +1811,37 @@ class Store:
         rows = self.list_signals(state=state, limit=100_000)
         # `confidence` 刻意不參與這個判斷：清除是**使用者按下按鈕的動作選擇**
         # （設計文件 3.1），信心度的去處是徽章文案與確認框的警語，不是這裡的
-        # 布林值。要改成「low 不進批次清除」是設計變更，不是 bug 修正。
-        doomed = [
-            r for r in rows
-            if expiry_status(r, gone_confidence=gone_confidence).kind != "live"
-        ]
-        if not doomed:
-            return {"cleared": 0, "keys": [], "by_source": {}}
+        # 布林值。信心度再高也只是推論——要不要清，看的是 verifier 的實證。
+        ended: list[dict[str, Any]] = []
+        gone: list[dict[str, Any]] = []
+        for r in rows:
+            kind = expiry_status(r, gone_confidence=gone_confidence).kind
+            if kind == "ended":
+                ended.append(r)
+            elif kind == "gone":
+                gone.append(r)
+
+        by_verdict = {
+            "ended": len(ended), "sold": 0, "delisted": 0,
+            "still_live": 0, "unverifiable": 0, "skipped": 0,
+        }
+        doomed = list(ended)
+        still_live_keys: list[str] = []
+        if verifier is None:
+            by_verdict["skipped"] = len(gone)
+        else:
+            for r in gone:
+                res = verifier(r["key"], str(r.get("url") or ""))
+                if res.clears:
+                    by_verdict[res.verdict.lower()] += 1
+                    doomed.append(r)
+                elif res.verdict == "STILL_LIVE":
+                    by_verdict["still_live"] += 1
+                    still_live_keys.append(r["key"])
+                else:
+                    # UNVERIFIABLE（與任何不认得的新 verdict）走同一格：
+                    # 不清是唯一安全的方向——讀不到 ≠ 賣光。
+                    by_verdict["unverifiable"] += 1
 
         now = _now_iso()
         keys = [r["key"] for r in doomed]
@@ -1817,7 +1861,23 @@ class Store:
                     f"WHERE key IN ({marks}) AND state = ?",
                     [TriageState.EXPIRED.value, now, state, *chunk, state],
                 )
-        return {"cleared": len(keys), "keys": keys, "by_source": by_source}
+            for key in still_live_keys:
+                # `AND disappeared_at IS NOT NULL`：驗證期間排程可能已經自己
+                # 掃到它並修過帳（`_upsert_listing_obs` 會清標記＋累加 revived）
+                # ——少了這道護欄，同一次誤判會被記兩次。
+                c.execute(
+                    "UPDATE listing_obs SET disappeared_at = NULL, "
+                    "revived_count = revived_count + 1 "
+                    "WHERE key = ? AND disappeared_at IS NOT NULL",
+                    (key,),
+                )
+        return {
+            "cleared": len(keys),
+            "keys": keys,
+            "by_source": by_source,
+            "by_verdict": by_verdict,
+            "still_live_keys": still_live_keys,
+        }
 
     # ------------------------------------------------------------------
     def restore_revived_signals(self) -> dict[str, Any]:
