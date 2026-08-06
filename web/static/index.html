@@ -534,6 +534,12 @@
     <div id="bid-meta" class="cmp">載入中…</div>
   </div>
 
+  <!-- 待清 banner。只在可清除的三個分頁（觀察中／已詢問／已出價）出現，
+       筆數是「數目前這一頁拿到的 expiry.kind !== live」——不是前端重算判定。 -->
+  <div id="xp-banner" class="dyn-note" style="display:none;margin-bottom:10px">
+    <span id="xp-banner-text"></span>
+    <button id="xp-clear-btn" style="margin-left:10px">清除</button>
+  </div>
   <div class="rows" id="grid"></div>
   <div class="empty" id="empty" style="display:none">這個分頁沒有標的。</div>
 </div><!-- /signals-view -->
@@ -584,6 +590,20 @@
 </main>
 
 <div id="toast"></div>
+<!-- 確認框。這個 SPA 沒有既有對話框（confirm / <dialog> / .modal 全部零命中），
+     所以是全新元件；配色一律沿用既有 CSS 變數，不引入新色票或外部資源。
+     清除會改到資料，所以**一定要有這一步**——沒有確認就沒有反悔的機會。 -->
+<div id="xp-confirm" style="display:none;position:fixed;inset:0;z-index:50;
+     background:rgba(0,0,0,.55);align-items:center;justify-content:center">
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:10px;
+       padding:18px 20px;max-width:460px;font-size:13px;color:var(--ink)">
+    <div id="xp-confirm-body" style="line-height:1.7"></div>
+    <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end">
+      <button id="xp-cancel">取消</button>
+      <button id="xp-ok" class="on">清除</button>
+    </div>
+  </div>
+</div>
 <div id="lightbox"><img id="lightbox-img" alt=""><div class="tip">點任意處關閉（Esc 也可以）</div></div>
 
 <script>
@@ -1163,6 +1183,40 @@ async function setState(key, state){
   }catch(e){ toast("失敗：" + e.message); }
 }
 
+/* 清除已離場：banner 的「清除」→ 確認框 → POST。判定與實際要清哪幾筆都在後端
+   （store.clear_expired_signals 自己重跑 expiry_status），前端送的只有分頁名稱——
+   前端挑好 key 再送的話，畫面與後端會對「哪些算離場」給出兩份答案。 */
+function askClearExpired(){
+  const b = document.getElementById("xp-banner");
+  const n = b.dataset.count, src = b.dataset.sources;
+  // 已出價的標的消失，很可能代表**你標下了**——歸宿應該是「已購買」而不是
+  // 「已過期」，而且自動還原救不了這種情況（標下的東西不會再出現在搜尋結果）。
+  const warn = currentState === "offer_sent"
+    ? `<div style="margin-top:10px;color:var(--warn)">
+         已出價的標的消失可能代表你標下了，請先確認再清除。</div>`
+    : "";
+  document.getElementById("xp-confirm-body").innerHTML =
+    `將清除 <b>${n}</b> 筆（${src}）
+     <div style="margin-top:8px;color:var(--dim)">
+       → 移到「已過期」分頁，可隨時查看<br>
+       → 若重新上架會自動放回原分頁
+     </div>${warn}`;
+  document.getElementById("xp-confirm").style.display = "flex";
+}
+
+async function clearExpired(){
+  document.getElementById("xp-confirm").style.display = "none";
+  try{
+    const r = await api("/api/signals/clear-expired", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({state: currentState}),
+    });
+    toast(`已清除 ${r.cleared} 筆 → 已過期分頁`);
+    loadAll();
+  }catch(e){ toast("清除失敗：" + e.message); }
+}
+
 let lastRes = null;    // 最近一次 /api/signals 的回應（truncated / 估價錯誤要用）
 
 async function loadSignals(){
@@ -1312,6 +1366,26 @@ function renderSignals(res){
     ? ` · <span class="hid">⚠️ P 值算不出來：${escapeHtml(res.valuation_error)}</span>` : "";
   const noP = res && res.p_worth_known != null && res.p_worth_known < items.length
     ? ` · <span class="hid">${items.length - res.p_worth_known} 筆無 P 值（不受 P 篩選影響）</span>` : "";
+
+  // 待清筆數：只算目前分頁看得到的，且只在可清除的三個分頁顯示。
+  const CLEARABLE = ["watching", "asked_seller", "offer_sent"];
+  const expiredItems = CLEARABLE.includes(currentState)
+    ? shown.filter(i => i.expiry && i.expiry.kind !== "live")
+    : [];
+  const banner = document.getElementById("xp-banner");
+  if(expiredItems.length){
+    const bySrc = {};
+    for(const i of expiredItems){ const s = i.site || "?"; bySrc[s] = (bySrc[s]||0)+1; }
+    const parts = Object.entries(bySrc).sort((a,b) => b[1]-a[1])
+      .map(([s,n]) => `${s} ${n}`).join("、");
+    document.getElementById("xp-banner-text").innerHTML =
+      `<b>${expiredItems.length}</b> 筆疑似已離場（${parts}）`;
+    banner.dataset.count = expiredItems.length;
+    banner.dataset.sources = parts;
+    banner.style.display = "";
+  } else {
+    banner.style.display = "none";
+  }
 
   document.getElementById("list-count").innerHTML =
     `顯示 <b>${shown.length}</b> / ${items.length} 筆 · 觸發 <b>${nTrig}</b>`
@@ -2420,6 +2494,11 @@ document.querySelectorAll(".tab").forEach(btn => {
     loadSignals();
   };
 });
+
+document.getElementById("xp-clear-btn").onclick = askClearExpired;
+document.getElementById("xp-ok").onclick = clearExpired;
+document.getElementById("xp-cancel").onclick =
+  () => { document.getElementById("xp-confirm").style.display = "none"; };
 
 document.querySelectorAll(".filt").forEach(btn => {
   btn.onclick = () => {
