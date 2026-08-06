@@ -4,7 +4,10 @@
 「migration＋store＋web API」三段結構加進來的。
 """
 
+import importlib
 import sqlite3
+import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -287,3 +290,55 @@ def test_normal_upsert_still_preserves_manual_state(store):
     _insert(store, key, state="asked_seller")
     store.upsert_signal(_signal_for(key))
     assert store.get_signal(key)["state"] == "asked_seller"
+
+
+# ---------------------------------------------------------------------------
+# API：TestClient 打真的端點（fixture 照抄 `tests/test_card_bucket.py:189-220`）
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    import ygo_sniper.config as config_mod
+
+    db = tmp_path / "web.db"
+    real_load = config_mod.load_config
+
+    def _tmp_config(*a, **kw):
+        # storage["db_path"] 給**絕對路徑**：Config.db_path 是 `root / 那個值`，
+        # 右運算元是絕對路徑時 root 會被忽略，剛好就是我們要的效果。
+        # replace() 而不是就地改：real_load 有 lru_cache，改它回傳的物件
+        # 會汙染整個 suite 的設定。
+        c = real_load(*a, **kw)
+        return replace(c, storage={**c.storage, "db_path": str(db)})
+
+    monkeypatch.setattr(config_mod, "load_config", _tmp_config)
+    monkeypatch.syspath_prepend(str(ROOT))
+    for mod in ("web.app", "web"):
+        sys.modules.pop(mod, None)
+    app_mod = importlib.import_module("web.app")
+    try:
+        # 承重的斷言，不是裝飾：這一行紅掉就代表測試正在開正式庫。
+        assert app_mod.store.db_path == db, (
+            f"web.app 的 store 沒有指到 tmp（{app_mod.store.db_path}）——"
+            "測試絕不能碰正式庫 data/sniper.db"
+        )
+        from fastapi.testclient import TestClient
+
+        yield TestClient(app_mod.app), app_mod
+    finally:
+        for mod in ("web.app", "web"):
+            sys.modules.pop(mod, None)
+
+
+def test_signals_api_carries_expiry(client):
+    """判定只有 expiry.py 一份：API 把它的結果原樣送出，前端不自己算。"""
+    c, app_mod = client
+    _insert(app_mod.store, "buyee_yahoo:gone-1")
+    _mark_gone(app_mod.store, "buyee_yahoo:gone-1")
+    _insert(app_mod.store, "buyee_yahoo:live-1")
+
+    items = c.get("/api/signals?state=watching").json()["items"]
+    by_key = {i["key"]: i for i in items}
+
+    assert by_key["buyee_yahoo:gone-1"]["expiry"]["kind"] == "gone"
+    assert "消失" in by_key["buyee_yahoo:gone-1"]["expiry"]["detail"]
+    assert by_key["buyee_yahoo:live-1"]["expiry"]["kind"] == "live"

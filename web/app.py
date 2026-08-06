@@ -43,6 +43,7 @@ from ygo_sniper.domain import (  # noqa: E402
     Site,
     TriageState,
 )
+from ygo_sniper.expiry import expiry_status, gone_confidence_from_config  # noqa: E402
 from ygo_sniper.fx import FxRates  # noqa: E402
 from ygo_sniper.market_search import VIEW_MIXED, VIEW_VENUE, search_market  # noqa: E402
 from ygo_sniper.scoring import (  # noqa: E402
@@ -67,6 +68,9 @@ app = FastAPI(title="ygo-sniper")
 cfg = load_config()
 fx = FxRates(cfg)
 store = Store(cfg.db_path)
+#: 各來源的離場判定信心度（`config/settings.yaml` 的 `scan.gone_confidence`）。
+#: 設定缺漏時 `gone_confidence_from_config` 會退回一律 low——不會因為沒設定就假裝有信心。
+_GONE_CONFIDENCE = gone_confidence_from_config(cfg)
 
 STATIC = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -203,6 +207,9 @@ def signals(
     for r in rows:
         r["flags"] = json.loads(r.get("flags") or "[]")
         r["payload"] = _with_overhead(json.loads(r.get("payload") or "{}"))
+        # 在架狀態：判定只有 expiry.py 一份，前端不自己算
+        # （前端算的話，CLI 與通知那兩條路徑就會拿到不同答案）。
+        r["expiry"] = expiry_status(r, gone_confidence=_GONE_CONFIDENCE).to_dict()
         r["triggered"] = is_triggered(r["flags"])
         r["shipping_alert"] = shipping_alert_for_row(r, cfg)
         r["p_worth_buying"] = None
