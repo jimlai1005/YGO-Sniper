@@ -245,6 +245,15 @@
   .cd.soon{color:var(--warn)}
   .cd.urgent{color:var(--danger)}
   .cd.ended{color:var(--dim);text-decoration:line-through}
+  /* 在架狀態徽章。判定由後端 expiry.py 給，這裡只上色——**過期的卡片變暗但不隱藏**：
+     使用者要先看得到「這筆已經沒了」才敢按清除，安靜地拿掉等於回到原本的抱怨。 */
+  .xp{font-size:10.5px;padding:1px 7px;border-radius:5px;margin-left:6px;
+      vertical-align:2px;white-space:nowrap;background:var(--panel-2);color:var(--dim)}
+  .xp.ended{border:1px solid #6b2a2a;background:#331616;color:var(--danger)}
+  .xp.gone{border:1px solid #6b5322;background:#33280f;color:var(--warn)}
+  .xp.low{opacity:.75}
+  .xp.back{border:1px solid #3f6b5f;background:#153029;color:var(--good)}
+  .card.expired{opacity:.62}
   .bid-why{font-size:11.5px;color:var(--dim);line-height:1.65}
 
   /* --- 篩選列（全部控制在同一列，不分兩排各自為政）--------------------
@@ -848,11 +857,24 @@ function card(it){
     ? `<span class="badge on">🔥 觸發</span>`
     : `<span class="badge">候選</span>`;
 
+  // 在架狀態徽章。判定來自後端 expiry.py（唯一真相來源），前端只負責畫。
+  // 舊回應沒有 expiry 欄位時整段跳過，不讓卡片壞掉。
+  const xp = it.expiry || null;
+  const gone = xp && xp.kind !== "live";
+  const xpBadge = gone
+    ? `<span class="xp ${xp.kind}${xp.confidence === "low" ? " low" : ""}"${
+        xp.note ? ` title="${escapeHtml(xp.note)}"` : ""}>${escapeHtml(xp.detail)}</span>`
+    : "";
+  // 自動還原過的：讓「誤殺又被救回來」這件事看得見，不是只有統計數字。
+  const backBadge = it.restored_count > 0
+    ? `<span class="xp back" title="這筆被清除過 ${it.restored_count} 次，後來又上架了">已復活</span>`
+    : "";
+
   return `
-  <article class="card ${hot?'hot':''} ${trig?'trig':''}">
+  <article class="card ${hot?'hot':''} ${trig?'trig':''} ${gone?'expired':''}">
     ${shot(it.image_url, it.title)}
     <div class="body">
-      <h3 class="title"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>${badge}${bucketChip(it)}</h3>
+      <h3 class="title"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>${badge}${bucketChip(it)}${xpBadge}${backBadge}</h3>
       <div class="money">${nt(it.landed_twd)}<small>到手 · ${escapeHtml(it.route || "")}</small></div>
       <div class="cmp">${comps} · ${pWorth(it)}</div>
       <div class="cmp">${escapeHtml(it.grader || "")} ${it.grade ?? ""} ${escapeHtml(it.set_code || "")}</div>
