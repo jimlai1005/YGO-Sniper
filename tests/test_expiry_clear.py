@@ -342,3 +342,35 @@ def test_signals_api_carries_expiry(client):
     assert by_key["buyee_yahoo:gone-1"]["expiry"]["kind"] == "gone"
     assert "消失" in by_key["buyee_yahoo:gone-1"]["expiry"]["detail"]
     assert by_key["buyee_yahoo:live-1"]["expiry"]["kind"] == "live"
+
+
+def test_clear_expired_endpoint(client):
+    c, app_mod = client
+    _insert(app_mod.store, "buyee_yahoo:gone-1")
+    _mark_gone(app_mod.store, "buyee_yahoo:gone-1")
+    _insert(app_mod.store, "buyee_yahoo:live-1")
+
+    r = c.post("/api/signals/clear-expired", json={"state": "watching"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cleared"] == 1
+    assert body["keys"] == ["buyee_yahoo:gone-1"]
+    assert body["by_source"] == {"buyee_yahoo": 1}
+
+
+def test_clear_expired_endpoint_is_idempotent(client):
+    """清完就不在原 state，重按第二次回 cleared: 0（工程原則二）。"""
+    c, app_mod = client
+    _insert(app_mod.store, "buyee_yahoo:gone-1")
+    _mark_gone(app_mod.store, "buyee_yahoo:gone-1")
+    c.post("/api/signals/clear-expired", json={"state": "watching"})
+    body = c.post("/api/signals/clear-expired", json={"state": "watching"}).json()
+    assert body["cleared"] == 0
+
+
+def test_clear_expired_endpoint_rejects_bad_state(client):
+    """不可清除的狀態是語意錯誤，要回 400，不是安靜地回 cleared: 0。"""
+    c, _ = client
+    r = c.post("/api/signals/clear-expired", json={"state": "bought"})
+    assert r.status_code == 400
+    assert "可清除" in r.json()["detail"]

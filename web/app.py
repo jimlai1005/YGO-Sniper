@@ -303,6 +303,28 @@ def set_bucket(key: str, body: BucketUpdate):
             "state": row.get("state")}
 
 
+class ClearExpiredRequest(BaseModel):
+    #: 要清哪個分頁。只接受 Store.CLEARABLE_STATES 裡的三個。
+    state: str
+
+
+@app.post("/api/signals/clear-expired")
+def clear_expired(body: ClearExpiredRequest):
+    """把某個分頁裡已離場的標的移到 expired。
+
+    冪等：清完就不在原 state，重按第二次回 `cleared: 0`（工程原則二——
+    非冪等寫入不可重試，所以這支刻意設計成冪等）。
+    """
+    try:
+        return store.clear_expired_signals(
+            body.state, gone_confidence=_GONE_CONFIDENCE
+        )
+    except ValueError as e:
+        # 不可清除的狀態是**語意錯誤**，不是暫時性失敗——回 400 讓前端看見，
+        # 不要安靜地回 cleared: 0 假裝成功（CLAUDE.md 第五節）。
+        raise HTTPException(400, str(e)) from e
+
+
 # ---------------------------------------------------------------------------
 @app.get("/api/bundle")
 def bundle():
