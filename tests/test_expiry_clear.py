@@ -315,6 +315,22 @@ def test_revive_rate_by_source(store):
     assert "d" not in stats
 
 
+def test_expiry_stats_reports_cleared_and_restored(store):
+    # key 用生產形狀 `site:external_id`（見 `_signal_for` 的自我把關）：
+    # 裸 key 的話 upsert_signal 會另插一列，還原分支根本不會被走到。
+    _insert(store, "buyee_yahoo:gone-1")
+    _mark_gone(store, "buyee_yahoo:gone-1")
+    _insert(store, "buyee_yahoo:gone-2")
+    _mark_gone(store, "buyee_yahoo:gone-2")
+    store.clear_expired_signals("watching", gone_confidence={"_default": "low"})
+    store.upsert_signal(_signal_for("buyee_yahoo:gone-1"))      # 誤殺，自己回來了
+
+    stats = store.expiry_stats()
+    assert stats["cleared_now"] == 1               # gone-2 還在 expired
+    assert stats["restored_total"] == 1
+    assert stats["by_cleared_from"] == {"watching": 1}
+
+
 # ---------------------------------------------------------------------------
 # API：TestClient 打真的端點（fixture 照抄 `tests/test_card_bucket.py:189-220`）
 # ---------------------------------------------------------------------------

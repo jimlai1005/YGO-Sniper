@@ -3489,5 +3489,36 @@ def revive_rate():
     )
 
 
+@app.command()
+def expiry_stats():
+    """清除功能的自我體檢：清掉幾筆、其中幾筆又自己回來了。"""
+    cfg = load_config()
+    s = Store(cfg.db_path).expiry_stats()
+
+    t = Table(title="清除已離場標的")
+    t.add_column("指標")
+    t.add_column("值", justify="right")
+    t.add_row("目前處於「被清除」狀態", str(s["cleared_now"]))
+    t.add_row("累計自動還原（誤殺）", str(s["restored_total"]))
+    for state, n in sorted(s["by_cleared_from"].items()):
+        t.add_row(f"　來源分頁：{state}", str(n))
+    console.print(t)
+
+    if s["restored_total"]:
+        total = s["cleared_now"] + s["restored_total"]
+        pct = round(100.0 * s["restored_total"] / total, 1) if total else 0.0
+        console.print(
+            f"[yellow]清掉的東西有 {pct}% 後來又上架了[/yellow]"
+            "[dim]——這是本功能自己的誤殺率，偏高就去看 revive-rate 調 gone_confidence。[/dim]"
+        )
+
+    t2 = Table(title="各分頁現況")
+    t2.add_column("分頁")
+    t2.add_column("筆數", justify="right")
+    for state, n in sorted(s["by_state"].items()):
+        t2.add_row(state, str(n))
+    console.print(t2)
+
+
 if __name__ == "__main__":
     app()

@@ -1814,6 +1814,42 @@ class Store:
                 }
         return out
 
+    # ------------------------------------------------------------------
+    def expiry_stats(self) -> dict[str, Any]:
+        """清除功能的自我體檢。
+
+        `restored_total` 是**這個功能自己的誤殺率**——清掉的東西有幾成又回來了。
+        沒有這個數字，功能會安靜地錯下去（CLAUDE.md 第一節：誤殺是靜默的）。
+        """
+        with self._conn() as c:
+            cleared_now = c.execute(
+                "SELECT COUNT(*) FROM signals WHERE cleared_from IS NOT NULL"
+            ).fetchone()[0]
+            restored_total = c.execute(
+                "SELECT COALESCE(SUM(restored_count), 0) FROM signals"
+            ).fetchone()[0]
+            by_from = {
+                str(r[0]): int(r[1])
+                for r in c.execute(
+                    "SELECT cleared_from, COUNT(*) FROM signals "
+                    "WHERE cleared_from IS NOT NULL GROUP BY cleared_from"
+                )
+            }
+            pending = {
+                str(r[0]): int(r[1])
+                for r in c.execute(
+                    "SELECT state, COUNT(*) FROM signals WHERE state IN "
+                    f"({','.join('?' * len(self.CLEARABLE_STATES))}) GROUP BY state",
+                    list(self.CLEARABLE_STATES),
+                )
+            }
+        return {
+            "cleared_now": int(cleared_now),
+            "restored_total": int(restored_total),
+            "by_cleared_from": by_from,
+            "by_state": pending,
+        }
+
     def all_signal_titles(self) -> list[dict[str, Any]]:
         """每一筆訊號的 (key, site, title, state)。重跑解析判準用。"""
         with self._conn() as c:
