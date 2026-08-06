@@ -3454,5 +3454,40 @@ def corpus_diff(
     )
 
 
+@app.command()
+def revive_rate():
+    """量「疑似已離場」判定的錯誤率——調 gone_confidence 之前先跑這個。
+
+    復活率 = 曾被判離場、後來又出現的比例。設定檔 `scan.gone_confidence`
+    的分級規則是：復活率 < 35% 且 n >= 20 → medium，其餘一律 low。
+    """
+    cfg = load_config()
+    stats = Store(cfg.db_path).revive_rate_by_source()
+    if not stats:
+        console.print("[dim]還沒有任何離場觀測——爬蟲跑幾輪之後再來量。[/dim]")
+        return
+
+    current = (cfg.scan or {}).get("gone_confidence", {})
+    t = Table(title="離場判定的復活率（越高越不可信）")
+    t.add_column("來源")
+    t.add_column("曾判離場", justify="right")
+    t.add_column("復活過", justify="right")
+    t.add_column("復活率", justify="right")
+    t.add_column("目前設定", justify="right")
+    t.add_column("建議", justify="right")
+    for site, s in sorted(stats.items(), key=lambda kv: -kv[1]["ever_gone"]):
+        suggest = "medium" if s["pct"] < 35 and s["ever_gone"] >= 20 else "low"
+        now = current.get(site, current.get("_default", "low"))
+        t.add_row(
+            site, str(int(s["ever_gone"])), str(int(s["revived"])),
+            f"{s['pct']}%", now,
+            f"[yellow]{suggest}[/yellow]" if suggest != now else suggest,
+        )
+    console.print(t)
+    console.print(
+        "[dim]這個比率是下界：目前仍標記離場的列未來還可能復活。[/dim]"
+    )
+
+
 if __name__ == "__main__":
     app()

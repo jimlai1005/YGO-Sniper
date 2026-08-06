@@ -292,6 +292,29 @@ def test_normal_upsert_still_preserves_manual_state(store):
     assert store.get_signal(key)["state"] == "asked_seller"
 
 
+def test_revive_rate_by_source(store):
+    """量測定義：分母 = 曾被判離場的列，分子 = 其中 revived_count > 0 的。"""
+    with sqlite3.connect(store.db_path) as c:
+        rows = [
+            ("a", "buyee_yahoo", "2026-08-05T00:00:00+00:00", 0),   # 離場、沒復活
+            ("b", "buyee_yahoo", None, 2),                          # 復活過
+            ("c", "ebay", "2026-08-05T00:00:00+00:00", 1),          # 離場且復活過
+            ("d", "ebay", None, 0),                                 # 兩者皆非 → 不列入
+        ]
+        for key, site, gone, revived in rows:
+            c.execute(
+                "INSERT INTO listing_obs (key, site, title, url, first_seen, last_seen,"
+                " seen_count, disappeared_at, revived_count) VALUES (?,?,?,?,?,?,?,?,?)",
+                (key, site, key, f"https://example.test/{key}",
+                 "2026-08-01T00:00:00+00:00", "2026-08-02T00:00:00+00:00",
+                 3, gone, revived),
+            )
+    stats = store.revive_rate_by_source()
+    assert stats["buyee_yahoo"] == {"ever_gone": 2, "revived": 1, "pct": 50.0}
+    assert stats["ebay"] == {"ever_gone": 1, "revived": 1, "pct": 100.0}
+    assert "d" not in stats
+
+
 # ---------------------------------------------------------------------------
 # API：TestClient 打真的端點（fixture 照抄 `tests/test_card_bucket.py:189-220`）
 # ---------------------------------------------------------------------------

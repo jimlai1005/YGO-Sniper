@@ -1786,6 +1786,34 @@ class Store:
             )
         return {"cleared": len(keys), "keys": keys, "by_source": by_source}
 
+    # ------------------------------------------------------------------
+    def revive_rate_by_source(self) -> dict[str, dict[str, float]]:
+        """量「離場判定」自己的錯誤率，依來源分。
+
+        分母 = 曾被判離場的列（`disappeared_at` 非空 **或** `revived_count > 0`
+        ——復活時離場標記會被清掉，所以只看 `disappeared_at` 會漏掉復活過的）。
+        分子 = 其中 `revived_count > 0` 的列。
+
+        ⚠️ 這個比率是**下界**：目前仍標記離場的列未來還可能復活。
+        """
+        q = (
+            "SELECT site, COUNT(*) AS ever_gone, "
+            "SUM(CASE WHEN revived_count > 0 THEN 1 ELSE 0 END) AS revived "
+            "FROM listing_obs "
+            "WHERE disappeared_at IS NOT NULL OR revived_count > 0 "
+            "GROUP BY site"
+        )
+        out: dict[str, dict[str, float]] = {}
+        with self._conn() as c:
+            for r in c.execute(q):
+                ever, rev = int(r["ever_gone"]), int(r["revived"] or 0)
+                out[str(r["site"])] = {
+                    "ever_gone": ever,
+                    "revived": rev,
+                    "pct": round(100.0 * rev / ever, 1) if ever else 0.0,
+                }
+        return out
+
     def all_signal_titles(self) -> list[dict[str, Any]]:
         """每一筆訊號的 (key, site, title, state)。重跑解析判準用。"""
         with self._conn() as c:
