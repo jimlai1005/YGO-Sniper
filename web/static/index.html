@@ -898,10 +898,11 @@ function openSection(id){
   if(el && !el.open) el.open = true;              // 觸發 toggle → saveSections
 }
 
-function toast(msg){
+function toast(msg, ms){
+  // ms：分項結果這種長訊息 2.2 秒讀不完，允許呼叫端加長；不傳維持原時長
   const t = document.getElementById("toast");
   t.textContent = msg; t.classList.add("show");
-  setTimeout(() => t.classList.remove("show"), 2200);
+  setTimeout(() => t.classList.remove("show"), ms || 2200);
 }
 
 async function api(path, opts){
@@ -1250,9 +1251,11 @@ function askClearExpired(){
          其中 <b>${hidden}</b> 筆被目前的篩選隱藏，畫面上看不到。</div>`
     : "";
   document.getElementById("xp-confirm-body").innerHTML =
-    `將清除 <b>${n}</b> 筆（${escapeHtml(src)}）${hid}
+    `將驗證 <b>${n}</b> 筆（${escapeHtml(src)}）的商品頁，
+     僅清除確認「已售出／已下架」者；驗證不了的會保留${hid}
      <div style="margin-top:8px;color:var(--dim)">
-       → 移到「已過期」分頁，可隨時查看<br>
+       → 驗證在背景進行，約需 1-2 分鐘<br>
+       → 清除的移到「已過期」分頁，可隨時查看<br>
        → 若重新上架會自動放回原分頁
      </div>${warn}`;
   const dlg = document.getElementById("xp-confirm");
@@ -1264,20 +1267,95 @@ function askClearExpired(){
   dlg.style.display = "flex";
 }
 
+/* 清除走背景模式（後端逐筆開商品頁驗證，40 筆約 1-2 分鐘）：POST 立即返回，
+   之後輪詢 status 直到跑完。骨架照 scanNow()/pollScanStatus() 那一組。 */
+let vcPollTimer = null;
+let vcWasRunning = false;   // 「剛剛還在跑」才收尾——頁面載入時的探測不觸發完成 toast
+
+function vcRestoreBtn(){
+  const btn = document.getElementById("xp-clear-btn");
+  btn.disabled = false;
+  btn.textContent = "清除";
+}
+
+// 完成 toast 的分項文案。0 的欄位省略——沒發生的事不佔版面。
+// toast 走 textContent（不是 innerHTML），這裡不需要 escape。
+function vcSummary(res){
+  const v = (res && res.by_verdict) || {};
+  const cleared = (res && res.cleared) || 0;
+  const inner = [];
+  if(v.ended)    inner.push(`結標 ${v.ended}`);
+  if(v.sold)     inner.push(`售出 ${v.sold}`);
+  if(v.delisted) inner.push(`下架 ${v.delisted}`);
+  const parts = [`已清 ${cleared}${inner.length ? `（${inner.join("、")}）` : " 筆"}`];
+  if(v.still_live)   parts.push(`仍在架 ${v.still_live} 筆已解除標記`);
+  if(v.unverifiable) parts.push(`無法驗證 ${v.unverifiable} 筆保留`);
+  if(v.skipped)      parts.push(`略過 ${v.skipped} 筆未驗證`);
+  return parts.join(" · ");
+}
+
+async function pollVerifyClearStatus(){
+  let st;
+  try{
+    st = await api("/api/signals/clear-expired/status");
+  }catch(e){
+    // 後端暫時連不上不該把按鈕永遠鎖死；只有「明知在跑」時才繼續追
+    if(vcWasRunning){
+      clearTimeout(vcPollTimer);
+      vcPollTimer = setTimeout(pollVerifyClearStatus, 2000);
+    }
+    return;
+  }
+  if(st.running){
+    vcWasRunning = true;
+    const p = st.progress || {};
+    const btn = document.getElementById("xp-clear-btn");
+    btn.disabled = true;
+    btn.textContent = `驗證中 ${p.done ?? 0}/${p.total ?? "?"}…`;
+    clearTimeout(vcPollTimer);
+    vcPollTimer = setTimeout(pollVerifyClearStatus, 2000);
+    return;
+  }
+  // 沒在跑：只有剛剛還在跑的那一次要收尾（恢復按鈕、報結果、刷新清單）
+  if(vcWasRunning){
+    vcWasRunning = false;
+    vcRestoreBtn();
+    if(st.stale){
+      toast("上一輪驗證清除沒有回報完成（多半是中途被中斷），按鈕已放行", 6000);
+    }else if(st.error){
+      toast("驗證清除失敗：" + st.error, 6000);
+    }else{
+      toast(vcSummary(st.last_result), 6000);
+    }
+    loadAll();
+  }
+}
+
 async function clearExpired(){
   const dlg = document.getElementById("xp-confirm");
   dlg.style.display = "none";
   const state = dlg.dataset.state;
   if(!state){ toast("清除失敗：不知道要清哪個分頁"); return; }
+  const btn = document.getElementById("xp-clear-btn");
+  btn.disabled = true;                    // 先鎖，不等 API 回來——雙擊就是在這半秒發生
+  btn.textContent = "驗證中…";
   try{
     const r = await api("/api/signals/clear-expired", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({state}),
     });
-    toast(`已清除 ${r.cleared} 筆 → 已過期分頁`);
-    loadAll();
-  }catch(e){ toast("清除失敗：" + e.message); }
+    // started:false = 別處（CLI 或另一個視窗）已經在跑——不是錯誤，接上進度就好
+    toast(r.started ? (r.message || "背景驗證已啟動…")
+                    : (r.message || "已經有一輪驗證在跑，接上進度"));
+    vcWasRunning = true;                  // 讓輪詢的「跑完了」判斷成立
+  }catch(e){
+    toast("清除失敗：" + e.message);
+    vcRestoreBtn();
+    return;
+  }
+  clearTimeout(vcPollTimer);
+  vcPollTimer = setTimeout(pollVerifyClearStatus, 700);
 }
 
 let lastRes = null;    // 最近一次 /api/signals 的回應（truncated / 估價錯誤要用）
@@ -2621,6 +2699,9 @@ syncFilterUI();
 initSections();
 loadAll();
 pollScanStatus();
+// 頁面載入時也探一次驗證清除的狀態：背景驗證還在跑（例如使用者重新整理了頁面）
+// 就讓按鈕直接進入輪詢，不要讓使用者以為沒在動、再按一次
+pollVerifyClearStatus();
 </script>
 </body>
 </html>
