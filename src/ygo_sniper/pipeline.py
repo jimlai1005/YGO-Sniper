@@ -293,8 +293,16 @@ class Pipeline:
         return total
 
     # ------------------------------------------------------------------
-    def _refill_comps(self, auction_titles: list[str]) -> dict | None:
+    def _refill_comps(
+        self,
+        auction_titles: list[str],
+        watch_fixed_titles: list[str] | None = None,
+    ) -> dict | None:
         """跑一輪需求驅動回補，回傳報告 dict（沒東西可做時回 None）。
+
+        需求端兩組：`auction_titles`（競標中標的，任何發現管道）與
+        `watch_fixed_titles`（監控賣家掃出來的定價上架，refill.py 頂註的
+        第二個來源）。兩組在 run_refill 裡合併後走同一套節流。
 
         任何失敗都不准拖垮掃描（隔離邊界，與 refresh_comps 同一立場）：
         回補是加分項，掃描是主業。收進新樣本時把 comps 視圖與懶建的估價模型
@@ -304,8 +312,9 @@ class Pipeline:
         from .cards import CardIndex
         from .refill import RefillParams, run_refill
 
+        watch_fixed_titles = watch_fixed_titles or []
         params = RefillParams.from_config(self.cfg)
-        if not params.enabled or not auction_titles:
+        if not params.enabled or not (auction_titles or watch_fixed_titles):
             return None
         try:
             report = run_refill(
@@ -314,6 +323,7 @@ class Pipeline:
                 comps=self.comps,
                 index=CardIndex.load(),
                 titles=auction_titles,
+                watch_titles=watch_fixed_titles,
                 params=params,
             )
         except Exception as exc:  # noqa: BLE001 - 隔離邊界，見 docstring
@@ -701,7 +711,9 @@ class Pipeline:
         估價、落庫、觀測帳全部要走同一份程式碼，否則「從賣家頁發現的標的」
         與「從關鍵字發現的標的」遲早會有兩套判準（工程原則 1）。
         跳過的只有：關鍵字查詢、canary（那是在問「關鍵字管道還活著嗎」）、
-        行情回補（綁在關鍵字掃到的競標標題上）。
+        行情回補——回補的需求端雖然也吃監控賣家的定價上架（見 _refill_comps），
+        但它會打真實網路請求並寫節流帳與 comps，那是 `daily`/`scan` 完整輪的事；
+        `watch-scan` 是手動輔助指令，維持零回補請求的預算不因本次來源擴充而變。
         """
         skip_comps = skip_comps or watch_only
         comps_added = 0 if skip_comps else self.refresh_comps()
@@ -757,9 +769,13 @@ class Pipeline:
 
         # 賣家輪替監控：這一批賣家的**全部在架**（賣家頁列舉，不是關鍵字搜尋）。
         # 產出的候選與觀測列直接併進同一條管線，下面的估價／評分／落庫一視同仁。
+        # 先收在自己的清單再併進主清單：refill 要分得出「監控賣家的定價上架」
+        # 這個需求來源（見下方 _refill_comps 的呼叫），靠的就是這條分界。
+        watch_candidates: list = []
         watch_batches, watch_report = self._scan_watched_sellers(
-            candidates, force=watch_force
+            watch_candidates, force=watch_force
         )
+        candidates.extend(watch_candidates)
         obs_batches.extend(watch_batches)
         scanned += watch_report.get("found", 0)
 
@@ -778,7 +794,14 @@ class Pipeline:
         refill_report = None
         if not dry_run and not skip_comps and not watch_only:
             refill_report = self._refill_comps(
-                [lst.title for lst, _info in candidates if is_live_auction(lst)]
+                [lst.title for lst, _info in candidates if is_live_auction(lst)],
+                # 第二個需求來源（2026-08-07 缺口）：監控賣家的**定價**上架。
+                # 監控賣家 62/80 是定價，只吃競標標題的佇列結構上永遠看不到它們。
+                # 競標中的那部分已在上一個清單（watch_candidates ⊆ candidates），
+                # 這裡只挑非競標，兩個清單不重疊、需求不會數兩次。
+                # 一般關鍵字掃描的定價上架**刻意不進**（會把佇列衝大，另議）。
+                [lst.title for lst, _info in watch_candidates
+                 if not is_live_auction(lst)],
             )
 
         # 同賣家多筆 → 可以問合併運費

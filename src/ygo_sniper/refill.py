@@ -11,6 +11,17 @@
 但同卡成交 < `min_comps` 筆」的卡，用該卡的日文卡名（主檔 `name_ja`）
 對已售出來源做針對性查詢。查的是需求端真的缺的卡，不是屬性空間的格子。
 
+## 第二個需求來源：監控賣家的定價上架（2026-08-07）
+
+逐筆重放 80 筆估不了的監控賣家上架：27 筆的卡在 comps 一筆成交都沒有。
+根因：佇列只吃 live auction 標題，而監控賣家的上架 62/80 是定價
+（paypay 48＋ebay 14），結構上永遠進不了佇列。所以 `run_refill` 多收一組
+`watch_titles`（監控賣家掃出來的**定價**上架；競標的那部分走原本的 `titles`）。
+兩組需求**先合併、再過同一道冷卻濾網與 max_cards 截斷**——新來源結構上
+繞不過任何一道節流，每輪請求上限不變。一般關鍵字掃描的定價上架**刻意不進**
+（會把佇列衝大，另議）；來源計數分開記在 `RefillCandidate.auction_n /
+watch_fixed_n`，之後查「refill 有沒有在吃新來源」不用猜。
+
 ## 節流是硬約束，不是禮貌
 
 - 每輪最多 `max_cards_per_run` 張卡（預設 10）。
@@ -121,11 +132,20 @@ class RefillParams:
 
 @dataclass(slots=True, frozen=True)
 class RefillCandidate:
-    """一張等著被回補的卡：庫裡幾筆成交、幾筆在架競標等著它。"""
+    """一張等著被回補的卡：庫裡幾筆成交、幾筆在架標的等著它。
+
+    `listings_n` 是**兩個需求來源的合計**（排序、截斷都用它）；
+    `auction_n`／`watch_fixed_n` 把來源分開記——「refill 有沒有在吃
+    監控賣家這條新需求線」要能從帳上直接讀出來，不用猜。
+    """
 
     card_name: str
     comps_n: int
     listings_n: int
+    #: 需求來自幾筆競標中標的（原始來源，任何發現管道）。
+    auction_n: int = 0
+    #: 需求來自幾筆**監控賣家的定價上架**（2026-08-07 新增的來源）。
+    watch_fixed_n: int = 0
 
 
 def comps_count_by_card(rows: list[dict[str, Any]], index: CardIndex) -> dict[str, int]:
@@ -152,30 +172,42 @@ def select_refill_cards(
     min_comps: int,
     max_cards: int,
     cooling: frozenset[str] | set[str] = frozenset(),
+    watch_titles: Iterable[str] = (),
 ) -> tuple[list[RefillCandidate], list[RefillCandidate]]:
     """從標的標題選出要回補的卡。回傳 (入選, 因冷卻被跳過)。純函式，可單測。
+
+    需求有兩個來源：`titles`（競標中標的）與 `watch_titles`（監控賣家的
+    定價上架，見模組頂註）。**先合併需求、再過冷卻濾網與 max_cards 截斷**
+    ——節流對兩個來源一視同仁，新來源結構上繞不過任何一道。
 
     入選判準（三個都要）：卡名比對得到、in_era、同卡成交 < `min_comps`。
     比不到卡名的標題**不選**——沒有卡名就沒有可查詢的關鍵字，那是
     卡名比對那條線的工作，不是回補能救的。
 
-    排序決定性（同一份輸入永遠選同一批）：等著這張卡的標的越多越優先、
-    庫裡樣本越少越優先、最後按卡名排 tie-break。截斷發生在尾端，
-    max_cards 改小時砍掉的是最不缺的那幾張。
+    排序決定性（同一份輸入永遠選同一批）：等著這張卡的標的越多越優先
+    （兩來源合計）、庫裡樣本越少越優先、最後按卡名排 tie-break。
+    截斷發生在尾端，max_cards 改小時砍掉的是最不缺的那幾張。
     """
-    demand: Counter[str] = Counter()
-    for title in titles:
-        m = index.match(title or "")
-        if m is not None and m.in_era:
-            demand[m.name_ja] += 1
+    demand_auction: Counter[str] = Counter()
+    demand_watch: Counter[str] = Counter()
+    for bucket, batch in ((demand_auction, titles), (demand_watch, watch_titles)):
+        for title in batch:
+            m = index.match(title or "")
+            if m is not None and m.in_era:
+                bucket[m.name_ja] += 1
 
     selected: list[RefillCandidate] = []
     cooled: list[RefillCandidate] = []
-    for name, listings_n in demand.items():
+    for name in {*demand_auction, *demand_watch}:
         n = int(comps_counts.get(name, 0))
         if n >= min_comps:
             continue
-        cand = RefillCandidate(card_name=name, comps_n=n, listings_n=listings_n)
+        auction_n = demand_auction.get(name, 0)
+        watch_n = demand_watch.get(name, 0)
+        cand = RefillCandidate(
+            card_name=name, comps_n=n, listings_n=auction_n + watch_n,
+            auction_n=auction_n, watch_fixed_n=watch_n,
+        )
         (cooled if name in cooling else selected).append(cand)
 
     selected.sort(key=lambda c: (-c.listings_n, c.comps_n, c.card_name))
@@ -218,6 +250,10 @@ class RefillReport:
             f"請求 {self.requests}",
             f"收 {self.kept} 筆、擋 {self.rejected} 筆" + (f"（{top}）" if top else ""),
         ]
+        # 新需求來源（監控賣家定價上架）有沒有在動，log 上要直接看得到。
+        watch_cards = sum(1 for c in self.selected if c.watch_fixed_n)
+        if watch_cards:
+            parts.append(f"含監控定價需求 {watch_cards} 張")
         if self.skipped_cooldown:
             parts.append(f"冷卻中跳過 {len(self.skipped_cooldown)} 張")
         if self.errors:
@@ -227,6 +263,12 @@ class RefillReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "selected": [c.card_name for c in self.selected],
+            # 每張入選卡的需求來源計數：auction（競標中標的）／
+            # watch_fixed（監控賣家定價上架）。查「新來源有沒有被吃」用這格。
+            "selected_origin": {
+                c.card_name: {"auction": c.auction_n, "watch_fixed": c.watch_fixed_n}
+                for c in self.selected
+            },
             "skipped_cooldown": [c.card_name for c in self.skipped_cooldown],
             "queries": self.queries,
             "queries_ok": self.queries_ok,
@@ -280,9 +322,12 @@ def run_refill(
     index: CardIndex,
     titles: Iterable[str],
     params: RefillParams,
+    watch_titles: Iterable[str] = (),
     dry_run: bool = False,
 ) -> RefillReport:
-    """跑一輪需求驅動回補。`titles` 是等著行情的標的標題（通常是競標候選）。
+    """跑一輪需求驅動回補。`titles` 是等著行情的競標標的標題；
+    `watch_titles` 是監控賣家掃出來的**定價**上架標題（第二個需求來源，
+    見模組頂註）。兩組合併後走同一套選卡與節流，只有來源計數分開記。
 
     `dry_run=True` 只做選卡（不打外網、不記帳、不入庫）——給「看看會查誰」用。
 
@@ -305,6 +350,7 @@ def run_refill(
         min_comps=params.min_comps,
         max_cards=params.max_cards_per_run,
         cooling=cooling,
+        watch_titles=watch_titles,
     )
     report.selected = selected
     report.skipped_cooldown = cooled
