@@ -63,6 +63,7 @@ from ygo_sniper.sources import CachedFetcher, build_sources  # noqa: E402
 from ygo_sniper.sources.base import BlockedError, FetchError  # noqa: E402
 from ygo_sniper.store import Store  # noqa: E402
 from ygo_sniper.venue_study import VENUE_STUDY_META_KEY, venue_study_label  # noqa: E402
+from ygo_sniper.verify_departed import build_page_verifier  # noqa: E402
 
 app = FastAPI(title="ygo-sniper")
 cfg = load_config()
@@ -309,20 +310,91 @@ class ClearExpiredRequest(BaseModel):
 
 
 @app.post("/api/signals/clear-expired")
-def clear_expired(body: ClearExpiredRequest):
-    """把某個分頁裡已離場的標的移到 expired。
+def clear_expired(body: ClearExpiredRequest, tasks: BackgroundTasks):
+    """把某個分頁裡已離場的標的移到 expired——gone 候選逐筆開商品頁驗證，
+    只清拿到實證的（SOLD／DELISTED），所以走背景模式（驗 40 筆約 1-2 分鐘，
+    同步回應會讓前端掛在 spinner 上直到 timeout）。
 
-    冪等：清完就不在原 state，重按第二次回 `cleared: 0`（工程原則二——
-    非冪等寫入不可重試，所以這支刻意設計成冪等）。
+    骨架照 `/api/scan` 的 begin/finish/status 三件組：已 running 就不再排一次
+    （回 200 + `started:false`——「已經在跑了」對使用者是正常回答，不是錯誤）；
+    否則**在回應之前**先標 running（晚標的話前端問到「沒有在跑」的空窗，
+    正是使用者會再按一次的時機）；內層 try/except 保證失敗也 finish，
+    不讓狀態卡死到逾時為止。
+
+    冪等：清完就不在原 state，重按第二次的 last_result 回 `cleared: 0`
+    （工程原則二——非冪等寫入不可重試，所以這支刻意設計成冪等）。
     """
     try:
-        return store.clear_expired_signals(
-            body.state, gone_confidence=_GONE_CONFIDENCE
+        # 這一步兼做 state 驗證（語意錯誤要在背景任務開跑之前回 400，
+        # 不是安靜地回 cleared: 0 假裝成功，CLAUDE.md 第五節）
+        # 與 total 預估（前端一開始就能畫 0/total）。
+        total = len(
+            store.departed_candidates(
+                body.state, gone_confidence=_GONE_CONFIDENCE
+            )["gone"]
         )
     except ValueError as e:
-        # 不可清除的狀態是**語意錯誤**，不是暫時性失敗——回 400 讓前端看見，
-        # 不要安靜地回 cleared: 0 假裝成功（CLAUDE.md 第五節）。
         raise HTTPException(400, str(e)) from e
+
+    st = store.verify_clear_status(timeout_seconds=cfg.scan_timeout_seconds)
+    if st["running"]:
+        return {
+            "ok": True,
+            "started": False,
+            "running": True,
+            "message": f"已經有一輪驗證清除在跑（{st.get('trigger') or '?'} 觸發），這次不重複啟動",
+            "status": st,
+        }
+
+    started = store.begin_verify_clear(
+        trigger="dashboard", state=body.state, total=total
+    )
+
+    def _run() -> None:
+        try:
+            verifier = build_page_verifier(cfg)
+            done = 0
+            try:
+                def _counting(key: str, url: str):
+                    nonlocal done
+                    res = verifier(key, url)
+                    done += 1
+                    store.set_verify_clear_progress(done, total)
+                    return res
+
+                result = store.clear_expired_signals(
+                    body.state,
+                    gone_confidence=_GONE_CONFIDENCE,
+                    verifier=_counting,
+                )
+            finally:
+                verifier.close()
+            store.finish_verify_clear(started, result=result)
+        except Exception as exc:  # noqa: BLE001 - 見下
+            # 建 verifier 就失敗（缺 playwright、db 壞掉…）或驗到一半炸掉時，
+            # 這裡不接的話狀態會卡 running 到逾時為止，按鈕鎖住而且看不到原因
+            # （工程原則 3：大聲失敗）。error 落地之後例外照樣往外傳。
+            store.finish_verify_clear(started, error=f"{type(exc).__name__}: {exc}")
+            raise
+
+    tasks.add_task(_run)
+    return {
+        "ok": True,
+        "started": True,
+        "running": True,
+        "total": total,
+        "message": f"開始驗證 {total} 筆的商品頁，完成後清單會自動更新",
+    }
+
+
+@app.get("/api/signals/clear-expired/status")
+def clear_expired_status():
+    """「現在有沒有在驗」＋進度＋上一次的結果。前端輪詢這個。
+
+    卡死防線在 store.verify_clear_status：開始超過逾時還沒回報完成，
+    一律回 `running:false, stale:true`——驗證中途被 kill 的狀態不會讓按鈕永遠鎖住。
+    """
+    return store.verify_clear_status(timeout_seconds=cfg.scan_timeout_seconds)
 
 
 # ---------------------------------------------------------------------------

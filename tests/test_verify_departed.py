@@ -23,6 +23,8 @@ from ygo_sniper.sources.ebay import EbayItemNotFound
 from ygo_sniper.verify_departed import (
     CLEARABLE_VERDICTS,
     VerifyResult,
+    _NoCacheGetter,
+    build_page_verifier,
     verify_listing,
 )
 
@@ -181,3 +183,121 @@ def test_unexpected_exception_propagates():
     fetch = _Fetch(exc=RuntimeError("boom"))
     with pytest.raises(RuntimeError, match="boom"):
         verify_listing(YAHOO_KEY, YAHOO_URL, fetch_page=fetch)
+
+
+# ---------------------------------------------------------------------------
+# build_page_verifier：把 verify_listing 接上真實抓取管線的可重用接線。
+# 單元測試只驗「組出來的 callable 會把例外分類對」與資源接線的形狀
+# （注入假 fetch_page／mock fetch_item_page），**絕不出網、絕不開瀏覽器**。
+# ---------------------------------------------------------------------------
+BUYEE_MERCARI_URL = "https://buyee.jp/mercari/item/m93414631870"
+BUYEE_MERCARI_KEY = "buyee_mercari:m93414631870"
+
+
+def test_build_page_verifier_classifies_injected_exceptions(cfg):
+    """注入假 fetch_page：組出來的 callable 是 (key, url) → VerifyResult，
+    例外分類與 verify_listing 同一份（它就是應該直接委給 verify_listing）。"""
+    with build_page_verifier(
+        cfg, fetch_page=_Fetch(exc=BlockedError("WAF", url=YAHOO_URL, status=202))
+    ) as verifier:
+        res = verifier(YAHOO_KEY, YAHOO_URL)
+    assert res.key == YAHOO_KEY
+    assert res.verdict == "UNVERIFIABLE"
+
+
+def test_build_page_verifier_classifies_injected_sold_page(cfg):
+    with build_page_verifier(
+        cfg, fetch_page=_Fetch(page=_page(is_sold=True, status="closed"))
+    ) as verifier:
+        res = verifier(YAHOO_KEY, YAHOO_URL)
+    assert res.verdict == "SOLD"
+
+
+def test_build_page_verifier_close_before_any_fetch_is_safe(cfg):
+    """一筆都沒驗就 close：懶初始化的資源根本沒開，不准爆。"""
+    build_page_verifier(cfg).close()
+
+
+def test_no_cache_getter_pins_use_cache_false():
+    """12 小時快取會回舊頁——驗證要看**現在**，use_cache=False 是釘死的，
+    連呼叫端明說 use_cache=True 都要被否決。"""
+
+    class _Inner:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+
+        def get(self, url, **kw):
+            self.calls.append((url, kw))
+            return "<html>ok</html>"
+
+        def close(self):
+            self.closed = True
+
+    inner = _Inner()
+    getter = _NoCacheGetter(inner)
+    getter.get("https://x.test/a")
+    getter.get("https://x.test/b", use_cache=True, min_bytes=10)
+    assert inner.calls[0] == ("https://x.test/a", {"use_cache": False})
+    assert inner.calls[1] == (
+        "https://x.test/b", {"use_cache": False, "min_bytes": 10}
+    )
+    getter.close()
+    assert inner.closed is True
+
+
+def _wiring_probe(monkeypatch):
+    """mock 掉 appraise.fetch_item_page，記錄接線收到的資源。"""
+    import ygo_sniper.appraise as appraise_mod
+
+    calls = []
+
+    def fake_fetch_item_page(_cfg, target, *, fetcher=None, waf=None, ebay=None):
+        calls.append({"mode": target.fetch_mode, "fetcher": fetcher,
+                      "waf": waf, "ebay": ebay})
+        return _page(is_sold=True, status="closed")
+
+    monkeypatch.setattr(appraise_mod, "fetch_item_page", fake_fetch_item_page)
+    return calls
+
+
+def test_page_verifier_wiring_reuses_fetcher_and_skips_waf_for_yahoo(
+    cfg, monkeypatch
+):
+    """yahoo_native 走一般 fetcher（no-cache 釘死），**不開** WafSession；
+    第二筆重用同一個 fetcher（節流與連線池共用）。"""
+    calls = _wiring_probe(monkeypatch)
+    with build_page_verifier(cfg) as verifier:
+        verifier(YAHOO_KEY, YAHOO_URL)
+        verifier(YAHOO_KEY, YAHOO_URL)
+    assert [c["mode"] for c in calls] == ["yahoo_native", "yahoo_native"]
+    assert all(c["waf"] is None for c in calls)
+    assert isinstance(calls[0]["fetcher"], _NoCacheGetter)
+    assert calls[0]["fetcher"] is calls[1]["fetcher"]
+
+
+def test_page_verifier_wiring_opens_waf_lazily_and_reuses_it(cfg, monkeypatch):
+    """WafSession 只在遇到 buyee_waf 標的時建立（token TTL 只有約 5 分鐘，
+    先開好再慢慢驗等於開一顆就過期），之後整批重用同一顆；
+    而且它也要包 no-cache——驗證看的是現在的頁面。"""
+    calls = _wiring_probe(monkeypatch)
+    with build_page_verifier(cfg) as verifier:
+        verifier(YAHOO_KEY, YAHOO_URL)                       # 不該觸發 waf
+        assert calls[-1]["waf"] is None
+        verifier(BUYEE_MERCARI_KEY, BUYEE_MERCARI_URL)
+        verifier(BUYEE_MERCARI_KEY, BUYEE_MERCARI_URL)
+    waf_calls = [c for c in calls if c["mode"] == "buyee_waf"]
+    assert len(waf_calls) == 2
+    assert all(isinstance(c["waf"], _NoCacheGetter) for c in waf_calls)
+    assert waf_calls[0]["waf"] is waf_calls[1]["waf"]
+
+
+def test_page_verifier_wiring_shares_one_ebay_source(cfg, monkeypatch):
+    """eBay 走 API：共用同一顆 EbaySource（同一顆 OAuth token），不逐筆重建。"""
+    calls = _wiring_probe(monkeypatch)
+    with build_page_verifier(cfg) as verifier:
+        verifier(EBAY_KEY, EBAY_URL)
+        verifier(EBAY_KEY, EBAY_URL)
+    assert [c["mode"] for c in calls] == ["ebay_api", "ebay_api"]
+    assert calls[0]["ebay"] is not None
+    assert calls[0]["ebay"] is calls[1]["ebay"]

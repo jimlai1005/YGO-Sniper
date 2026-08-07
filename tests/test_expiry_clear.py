@@ -684,6 +684,96 @@ def test_expiry_stats_reports_cleared_and_restored(store):
 
 
 # ---------------------------------------------------------------------------
+# 候選挑選的唯一入口：clear 與 CLI dry-run 共用，不准各寫一份判定
+# ---------------------------------------------------------------------------
+def test_departed_candidates_splits_ended_and_gone(store):
+    _insert(store, "buyee_yahoo:gone-1")
+    _mark_gone(store, "buyee_yahoo:gone-1")
+    _insert(store, "buyee_yahoo:ended-1", payload=json.dumps(
+        {"listing": {"end_time": "2026-01-01T00:00:00+00:00"}}
+    ))
+    _insert(store, "buyee_yahoo:live-1")
+
+    cand = store.departed_candidates("watching", gone_confidence=LOW)
+
+    assert [r["key"] for r in cand["ended"]] == ["buyee_yahoo:ended-1"]
+    assert [r["key"] for r in cand["gone"]] == ["buyee_yahoo:gone-1"]
+    # 候選列要帶得動後續動作：驗證要 url、dry-run 表要 title
+    assert cand["gone"][0]["url"] == "https://example.test/buyee_yahoo:gone-1"
+    assert cand["gone"][0]["title"] == "卡 buyee_yahoo:gone-1"
+
+
+def test_departed_candidates_rejects_bad_state(store):
+    with pytest.raises(ValueError, match="不可清除"):
+        store.departed_candidates("bought", gone_confidence=LOW)
+
+
+# ---------------------------------------------------------------------------
+# 驗證清除的背景狀態組（meta 表，照 scan_status 的寫法）
+# ---------------------------------------------------------------------------
+def test_verify_clear_status_fresh_db_is_not_running(store):
+    st = store.verify_clear_status()
+    assert st["running"] is False
+    assert st["stale"] is False
+    assert st["started_at"] is None
+    assert st["progress"] == {"done": 0, "total": None}
+    assert st["last_result"] is None
+
+
+def test_verify_clear_begin_progress_finish_roundtrip(store):
+    started = store.begin_verify_clear(
+        trigger="dashboard", state="watching", total=3
+    )
+    st = store.verify_clear_status(timeout_seconds=1800)
+    assert st["running"] is True
+    assert st["started_at"] == started
+    assert st["trigger"] == "dashboard"
+    assert st["state"] == "watching"
+    assert st["progress"] == {"done": 0, "total": 3}
+
+    store.set_verify_clear_progress(2, 3)
+    assert store.verify_clear_status()["progress"] == {"done": 2, "total": 3}
+
+    result = {"cleared": 1, "by_verdict": {"sold": 1}}
+    store.finish_verify_clear(started, result=result)
+    st = store.verify_clear_status()
+    assert st["running"] is False
+    assert st["finished_at"] is not None
+    assert st["error"] is None
+    assert st["last_result"] == result
+    # 完成後 progress 保留最後的值——前端 toast 要顯示「驗了幾筆」
+    assert st["progress"] == {"done": 2, "total": 3}
+
+
+def test_verify_clear_failure_is_recorded_not_stuck(store):
+    started = store.begin_verify_clear(state="watching", total=5)
+    store.finish_verify_clear(started, error="RuntimeError: 驗證炸了")
+    st = store.verify_clear_status()
+    assert st["running"] is False
+    assert "驗證炸了" in st["error"]
+    assert st["last_result"] is None
+
+
+def test_verify_clear_timeout_is_not_running(store):
+    """崩潰後沒人呼叫 finish → 靠逾時兜底，前端按鈕才有自救手段
+    （與 scan_status 同一個理由：讀不到 ≠ 還在跑）。"""
+    store.begin_verify_clear(state="watching", total=1)
+    st = store.verify_clear_status(timeout_seconds=0.0)
+    assert st["running"] is False
+    assert st["stale"] is True
+
+
+def test_begin_verify_clear_overwrites_stale_state(store):
+    """殘留的 running 狀態不該擋住下一輪（覆寫是刻意的，同 begin_scan）。"""
+    store.begin_verify_clear(state="watching", total=9)
+    started = store.begin_verify_clear(state="watching", total=2)
+    st = store.verify_clear_status(timeout_seconds=1800)
+    assert st["running"] is True
+    assert st["started_at"] == started
+    assert st["progress"] == {"done": 0, "total": 2}
+
+
+# ---------------------------------------------------------------------------
 # API：TestClient 打真的端點（fixture 照抄 `tests/test_card_bucket.py:189-220`）
 # ---------------------------------------------------------------------------
 @pytest.fixture
@@ -738,43 +828,161 @@ def test_signals_api_carries_expiry(client):
 _ENDED_PAYLOAD = json.dumps({"listing": {"end_time": "2026-01-01T00:00:00+00:00"}})
 
 
-def test_clear_expired_endpoint_without_verifier_only_clears_ended(client):
-    """端點目前沒接 verifier（背景驗證是後續 task）——安全預設必須生效：
-    只清 ended（事實），gone 推論原地保留、以 skipped 回報。
-    這正是事故的修法：忘記（或還沒）接驗證器的呼叫端不准退回推論清除。"""
+class _FakeEndpointVerifier:
+    """給端點測試用的假 verifier（mock verifier、不 mock store）。
+
+    順手扮演 `build_page_verifier` 回傳物的完整介面（callable + close），
+    並在**每筆驗證當下**偷看 store 的背景狀態——TestClient 會在回應返回前
+    把 BackgroundTask 跑完，所以「驗證中 running=True、progress 有前進」
+    只能從驗證器內部觀測。
+    """
+
+    def __init__(self, verdicts: dict[str, str], store: Store | None = None):
+        self.verdicts = verdicts
+        self.store = store
+        self.calls: list[str] = []
+        self.closed = False
+        self.observed: list[dict] = []
+
+    def __call__(self, key: str, url: str) -> VerifyResult:
+        self.calls.append(key)
+        if self.store is not None:
+            st = self.store.verify_clear_status()
+            self.observed.append(
+                {"running": st["running"], "progress": st["progress"]}
+            )
+        return VerifyResult(key, self.verdicts[key], "test")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_clear_expired_endpoint_verifies_in_background(client, monkeypatch):
+    """端點三件組的主流程：POST 開始 → 驗證期間狀態是 running、progress
+    逐筆前進 → 完成後 status 的 last_result 分項正確、資源已關。"""
     c, app_mod = client
     _insert(app_mod.store, "buyee_yahoo:gone-1")
     _mark_gone(app_mod.store, "buyee_yahoo:gone-1")
+    _insert(app_mod.store, "buyee_yahoo:phantom")
+    _mark_gone(app_mod.store, "buyee_yahoo:phantom")
     _insert(app_mod.store, "buyee_yahoo:ended-1", payload=_ENDED_PAYLOAD)
     _insert(app_mod.store, "buyee_yahoo:live-1")
+    fake = _FakeEndpointVerifier(
+        {"buyee_yahoo:gone-1": "SOLD", "buyee_yahoo:phantom": "STILL_LIVE"},
+        store=app_mod.store,
+    )
+    monkeypatch.setattr(app_mod, "build_page_verifier", lambda _cfg: fake)
 
     r = c.post("/api/signals/clear-expired", json={"state": "watching"})
     assert r.status_code == 200
     body = r.json()
-    assert body["cleared"] == 1
-    assert body["keys"] == ["buyee_yahoo:ended-1"]
-    assert body["by_source"] == {"buyee_yahoo": 1}
-    assert body["by_verdict"]["ended"] == 1
-    assert body["by_verdict"]["skipped"] == 1
-    assert app_mod.store.get_signal("buyee_yahoo:gone-1")["state"] == "watching"
+    assert body["ok"] is True
+    assert body["started"] is True
+    assert body["running"] is True
+
+    # 驗證期間：狀態是 running，progress 每筆前進一次（total = gone 候選數）
+    assert len(fake.observed) == 2
+    assert all(o["running"] for o in fake.observed)
+    assert [o["progress"] for o in fake.observed] == [
+        {"done": 0, "total": 2}, {"done": 1, "total": 2},
+    ]
+
+    # 完成後：status 端點回 last_result 分項
+    st = c.get("/api/signals/clear-expired/status").json()
+    assert st["running"] is False
+    assert st["error"] is None
+    assert st["progress"] == {"done": 2, "total": 2}
+    assert st["last_result"]["cleared"] == 2          # ended-1 + gone-1
+    assert st["last_result"]["by_verdict"] == {
+        "ended": 1, "sold": 1, "delisted": 0,
+        "still_live": 1, "unverifiable": 0, "skipped": 0,
+    }
+    assert st["last_result"]["still_live_keys"] == ["buyee_yahoo:phantom"]
+
+    # db 是真的（不 mock store）：清了誰、修了誰的帳，逐筆對
+    assert app_mod.store.get_signal("buyee_yahoo:gone-1")["state"] == "expired"
+    assert app_mod.store.get_signal("buyee_yahoo:ended-1")["state"] == "expired"
+    assert app_mod.store.get_signal("buyee_yahoo:phantom")["state"] == "watching"
     assert app_mod.store.get_signal("buyee_yahoo:live-1")["state"] == "watching"
+    assert fake.closed is True, "背景任務結束必須關掉 verifier 的資源"
 
 
-def test_clear_expired_endpoint_is_idempotent(client):
-    """清完就不在原 state，重按第二次回 cleared: 0（工程原則二）。"""
+def test_clear_expired_endpoint_does_not_start_twice(client, monkeypatch):
+    """防重入：已經在跑（例如 CLI 那邊）就回 started:false，
+    不建 verifier、不動任何一列——兩條驗證管線同時打同一批站只會更快被擋。"""
+    c, app_mod = client
+    _insert(app_mod.store, "buyee_yahoo:gone-1")
+    _mark_gone(app_mod.store, "buyee_yahoo:gone-1")
+    app_mod.store.begin_verify_clear(trigger="cli", state="watching", total=5)
+    monkeypatch.setattr(
+        app_mod, "build_page_verifier",
+        lambda _cfg: (_ for _ in ()).throw(
+            AssertionError("已在跑時不准再建 verifier")
+        ),
+    )
+
+    r = c.post("/api/signals/clear-expired", json={"state": "watching"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["started"] is False
+    assert body["running"] is True
+    assert app_mod.store.get_signal("buyee_yahoo:gone-1")["state"] == "watching"
+
+
+def test_clear_expired_endpoint_failure_does_not_stick_running(
+    client, monkeypatch
+):
+    """verifier 半路炸掉：例外照樣大聲往外傳，但狀態必須離開 running
+    （error 落地、資源關閉），不然按鈕會鎖到逾時為止。"""
+    c, app_mod = client
+    _insert(app_mod.store, "buyee_yahoo:gone-1")
+    _mark_gone(app_mod.store, "buyee_yahoo:gone-1")
+
+    class _Boom(_FakeEndpointVerifier):
+        def __call__(self, key: str, url: str) -> VerifyResult:
+            raise RuntimeError("驗證炸了")
+
+    boom = _Boom({})
+    monkeypatch.setattr(app_mod, "build_page_verifier", lambda _cfg: boom)
+
+    with pytest.raises(RuntimeError, match="驗證炸了"):
+        c.post("/api/signals/clear-expired", json={"state": "watching"})
+
+    st = app_mod.store.verify_clear_status()
+    assert st["running"] is False, "驗證炸了卻卡在 running，按鈕會鎖到逾時為止"
+    assert "驗證炸了" in (st["error"] or "")
+    assert boom.closed is True
+    # 一筆都沒清（清除寫入在驗證全數完成之後）
+    assert app_mod.store.get_signal("buyee_yahoo:gone-1")["state"] == "watching"
+
+
+def test_clear_expired_endpoint_is_idempotent(client, monkeypatch):
+    """清完就不在原 state，重按第二次的 last_result 回 cleared: 0
+    （工程原則二——非冪等寫入不可重試，所以這支刻意設計成冪等）。"""
     c, app_mod = client
     _insert(app_mod.store, "buyee_yahoo:ended-1", payload=_ENDED_PAYLOAD)
+    monkeypatch.setattr(
+        app_mod, "build_page_verifier", lambda _cfg: _FakeEndpointVerifier({})
+    )
+
     c.post("/api/signals/clear-expired", json={"state": "watching"})
-    body = c.post("/api/signals/clear-expired", json={"state": "watching"}).json()
-    assert body["cleared"] == 0
+    first = c.get("/api/signals/clear-expired/status").json()
+    assert first["last_result"]["cleared"] == 1
+
+    c.post("/api/signals/clear-expired", json={"state": "watching"})
+    again = c.get("/api/signals/clear-expired/status").json()
+    assert again["last_result"]["cleared"] == 0
 
 
 def test_clear_expired_endpoint_rejects_bad_state(client):
-    """不可清除的狀態是語意錯誤，要回 400，不是安靜地回 cleared: 0。"""
-    c, _ = client
+    """不可清除的狀態是語意錯誤，要回 400——而且要在**背景任務開跑之前**擋，
+    不是安靜地回 cleared: 0。"""
+    c, app_mod = client
     r = c.post("/api/signals/clear-expired", json={"state": "bought"})
     assert r.status_code == 400
     assert "可清除" in r.json()["detail"]
+    # 連狀態都不准動：begin 過的話按鈕會被一個不存在的任務鎖住
+    assert app_mod.store.verify_clear_status()["running"] is False
 
 
 # ---------------------------------------------------------------------------

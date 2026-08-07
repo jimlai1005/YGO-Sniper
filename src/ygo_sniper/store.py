@@ -1737,6 +1737,120 @@ class Store:
         }
 
     # ------------------------------------------------------------------
+    # 「驗證清除」的背景狀態組。與 scan_status 同一套形狀、同一個理由：
+    # 狀態落在 db 的 meta 表所以**跨行程**（CLI 在驗的時候 dashboard 看得到），
+    # 卡死防線靠 verify_clear_status 的逾時兜底（崩潰後前端能自救）。
+    # 刻意另開一組 key 而不是共用 scan_status：掃描與驗證清除是兩個獨立動作，
+    # 共用一組旗標的話「掃描中」會擋住清除按鈕（反之亦然），而兩者根本不衝突。
+    VERIFY_CLEAR_STATUS_KEY = "verify_clear_status"
+
+    def begin_verify_clear(
+        self, *, trigger: str = "dashboard", state: str = "", total: int | None = None
+    ) -> str:
+        """標記「驗證清除開始」，回傳 started_at。
+
+        直接覆寫舊狀態是刻意的（同 `begin_scan`）：卡在 running 的殘留狀態
+        不該擋住下一輪。併發保護在呼叫端（先看 `verify_clear_status`）。
+        `total` 是 gone 候選數——前端一開始就要能畫 `0/total`。
+        """
+        started = _now_iso()
+        self.set_meta(
+            self.VERIFY_CLEAR_STATUS_KEY,
+            json.dumps(
+                {
+                    "running": True,
+                    "started_at": started,
+                    "finished_at": None,
+                    "trigger": trigger,
+                    "state": state,
+                    "progress": {"done": 0, "total": total},
+                    "error": None,
+                    "result": None,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return started
+
+    def set_verify_clear_progress(self, done: int, total: int) -> None:
+        """逐筆回報驗證進度（每筆一次；一筆要 1-3 秒，寫 meta 的成本可忽略）。"""
+        cur = self._read_verify_clear_status()
+        cur["progress"] = {"done": int(done), "total": int(total)}
+        self.set_meta(
+            self.VERIFY_CLEAR_STATUS_KEY, json.dumps(cur, ensure_ascii=False)
+        )
+
+    def finish_verify_clear(
+        self,
+        started_at: str,
+        *,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        """標記「驗證清除結束」。**失敗也要呼叫**（帶 error）——
+        同 `finish_scan`：抓到例外這種還活著的失敗必須明確落成 finished + error，
+        不能讓它跟真正的崩潰長得一樣（工程原則 3）。"""
+        cur = self._read_verify_clear_status()
+        cur.update(
+            {
+                "running": False,
+                "started_at": started_at,
+                "finished_at": _now_iso(),
+                "error": error,
+                "result": result,
+            }
+        )
+        self.set_meta(
+            self.VERIFY_CLEAR_STATUS_KEY,
+            json.dumps(cur, ensure_ascii=False, default=str),
+        )
+
+    def _read_verify_clear_status(self) -> dict[str, Any]:
+        raw = self.get_meta(self.VERIFY_CLEAR_STATUS_KEY)
+        if not raw:
+            return {}
+        try:
+            val = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return val if isinstance(val, dict) else {}
+
+    def verify_clear_status(self, *, timeout_seconds: float = 1800) -> dict[str, Any]:
+        """「現在有沒有在驗」＋進度＋上一次的結果。前端輪詢這個。
+
+        逾時判定與 `scan_status` 同一個理由：驗到一半被 kill／行程重啟，
+        `finish_verify_clear` 永遠不會被呼叫——只看 running 旗標的話按鈕會
+        永遠 disabled。逾時的回 `running: false, stale: true`，前端據此放行。
+        """
+        st = self._read_verify_clear_status()
+        started_at = st.get("started_at")
+        running = bool(st.get("running")) and bool(started_at)
+        stale = False
+        age = None
+        if running:
+            age = _age_seconds(started_at)
+            # 解析不出開始時間 = 無法證明它還活著，一律當死的（讀不到 ≠ 還在跑）
+            if age is None or age > float(timeout_seconds):
+                running, stale = False, True
+
+        progress = st.get("progress")
+        if not isinstance(progress, dict):
+            progress = {"done": 0, "total": None}
+        return {
+            "running": running,
+            "stale": stale,
+            "started_at": started_at,
+            "finished_at": st.get("finished_at"),
+            "trigger": st.get("trigger"),
+            "state": st.get("state"),
+            "error": st.get("error"),
+            "elapsed_seconds": round(age, 1) if age is not None else None,
+            "timeout_seconds": float(timeout_seconds),
+            "progress": progress,
+            "last_result": st.get("result"),
+        }
+
+    # ------------------------------------------------------------------
     def expire_stale_signals(self, days: int) -> int:
         """把「很久沒再被掃到、而且你從沒動過」的訊號標成 expired，回傳筆數。
 
@@ -1769,6 +1883,35 @@ class Store:
     )
 
     # ------------------------------------------------------------------
+    def departed_candidates(
+        self, state: str, *, gone_confidence: dict[str, str] | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """把某個狀態的列分成 `{"ended": [...], "gone": [...]}` 候選。
+
+        這是候選挑選的**唯一入口**：`clear_expired_signals`（真的清）與
+        CLI `clear-departed --dry-run`（只驗不清）都走這裡。各寫一份判定的話，
+        dry-run 看到的清單和實際會被清的清單遲早漂移成兩種答案——
+        dry-run 的意義就沒了。判定本身沿用 `expiry.expiry_status`（唯一真相來源）。
+        """
+        if state not in self.CLEARABLE_STATES:
+            raise ValueError(
+                f"不可清除的狀態 {state}；可清除：{list(self.CLEARABLE_STATES)}"
+            )
+        rows = self.list_signals(state=state, limit=100_000)
+        # `confidence` 刻意不參與這個判斷：清除是**使用者按下按鈕的動作選擇**
+        # （設計文件 3.1），信心度的去處是徽章文案與確認框的警語，不是這裡的
+        # 布林值。信心度再高也只是推論——要不要清，看的是 verifier 的實證。
+        ended: list[dict[str, Any]] = []
+        gone: list[dict[str, Any]] = []
+        for r in rows:
+            kind = expiry_status(r, gone_confidence=gone_confidence).kind
+            if kind == "ended":
+                ended.append(r)
+            elif kind == "gone":
+                gone.append(r)
+        return {"ended": ended, "gone": gone}
+
+    # ------------------------------------------------------------------
     def clear_expired_signals(
         self,
         state: str,
@@ -1797,29 +1940,15 @@ class Store:
           的呼叫端自動退到只清事實，而不是退回出事故的推論清除；
           被跳過的筆數以 `by_verdict["skipped"]` 大聲回報。
 
-        候選判定沿用 `expiry.expiry_status`（唯一真相來源），不在這裡重寫一套
-        SQL 條件：判準散成兩份，遲早會漂移成兩種答案。
+        候選判定沿用 `expiry.expiry_status`（唯一真相來源），挑選走
+        `departed_candidates`（與 CLI dry-run 共用同一份，不各寫一套）。
 
         回傳 `{"cleared", "keys", "by_source", "by_verdict": {"ended", "sold",
         "delisted", "still_live", "unverifiable", "skipped"}, "still_live_keys"}`
         ——照 `purge_signals` 的慣例回 dict，呼叫端要能把細節印給使用者看。
         """
-        if state not in self.CLEARABLE_STATES:
-            raise ValueError(
-                f"不可清除的狀態 {state}；可清除：{list(self.CLEARABLE_STATES)}"
-            )
-        rows = self.list_signals(state=state, limit=100_000)
-        # `confidence` 刻意不參與這個判斷：清除是**使用者按下按鈕的動作選擇**
-        # （設計文件 3.1），信心度的去處是徽章文案與確認框的警語，不是這裡的
-        # 布林值。信心度再高也只是推論——要不要清，看的是 verifier 的實證。
-        ended: list[dict[str, Any]] = []
-        gone: list[dict[str, Any]] = []
-        for r in rows:
-            kind = expiry_status(r, gone_confidence=gone_confidence).kind
-            if kind == "ended":
-                ended.append(r)
-            elif kind == "gone":
-                gone.append(r)
+        cand = self.departed_candidates(state, gone_confidence=gone_confidence)
+        ended, gone = cand["ended"], cand["gone"]
 
         by_verdict = {
             "ended": len(ended), "sold": 0, "delisted": 0,
