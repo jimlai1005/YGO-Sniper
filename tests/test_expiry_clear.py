@@ -986,6 +986,151 @@ def test_clear_expired_endpoint_rejects_bad_state(client):
 
 
 # ---------------------------------------------------------------------------
+# CLI `clear-departed`：與端點走同一條 store 路徑；--dry-run 只驗不寫
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def cli_env(tmp_path, monkeypatch):
+    """臨時 db 的 CLI 環境：`cli.load_config` 指到 tmp，回傳 (runner, store)。
+
+    承重的斷言在最後：CLI 測試絕不能碰正式庫 data/sniper.db。
+    """
+    import ygo_sniper.cli as cli_mod
+    import ygo_sniper.config as config_mod
+
+    db = tmp_path / "cli.db"
+    base = config_mod.load_config()
+    test_cfg = replace(base, storage={**base.storage, "db_path": str(db)})
+    monkeypatch.setattr(cli_mod, "load_config", lambda: test_cfg)
+    assert test_cfg.db_path == db, "CLI 測試的 cfg 沒有指到 tmp db"
+
+    from typer.testing import CliRunner
+
+    return CliRunner(), Store(db), cli_mod
+
+
+def _seed_departed_mix(store: Store) -> None:
+    """一組涵蓋四種 verdict 去向的標的：SOLD／STILL_LIVE／UNVERIFIABLE 的
+    gone 候選＋一筆 ended（事實）＋一筆在架的。"""
+    _insert(store, "buyee_yahoo:gone-1")
+    _mark_gone(store, "buyee_yahoo:gone-1")
+    _insert(store, "buyee_yahoo:phantom")
+    _mark_gone(store, "buyee_yahoo:phantom")
+    _insert(store, "buyee_yahoo:blocked")
+    _mark_gone(store, "buyee_yahoo:blocked")
+    _insert(store, "buyee_yahoo:ended-1", payload=_ENDED_PAYLOAD)
+    _insert(store, "buyee_yahoo:live-1")
+
+
+_MIX_VERDICTS = {
+    "buyee_yahoo:gone-1": "SOLD",
+    "buyee_yahoo:phantom": "STILL_LIVE",
+    "buyee_yahoo:blocked": "UNVERIFIABLE",
+}
+
+
+def test_cli_clear_departed_dry_run_verifies_but_never_writes(
+    cli_env, monkeypatch
+):
+    """--dry-run：逐筆印 verdict 表、**一個 byte 都不寫庫**——
+    不清、不修帳（STILL_LIVE 的 disappeared_at 原封不動），使用者先看再決定。"""
+    runner, store, cli_mod = cli_env
+    _seed_departed_mix(store)
+    fake = _FakeEndpointVerifier(_MIX_VERDICTS)
+    monkeypatch.setattr(
+        "ygo_sniper.verify_departed.build_page_verifier", lambda _cfg: fake
+    )
+
+    result = runner.invoke(
+        cli_mod.app, ["clear-departed", "--state", "watching", "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    # 三個 gone 候選都被驗、verdict 都有印
+    assert sorted(fake.calls) == sorted(_MIX_VERDICTS)
+    for verdict in ("SOLD", "STILL_LIVE", "UNVERIFIABLE"):
+        assert verdict in result.output
+    # ended（事實）不花驗證流量，但要讓使用者知道非 dry-run 會清它
+    assert "end_time 已過" in result.output
+    # UNVERIFIABLE 要大聲：筆數＋原因
+    assert "無法驗證 1 筆" in result.output
+    # 不寫庫：狀態、離場標記、帳本全部原封不動
+    for key in ("buyee_yahoo:gone-1", "buyee_yahoo:phantom",
+                "buyee_yahoo:blocked", "buyee_yahoo:ended-1",
+                "buyee_yahoo:live-1"):
+        assert store.get_signal(key)["state"] == "watching"
+    with sqlite3.connect(store.db_path) as c:
+        gone, revived = c.execute(
+            "SELECT disappeared_at, revived_count FROM listing_obs WHERE key = ?",
+            ("buyee_yahoo:phantom",),
+        ).fetchone()
+    assert gone is not None and revived == 0
+    assert fake.closed is True
+
+
+def test_cli_clear_departed_applies_via_the_same_store_path(
+    cli_env, monkeypatch
+):
+    """非 dry-run 與端點走**同一條** store 路徑（clear_expired_signals）：
+    清實證、STILL_LIVE 修帳、UNVERIFIABLE 保留＋大聲回報。"""
+    runner, store, cli_mod = cli_env
+    _seed_departed_mix(store)
+    fake = _FakeEndpointVerifier(_MIX_VERDICTS)
+    monkeypatch.setattr(
+        "ygo_sniper.verify_departed.build_page_verifier", lambda _cfg: fake
+    )
+
+    result = runner.invoke(cli_mod.app, ["clear-departed", "--state", "watching"])
+
+    assert result.exit_code == 0, result.output
+    assert store.get_signal("buyee_yahoo:gone-1")["state"] == "expired"
+    assert store.get_signal("buyee_yahoo:gone-1")["cleared_from"] == "watching"
+    assert store.get_signal("buyee_yahoo:ended-1")["state"] == "expired"
+    assert store.get_signal("buyee_yahoo:phantom")["state"] == "watching"
+    assert store.get_signal("buyee_yahoo:blocked")["state"] == "watching"
+    assert store.get_signal("buyee_yahoo:live-1")["state"] == "watching"
+    with sqlite3.connect(store.db_path) as c:
+        gone, revived = c.execute(
+            "SELECT disappeared_at, revived_count FROM listing_obs WHERE key = ?",
+            ("buyee_yahoo:phantom",),
+        ).fetchone()
+    assert gone is None and revived == 1
+    # 分項結果與 UNVERIFIABLE 摘要都要印出來
+    assert "已清 2 筆" in result.output
+    assert "無法驗證 1 筆" in result.output
+    assert fake.closed is True
+
+
+def test_cli_clear_departed_rejects_bad_state(cli_env):
+    runner, _store, cli_mod = cli_env
+    result = runner.invoke(cli_mod.app, ["clear-departed", "--state", "bought"])
+    assert result.exit_code != 0
+    assert "不可清除" in result.output
+
+
+def test_cli_clear_departed_closes_verifier_even_when_it_blows_up(
+    cli_env, monkeypatch
+):
+    """驗到一半炸掉：例外大聲往外傳（exit code != 0），但資源要關。"""
+    runner, store, cli_mod = cli_env
+    _seed_departed_mix(store)
+
+    class _Boom(_FakeEndpointVerifier):
+        def __call__(self, key: str, url: str) -> VerifyResult:
+            raise RuntimeError("驗證炸了")
+
+    boom = _Boom({})
+    monkeypatch.setattr(
+        "ygo_sniper.verify_departed.build_page_verifier", lambda _cfg: boom
+    )
+
+    result = runner.invoke(cli_mod.app, ["clear-departed", "--state", "watching"])
+
+    assert result.exit_code != 0
+    assert boom.closed is True
+    assert store.get_signal("buyee_yahoo:gone-1")["state"] == "watching"
+
+
+# ---------------------------------------------------------------------------
 # 掃描流程：還原必須真的被接進去（不是「有一支方法可以呼叫」）
 # ---------------------------------------------------------------------------
 class _OneListingSource:

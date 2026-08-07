@@ -3524,5 +3524,99 @@ def expiry_stats():
     console.print(t2)
 
 
+@app.command()
+def clear_departed(
+    state: str = typer.Option(
+        "watching", help="要清哪個分頁（watching / asked_seller / offer_sent）"
+    ),
+    dry_run: bool = typer.Option(
+        False, help="只驗證並逐筆列出 verdict，一個 byte 都不寫庫"
+    ),
+):
+    """清除已離場標的——gone 候選逐筆開商品頁驗證，只清有實證的。
+
+    2026-08-07 事故的修法：`disappeared_at` 推論一鍵誤清 43 筆（誤殺率 100%），
+    改為**驗證取代推論**。ended（end_time 已過）是事實直接清；gone 候選開頁
+    驗證，只清 SOLD／DELISTED；STILL_LIVE 解除離場標記；UNVERIFIABLE
+    （被擋／讀不到）一律保留並大聲回報——讀不到 ≠ 已離場。
+
+    非 dry-run 與 dashboard 的清除按鈕走**同一條** store 路徑
+    （`clear_expired_signals` + `build_page_verifier`），dry-run 的候選也來自
+    同一個入口（`departed_candidates`）——兩邊看到的清單不會漂移。
+    """
+    from .expiry import gone_confidence_from_config
+    from .verify_departed import VerifyResult, build_page_verifier
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    gone_conf = gone_confidence_from_config(cfg)
+    try:
+        cand = store.departed_candidates(state, gone_confidence=gone_conf)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+    gone, ended = cand["gone"], cand["ended"]
+    if not gone and not ended:
+        console.print(f"[dim]{state} 分頁沒有離場候選，沒有事可做。[/dim]")
+        return
+
+    titles = {r["key"]: str(r.get("title") or "") for r in gone}
+    results: list[VerifyResult] = []
+    verifier = build_page_verifier(cfg)
+    try:
+        if dry_run:
+            for r in gone:
+                results.append(verifier(r["key"], str(r.get("url") or "")))
+        else:
+
+            def _recording(key: str, url: str) -> VerifyResult:
+                res = verifier(key, url)
+                results.append(res)
+                return res
+
+            outcome = store.clear_expired_signals(
+                state, gone_confidence=gone_conf, verifier=_recording
+            )
+    finally:
+        verifier.close()
+
+    if dry_run:
+        t = Table(title=f"clear-departed dry-run（{state}；只驗證，未寫庫）")
+        t.add_column("標的")
+        t.add_column("標題", max_width=30)
+        t.add_column("verdict")
+        t.add_column("說明", max_width=44)
+        for res in results:
+            t.add_row(res.key, titles.get(res.key, "")[:30], res.verdict, res.detail)
+        console.print(t)
+        would = sum(1 for r in results if r.clears)
+        console.print(
+            f"[dim]另有 ended（end_time 已過）{len(ended)} 筆——那是事實，"
+            "不花驗證流量，非 dry-run 會直接清。[/dim]"
+        )
+        console.print(
+            f"[dim]非 dry-run 將清 {would + len(ended)} 筆"
+            f"（頁面實證 {would}＋ended {len(ended)}）。[/dim]"
+        )
+    else:
+        bv = outcome["by_verdict"]
+        console.print(
+            f"已清 {outcome['cleared']} 筆"
+            f"（ended {bv['ended']}、售出 {bv['sold']}、下架 {bv['delisted']}）"
+            f" · 仍在架 {bv['still_live']} 筆已解除離場標記"
+        )
+
+    # 讀不到的要大聲（CLAUDE.md 第五節）：dry-run 与非 dry-run 都印
+    unver = [r for r in results if r.verdict == "UNVERIFIABLE"]
+    if unver:
+        console.print(
+            f"[yellow]無法驗證 {len(unver)} 筆——讀不到 ≠ 已離場，全部保留：[/yellow]"
+        )
+        for r in unver:
+            console.print(f"[dim]· {r.key}｜{r.detail}[/dim]")
+    else:
+        console.print("[dim]無法驗證 0 筆。[/dim]")
+
+
 if __name__ == "__main__":
     app()
