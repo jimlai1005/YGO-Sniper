@@ -647,6 +647,125 @@ def test_shipped_config_actually_closes_the_broken_bucket(cfg):
     assert "10-49" in EvidenceGate.from_config(cfg).reject_n_buckets
 
 
+# ---------------------------------------------------------------------------
+# 8b. 檔位（profile）：出價檔 vs 通知檔
+#
+# 通知與出價的錯誤代價不對稱：通知錯了使用者看一眼就知道，出價上限錯了會
+# 花錯真錢。所以通知檔只放寬「校準政策」那兩道（破口桶、校準殘差門檻），
+# 語意閘門（分數已知、L1/L2）兩檔一樣硬。**bidding 檔是紅線：行為一項都不准變。**
+# ---------------------------------------------------------------------------
+from ygo_sniper.bidding import (  # noqa: E402
+    DEFAULT_NOTIFY_MIN_CALIBRATION_SAMPLES,
+    PROFILE_BIDDING,
+    PROFILE_NOTIFY,
+    bidding_gate_note,
+)
+
+
+def test_bidding_profile_is_the_default_and_unchanged(cfg):
+    """回歸釘子 1：不指定檔位 ＝ bidding 檔，且每一項門檻與改動前一模一樣。"""
+    default = EvidenceGate.from_config(cfg)
+    explicit = EvidenceGate.from_config(cfg, profile=PROFILE_BIDDING)
+    assert default == explicit
+    assert default.require_known_grade is True
+    assert default.require_card_specific_level is True
+    assert default.min_effective_samples == 1
+    assert default.min_calibration_samples == 50
+    assert default.reject_n_buckets == ("10-49",)
+
+
+def test_bidding_path_still_rejects_broken_bucket_and_thin_backing(cfg, fx):
+    """回歸釘子 2：**出價路徑**（max_bid_jpy）對兩種校準政策失格的行為不變。
+
+    落在 `10-49` 桶 → 仍拒絕；校準殘差 30（< 50）→ 仍拒絕。
+    這正是通知檔放行的那兩種輸入——出價那一側一步都不能跟著鬆。
+    """
+    c = max_bid_jpy(est(n_effective=12), cfg, fx, site=Site.BUYEE_YAHOO)
+    assert not c.ok and c.max_bid_jpy is None
+    assert "10-49" in c.reason and "校準已知壞掉" in c.reason
+
+    c2 = max_bid_jpy(est(calibration_group_n=30), cfg, fx, site=Site.BUYEE_YAHOO)
+    assert not c2.ok and c2.max_bid_jpy is None
+    assert "校準殘差只有 30 筆" in c2.reason
+
+
+def test_notify_profile_relaxes_only_the_calibration_policy(cfg):
+    """通知檔與出價檔的差集必須**恰好**是那兩道校準政策，一項不多。"""
+    notify = EvidenceGate.from_config(cfg, profile=PROFILE_NOTIFY)
+    bid = EvidenceGate.from_config(cfg)
+    # 語意閘門：兩檔一樣硬
+    assert notify.require_known_grade == bid.require_known_grade is True
+    assert notify.require_card_specific_level == bid.require_card_specific_level is True
+    assert notify.min_effective_samples == bid.min_effective_samples
+    # 校準政策：通知檔放寬
+    assert notify.reject_n_buckets == ()
+    assert notify.min_calibration_samples == DEFAULT_NOTIFY_MIN_CALIBRATION_SAMPLES == 30
+
+
+def test_notify_profile_passes_what_bidding_rejects_on_calibration_policy(cfg):
+    notify = EvidenceGate.from_config(cfg, profile=PROFILE_NOTIFY)
+    bid = EvidenceGate.from_config(cfg)
+    broken = est(n_effective=12)               # 10-49 破口桶
+    thin = est(calibration_group_n=30)         # 殘差 30 < 出價門檻 50
+    assert bid.check(broken) is not None and notify.check(broken) is None
+    assert bid.check(thin) is not None and notify.check(thin) is None
+
+
+def test_notify_profile_keeps_the_semantic_gates_hard(cfg):
+    """分數未知、L3——估不出分數或連卡都認不出來的，通知檔也不給數字。"""
+    notify = EvidenceGate.from_config(cfg, profile=PROFILE_NOTIFY)
+    assert notify.check(est(grade=None)) is not None
+    assert notify.check(est(level="L3", level_label="稀有度層", n_effective=325)) is not None
+    # 30 是門檻不是擺設：殘差 29 仍然擋
+    assert notify.check(est(calibration_group_n=29)) is not None
+
+
+def test_bidding_gate_note_names_the_reason_briefly(cfg):
+    """「放寬的必須看得見」的原料：一句短話講出出價檔為什麼會拒。"""
+    bid = EvidenceGate.from_config(cfg)
+    assert bidding_gate_note(bid, est()) is None            # 出價檔也收 → 不標
+    note = bidding_gate_note(bid, est(n_effective=12))
+    assert note is not None and "10-49" in note and "拒絕桶" in note
+    note2 = bidding_gate_note(bid, est(calibration_group_n=30))
+    assert note2 is not None and "30" in note2 and "50" in note2
+
+
+def test_unknown_profile_falls_back_to_bidding_loudly(cfg, capsys):
+    """打錯檔位名必須退回**最嚴**的 bidding 檔並大聲警告——fail closed。"""
+    g = EvidenceGate.from_config(cfg, profile="yolo")
+    assert g == EvidenceGate.from_config(cfg)
+    assert "yolo" in capsys.readouterr().out
+
+
+def test_notify_profile_reads_and_validates_its_own_config_keys(capsys):
+    """notify 檔的兩個參數來自 `notify.evidence_gate`，非法值大聲退回 notify 預設。"""
+    class FakeCfg:
+        bidding = {}
+        notify = {"evidence_gate": {
+            "min_calibration_samples": "卅",
+            "reject_n_buckets": ["10-49", "bogus"],
+        }}
+
+    g = EvidenceGate.from_config(FakeCfg(), profile=PROFILE_NOTIFY)
+    assert g.min_calibration_samples == DEFAULT_NOTIFY_MIN_CALIBRATION_SAMPLES
+    assert g.reject_n_buckets == ("10-49",)     # 合法桶保留、亂寫的丟掉
+    out = capsys.readouterr().out
+    assert "notify.evidence_gate" in out and "bogus" in out
+
+
+def test_notify_config_keys_do_not_leak_into_the_bidding_profile():
+    """`notify.evidence_gate` 就算設得再鬆，也**碰不到** bidding 檔（紅線）。"""
+    class FakeCfg:
+        bidding = {}
+        notify = {"evidence_gate": {
+            "min_calibration_samples": 0, "reject_n_buckets": [],
+        }}
+
+    g = EvidenceGate.from_config(FakeCfg())
+    assert g.min_calibration_samples == 50
+    assert g.reject_n_buckets == ("10-49",)
+
+
 def test_a_description_sourced_grade_cannot_be_called_strong():
     """分數從商品描述撈來的 → 證據等級降到 moderate。
 

@@ -374,6 +374,9 @@ def format_seller_new(match, dashboard_url: str) -> str:
     2. 賣家沒有分數時明講「未達評分門檻」，不印 0 分（見 `_seller_head`）。
     3. caveat 直接進訊息本文（不是附註）：同儕只有 1 個賣家、標題疑似變體
        這種前提，在手機上看不到就等於不存在。
+    4. 通知檔位放行、但**出價檔會拒**的估價（`bidding_reject_note`）要掛
+       ⚠️「不是出價依據」——放寬的必須看得見。這則訊息**永遠不含出價上限**：
+       通知給的是「模型合理價＋折價幅度」，不是「你可以出到多少」。
     """
     from .notify_rules import SOURCE_MODEL
     from .valuation import venue_label
@@ -402,6 +405,14 @@ def format_seller_new(match, dashboard_url: str) -> str:
             "⚠️ 這是**模型絕對值**、不是賣家 alpha：它只回答「這一筆值不值得你看一眼」，"
             "**不進 Seller Alpha 分數**（分數永遠只用同儕相對）。請人工複核。",
         ]
+        # 通知檔位放行、但出價檔會拒的估價：放寬的必須看得見。這一行不可省略
+        # ——通知刻意比出價鬆（錯誤代價不對稱），鬆在哪裡要送到使用者眼前，
+        # 而且要明說這個數字**不能**拿去當出價依據。
+        if match.bidding_reject_note:
+            lines.append(
+                f"⚠️ <b>出價檔會拒收這份估價</b>（{_esc(str(match.bidding_reject_note))}）"
+                "：僅供看一眼，不是出價依據",
+            )
     else:
         lines += [
             "判定來源 <b>同儕相對（強）</b>",

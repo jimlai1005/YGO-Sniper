@@ -91,7 +91,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -112,6 +112,23 @@ DEFAULT_REQUIRE_KNOWN_GRADE = True
 #: 依據見模組頂註第 2 道閘門：`10-49` 這一桶實測下尾違反率 29%（名目 10%），
 #: 六種分群鍵全部修不好，因為問題不在分群而在點估計本身有段狀偏誤。
 DEFAULT_REJECT_N_BUCKETS: tuple[str, ...] = ("10-49",)
+
+#: 證據閘門的兩個檔位（profile）。差別**只在「校準政策」那兩道**（破口桶、
+#: 校準殘差門檻）；語意閘門（分數已知、L1/L2、min_effective_samples）兩檔一樣硬。
+#: 依據：通知與出價的**錯誤代價不對稱**——通知錯了使用者自己看一眼就知道，
+#: 出價上限錯了會花錯真錢。用出價的閘門擋通知，等於把全庫證據最強的標的
+#: 靜默丟掉（誤殺是靜默的，CLAUDE.md 第一節；代價不對稱見第四節末段）。
+#: ⚠️ `bidding` 檔是紅線：它的判定路徑、閾值、拒絕行為不隨 notify 檔存在而改變。
+PROFILE_BIDDING = "bidding"
+PROFILE_NOTIFY = "notify"
+
+#: notify 檔的預設值（settings.yaml `notify.evidence_gate` 沒設時用；依據見該區塊註解）。
+#: 2026-08-07 逐筆重放 80 筆 seller_unpriced：W3=11 筆被破口桶擋住，但它們是
+#: 全庫證據最強的標的（青眼の白龍 L1 n=25、真紅眼 n=20、エクゾディア n=13）；
+#: W5=5 筆校準殘差 30 < 出價門檻 50。30 = `valuation.min_group_calibration`
+#: （估價層自己的「夠格獨立成群」下限）——低於它連估價層都認為區間站不住。
+DEFAULT_NOTIFY_MIN_CALIBRATION_SAMPLES = 30
+DEFAULT_NOTIFY_REJECT_N_BUCKETS: tuple[str, ...] = ()
 
 #: 「有這張卡自己的成交」的層級。與 `valuation.Estimate.has_card_specific_evidence`
 #: 同一個定義——兩邊各寫一份就會有一天分岔。
@@ -451,9 +468,17 @@ class EvidenceGate:
     reject_n_buckets: tuple[str, ...] = DEFAULT_REJECT_N_BUCKETS
 
     @classmethod
-    def from_config(cls, cfg: Any) -> EvidenceGate:
+    def from_config(cls, cfg: Any, profile: str = PROFILE_BIDDING) -> EvidenceGate:
+        """讀出指定**檔位**的閘門。不給 `profile` ＝ `bidding` 檔（最嚴，行為與
+        引入檔位之前完全相同——出價那一側的既有呼叫端一行都不用改）。
+
+        `notify` 檔以 bidding 檔為底，只覆寫「校準政策」那兩道
+        （`notify.evidence_gate` 區塊；沒設就用 notify 預設）。語意閘門刻意
+        **沒有** notify 專屬鍵——結構上就寫不出一個語意閘門比出價鬆的通知檔。
+        打錯檔位名退回 bidding 檔並大聲警告（fail closed：錯字不該讓閘門變鬆）。
+        """
         b = dict(getattr(cfg, "bidding", None) or {})
-        return cls(
+        base = cls(
             min_effective_samples=_int_setting(
                 b, "min_effective_samples", DEFAULT_MIN_EFFECTIVE_SAMPLES
             ),
@@ -467,6 +492,27 @@ class EvidenceGate:
                 b.get("require_known_grade", DEFAULT_REQUIRE_KNOWN_GRADE)
             ),
             reject_n_buckets=_bucket_setting(b, "reject_n_buckets"),
+        )
+        if profile == PROFILE_BIDDING:
+            return base
+        if profile != PROFILE_NOTIFY:
+            print(
+                f"[warn] EvidenceGate 沒有 {profile!r} 這個檔位"
+                f"（合法值：{PROFILE_BIDDING}／{PROFILE_NOTIFY}），"
+                f"改用最嚴的 {PROFILE_BIDDING} 檔"
+            )
+            return base
+        n = dict((dict(getattr(cfg, "notify", None) or {})).get("evidence_gate") or {})
+        return replace(
+            base,
+            min_calibration_samples=_int_setting(
+                n, "min_calibration_samples",
+                DEFAULT_NOTIFY_MIN_CALIBRATION_SAMPLES, prefix="notify.evidence_gate",
+            ),
+            reject_n_buckets=_bucket_setting(
+                n, "reject_n_buckets",
+                default=DEFAULT_NOTIFY_REJECT_N_BUCKETS, prefix="notify.evidence_gate",
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -561,39 +607,48 @@ class EvidenceGate:
         return None
 
 
-def _int_setting(cfg_block: dict[str, Any], key: str, default: int) -> int:
+def _int_setting(
+    cfg_block: dict[str, Any], key: str, default: int, *, prefix: str = "bidding"
+) -> int:
     raw = cfg_block.get(key, default)
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        print(f"[warn] bidding.{key}={raw!r} 不是整數，改用 {default}")
+        print(f"[warn] {prefix}.{key}={raw!r} 不是整數，改用 {default}")
         return default
     if value < 0:
-        print(f"[warn] bidding.{key}={value} 是負數，改用 {default}")
+        print(f"[warn] {prefix}.{key}={value} 是負數，改用 {default}")
         return default
     return value
 
 
-def _bucket_setting(cfg_block: dict[str, Any], key: str) -> tuple[str, ...]:
+def _bucket_setting(
+    cfg_block: dict[str, Any],
+    key: str,
+    *,
+    default: tuple[str, ...] = DEFAULT_REJECT_N_BUCKETS,
+    prefix: str = "bidding",
+) -> tuple[str, ...]:
     """讀「要拒絕哪些 n 分桶」。**打錯的桶名一律大聲警告**（不靜默）。
 
     寫錯一個桶名的後果是那道閘門安靜地變成空門——使用者以為破口被擋著，
     其實沒有。所以桶名必須對得上 `valuation.N_BUCKETS` 的標籤，對不上就丟掉
-    並印警告；整個鍵沒設時才用預設值（`DEFAULT_REJECT_N_BUCKETS`）。
+    並印警告；整個鍵沒設時才用預設值（`default`，出價檔是
+    `DEFAULT_REJECT_N_BUCKETS`、通知檔是空 tuple）。
     設成空 list 是合法的「我知道風險、我要關掉這道閘門」。
     """
     from .valuation import N_BUCKETS
 
     if key not in cfg_block:
-        return DEFAULT_REJECT_N_BUCKETS
+        return default
     raw = cfg_block.get(key)
     if raw is None:
         return ()
     if isinstance(raw, str):
         raw = [raw]
     if not isinstance(raw, (list, tuple)):
-        print(f"[warn] bidding.{key}={raw!r} 不是清單，改用 {list(DEFAULT_REJECT_N_BUCKETS)}")
-        return DEFAULT_REJECT_N_BUCKETS
+        print(f"[warn] {prefix}.{key}={raw!r} 不是清單，改用 {list(default)}")
+        return default
     valid = {label for _upper, label in N_BUCKETS}
     out: list[str] = []
     for item in raw:
@@ -602,7 +657,7 @@ def _bucket_setting(cfg_block: dict[str, Any], key: str) -> tuple[str, ...]:
             out.append(name)
         else:
             print(
-                f"[warn] bidding.{key} 裡的 {name!r} 不是合法的 n 分桶名"
+                f"[warn] {prefix}.{key} 裡的 {name!r} 不是合法的 n 分桶名"
                 f"（合法值：{sorted(valid)}），已忽略"
             )
     return tuple(out)
@@ -619,6 +674,30 @@ def _calibration_backing(estimate: Any) -> int:
     if group_n:
         return group_n
     return int(getattr(estimate, "calibration_n", 0) or 0)
+
+
+def bidding_gate_note(gate: EvidenceGate, estimate: Any) -> str | None:
+    """**出價檔**對這份估價的判定，壓成一句短話（None ＝ 出價檔也會收）。
+
+    給通知檔位當跨檔對照用：「放寬的必須看得見」——通知檔放行、但出價檔
+    會拒的估價，訊息上要掛 ⚠️ caveat，這裡就是那句話的原料。`gate` 必須是
+    **bidding 檔**的閘門（不能拿通知檔自問自答）。
+
+    前置條件：呼叫端已用通知檔放行這份估價。兩檔的語意閘門相同，所以出價檔
+    的拒絕理由只可能是「校準政策」那兩道——短句只寫這兩種。萬一走到別的
+    （代表兩檔語意分岔了，不該發生），退回長理由的第一段，寧可醜也不靜默漏標。
+    完整長文（dashboard 用）請直接呼叫 `gate.check(estimate)`。
+    """
+    reason = gate.check(estimate)
+    if reason is None:
+        return None
+    broken = gate.broken_bucket(estimate)
+    if broken:
+        return f"校準樣本落在出價拒絕桶（{broken}）"
+    backing = _calibration_backing(estimate)
+    if backing < gate.min_calibration_samples:
+        return f"校準殘差 {backing} 筆＜出價門檻 {gate.min_calibration_samples} 筆"
+    return reason.split("：", 1)[0].replace("*", "")
 
 
 #: 證據強度的三級與人話標籤。**分級規則放後端**：前端自己判一份，
@@ -1356,10 +1435,15 @@ __all__ = [
     "hours_until_end",
     "DEFAULT_MIN_CALIBRATION_SAMPLES",
     "DEFAULT_MIN_EFFECTIVE_SAMPLES",
+    "DEFAULT_NOTIFY_MIN_CALIBRATION_SAMPLES",
+    "DEFAULT_NOTIFY_REJECT_N_BUCKETS",
     "DEFAULT_REQUIRE_CARD_SPECIFIC_LEVEL",
     "DEFAULT_REJECT_N_BUCKETS",
     "DEFAULT_REQUIRE_KNOWN_GRADE",
     "DEFAULT_TARGET_MARGIN",
+    "PROFILE_BIDDING",
+    "PROFILE_NOTIFY",
+    "bidding_gate_note",
     "EBAY_PROXY_BID_FINDING",
     "HONESTY_NOTES",
     "LIVE_AUCTION_KIND",

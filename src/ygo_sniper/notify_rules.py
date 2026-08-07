@@ -31,12 +31,18 @@ dashboard 回答「有什麼」，推播只回答一件事：「現在有沒有�
 只有 1 筆成交，同卡×同稀有度×同分數的同儕在結構上就湊不出來。
 
 所以現在：**同儕算得出來就用同儕（強）；算不出來改用模型估值（弱），但要過
-`bidding.EvidenceGate` 那四道閘門，而且折價門檻更嚴**。三件事情必須同時成立，
-少一件這個 fallback 就會變回「主動製造假 alpha」的那台機器：
+`bidding.EvidenceGate` 的證據閘門（通知檔位），而且折價門檻更嚴**。三件事情必須
+同時成立，少一件這個 fallback 就會變回「主動製造假 alpha」的那台機器：
 
-1. **閘門引用既有的那一份，不另訂標準**（`rules.gate` 就是 `EvidenceGate.from_config`）：
-   估價層級 L1／L2、分數已知、校準樣本足夠、不在破口桶。擋下來的**仍然不推**
-   ——改走規則 3b（「需要你看一眼」），而不是硬給一個折價數字。
+1. **閘門引用既有的那一份，不另訂標準**（`rules.gate` 就是
+   `EvidenceGate.from_config(cfg, profile="notify")`）：語意閘門與出價檔一樣硬
+   （估價層級 L1／L2、分數已知），只放寬「校準政策」兩道（破口桶不拒收、
+   校準殘差門檻 30；2026-08-07 重放 80 筆 unpriced，W3=11＋W5=5 筆被出價檔的
+   校準政策擋掉，而它們是全庫證據最強的標的——通知與出價的錯誤代價不對稱）。
+   擋下來的**仍然不推**——改走規則 3b（「需要你看一眼」），而不是硬給一個
+   折價數字。**放寬的必須看得見**：通知檔放行、但出價檔會拒的，訊息帶
+   ⚠️「不是出價依據」caveat（`Match.bidding_reject_note`）。出價那一側
+   （`bidding.max_bid_jpy`）永遠走 bidding 檔，不受此影響。
 2. **訊息必須標示判定來源**：同儕相對（👤，強）vs 模型估值（🤖，弱）＋
    「為什麼沒有同儕」。兩種在手機上要能一眼分辨。
 3. **絕不回饋到 Seller Alpha 分數**。賣家評分維持只用同儕相對，這是第二棒
@@ -88,11 +94,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .bidding import (
+    DEFAULT_NOTIFY_MIN_CALIBRATION_SAMPLES,
+    DEFAULT_NOTIFY_REJECT_N_BUCKETS,
     PRICE_DYNAMICS_HOURS,
+    PROFILE_NOTIFY,
     EvidenceGate,
     actionable_window_hours,
     auction_room_value,
     auction_tier,
+    bidding_gate_note,
     ceiling_value_of,
     hours_until_end,
     is_live_auction,
@@ -237,10 +247,19 @@ class NotifyRules:
     seller_unpriced_enabled: bool = True
     #: 規則 3b 一輪的上限。**0 ＝ 一則都不送**（見常數註）。
     seller_unpriced_max_per_run: int = DEFAULT_SELLER_UNPRICED_MAX_PER_RUN
-    #: 模型 fallback 的證據閘門。**引用 `bidding.EvidenceGate`，不另訂一套標準**：
-    #: 出價那一側已經為這四道閘門各量過一次實測依據，推播這一側再寫一份門檻，
-    #: 兩邊遲早分岔（工程原則 1）。frozen dataclass，共用同一個預設實例是安全的。
-    gate: EvidenceGate = EvidenceGate()
+    #: 模型 fallback 的證據閘門——`bidding.EvidenceGate` 的**通知檔**（notify
+    #: profile），不是另訂的標準：語意閘門（分數已知、L1/L2）與出價檔一樣硬，
+    #: 只放寬「校準政策」那兩道（破口桶不拒收、校準殘差門檻 30）。依據：通知與
+    #: 出價的錯誤代價不對稱（2026-08-07 重放 80 筆 unpriced，W3=11、W5=5——
+    #: 被出價檔擋掉的正是全庫證據最強的標的）。frozen dataclass，共用預設實例安全。
+    gate: EvidenceGate = EvidenceGate(
+        min_calibration_samples=DEFAULT_NOTIFY_MIN_CALIBRATION_SAMPLES,
+        reject_n_buckets=DEFAULT_NOTIFY_REJECT_N_BUCKETS,
+    )
+    #: **出價檔**的閘門，只用來做跨檔對照（「出價檔會拒」的 ⚠️ 標記）。
+    #: 必須與 bidding.py 真正在用的那一份同源（`EvidenceGate.from_config(cfg)`），
+    #: 不能在 notify 這一側自己拍一份門檻（工程原則 1）。
+    bidding_gate: EvidenceGate = EvidenceGate()
 
     @classmethod
     def from_config(cls, cfg: Any) -> NotifyRules:
@@ -262,7 +281,8 @@ class NotifyRules:
                 unpriced, f"rules.{RULE_SELLER_UNPRICED}.max_per_run",
                 DEFAULT_SELLER_UNPRICED_MAX_PER_RUN,
             ),
-            gate=EvidenceGate.from_config(cfg),
+            gate=EvidenceGate.from_config(cfg, profile=PROFILE_NOTIFY),
+            bidding_gate=EvidenceGate.from_config(cfg),
             seller_min_discount=_float_setting(
                 seller, f"rules.{RULE_SELLER_NEW}.min_discount",
                 DEFAULT_SELLER_MIN_DISCOUNT, lo=0.0, hi=1.0,
@@ -405,6 +425,11 @@ class Match:
     peer_absent_reason: str | None = None
     #: 模型 fallback 的折價（正數 ＝ 比模型公允價便宜幾 %）。
     model_discount_pct: float | None = None
+    #: 通知檔放行、但**出價檔會拒**這份估價的短理由（None ＝ 出價檔也會收）。
+    #: 放寬的必須看得見：這一欄**必須走到訊息上**（⚠️ caveat，見
+    #: `notify.format_seller_new`）——通知檔位刻意比出價鬆，鬆在哪裡不能只有
+    #: 程式碼知道。
+    bidding_reject_note: str | None = None
     #: --- 規則 3b 用（估不了）--------------------------------------------
     #: 為什麼估不了（閘門原文的第一句、或「疑似變體」、或「沒有區間」）。
     unpriced_reason: str | None = None
@@ -733,7 +758,7 @@ def _match_seller_new(
       2. 這是新標的嗎？（`listing_obs.seen_count <= 1` ＝ 第一次進帳本）
          不是 → 離開。舊標的的「新上架」是假的。
       3. 同儕相對折價 ≥ `seller_min_discount`？→ 規則 3（👤 強）。
-      4. 同儕算不出來 → 模型 fallback：過 `rules.gate` 四道閘門且折價 ≥
+      4. 同儕算不出來 → 模型 fallback：過 `rules.gate`（通知檔位）且折價 ≥
          `seller_model_min_discount` → 規則 3（🤖 弱）。
       5. 閘門擋下／沒有區間／疑似變體 → 規則 3b（🔍 估不了，低音量）。
 
@@ -927,6 +952,9 @@ def _model_fallback(
         rule=RULE_SELLER_NEW,
         judgement_source=SOURCE_MODEL,
         model_discount_pct=discount,
+        # 跨檔對照：通知檔放行、但出價檔會拒的，要在訊息上講出來（⚠️ caveat）。
+        # 拿**真的**出價檔（rules.bidding_gate）來比，不是通知檔自問自答。
+        bidding_reject_note=bidding_gate_note(rules.bidding_gate, estimate),
         **common,
     ), None
 

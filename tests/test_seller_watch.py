@@ -585,21 +585,103 @@ def test_model_fallback_threshold_is_stricter_than_peers(stub_model):
     [
         (_Est(level="L3"), "估價層級"),
         (_Est(grade=None), "鑑定分數"),
-        (_Est(n_eff=20), "校準已知壞掉"),          # 10-49 破口桶
-        (_Est(cal_n=10), "校準殘差"),
+        (_Est(cal_n=10), "校準殘差"),            # 10 < 通知檔門檻 30，仍擋
     ],
 )
 def test_evidence_gate_blocks_the_model_fallback(stub_model, est, expect):
     """閘門擋下的**仍然不推折價**——改走規則 3b，而且說得出被哪一道擋下。
 
     這是「模型 fallback 不是什麼都推」的結構性保證：閘門引用的是
-    `bidding.EvidenceGate`（出價那一側量過實測依據的那一份），不是另訂的標準。
+    `bidding.EvidenceGate` 的**通知檔**（notify profile）——語意閘門（分數已知、
+    L1/L2）與出價檔一樣硬，校準殘差門檻是通知檔自己的 30（出價檔是 50）。
+    2026-08-07 之前這裡直接用出價檔，把全庫證據最強的標的（青眼 L1 n=25…）
+    連同真正估不了的一起丟進 3b——用出價的閘門擋通知，等於把最好看的標的
+    靜默丟掉（誤殺是靜默的）。破口桶案例移到下面的檔位測試（通知檔放行＋標註）。
     """
     val = stub_model(est)
     out = _run_model(_ctx(item=None), valuator=val)
     assert out.seller_new == []                  # 沒有折價數字
     assert len(out.seller_unpriced) == 1
     assert expect in (out.seller_unpriced[0].unpriced_reason or "")
+
+
+# ---------------------------------------------------------------------------
+# 6c. 證據閘門的通知檔位（2026-08-07）
+#
+# 通知與出價的錯誤代價不對稱：通知錯了使用者自己看一眼就知道，出價上限錯了
+# 會花錯真錢。所以規則 3 的模型 fallback 走**通知檔**：破口桶不拒收、校準殘差
+# 門檻 30——但「出價檔會拒」必須跟著訊息一起送到使用者眼前（放寬的必須看得見）。
+# ---------------------------------------------------------------------------
+def test_notify_profile_rescues_the_broken_bucket_with_a_visible_marker(stub_model):
+    """W3：`10-49` 桶在通知檔放行——結果物件必須帶「出價檔會拒」的標記。"""
+    val = stub_model(_Est(fair=3000.0, n_eff=20))       # 10-49 破口桶
+    out = _run_model(_ctx(item=None), valuator=val)
+    assert len(out.seller_new) == 1 and out.seller_unpriced == []
+    m = out.seller_new[0]
+    assert m.judgement_source == SOURCE_MODEL
+    assert m.bidding_reject_note is not None
+    assert "10-49" in m.bidding_reject_note
+
+
+def test_notify_profile_lowers_the_calibration_floor_to_30(stub_model):
+    """W5：殘差 30 在出價檔被 50 擋住，在通知檔剛好過（且帶標記）；29 仍走 3b。"""
+    val = stub_model(_Est(fair=3000.0, cal_n=30))
+    out = _run_model(_ctx(item=None), valuator=val)
+    assert len(out.seller_new) == 1
+    m = out.seller_new[0]
+    assert m.bidding_reject_note is not None and "30" in m.bidding_reject_note
+
+    val29 = stub_model(_Est(fair=3000.0, cal_n=29))
+    out29 = _run_model(_ctx(item=None), valuator=val29)
+    assert out29.seller_new == [] and len(out29.seller_unpriced) == 1
+
+
+def test_no_marker_when_bidding_would_also_accept(stub_model):
+    """出價檔也會收的估價**不准**掛標記——狼來了的 caveat 等於沒有 caveat。"""
+    val = stub_model(_Est(fair=3000.0))          # 3-9 桶、殘差 147：兩檔都過
+    out = _run_model(_ctx(item=None), valuator=val)
+    assert len(out.seller_new) == 1
+    assert out.seller_new[0].bidding_reject_note is None
+
+
+def test_relaxed_message_carries_the_caveat_and_never_a_ceiling(stub_model):
+    """訊息三件事：⚠️ caveat 講出出價檔會拒、🤖 弱路徑標記維持、
+    **絕不包含出價上限數字**（通知給的是合理價＋折價，不是「你可以出到多少」）。"""
+    from ygo_sniper.notify import format_seller_new
+
+    val = stub_model(_Est(fair=3000.0, n_eff=20))
+    out = _run_model(_ctx(item=None), valuator=val)
+    m = out.seller_new[0]
+    text = format_seller_new(m, DASH)
+    assert "🤖" in text and "模型估值（弱）" in text     # 既有弱路徑標記維持
+    assert "⚠️" in text and "不是出價依據" in text
+    assert "出價拒絕桶" in text and "10-49" in text
+    assert "上限" not in text and "出價欄" not in text   # 不給任何出價上限
+    assert m.max_bid is None and m.max_bid_native is None
+
+
+def test_strict_pass_message_has_no_bidding_caveat(stub_model):
+    from ygo_sniper.notify import format_seller_new
+
+    val = stub_model(_Est(fair=3000.0))
+    out = _run_model(_ctx(item=None), valuator=val)
+    text = format_seller_new(out.seller_new[0], DASH)
+    assert "不是出價依據" not in text and "出價拒絕桶" not in text
+
+
+def test_notify_rules_wire_the_notify_profile_and_keep_the_bidding_reference(cfg):
+    """`rules.gate` 是通知檔、`rules.bidding_gate` 是出價檔——兩份都從 config 來。
+
+    後者的存在理由：跨檔位對照（「出價檔會拒」的標記）必須拿**真的**出價檔
+    來比，不能在 notify 這一側自己另拍一份門檻（工程原則 1：同源）。
+    """
+    rules = NotifyRules.from_config(cfg)
+    assert rules.gate.reject_n_buckets == ()
+    assert rules.gate.min_calibration_samples == 30
+    assert rules.bidding_gate.reject_n_buckets == ("10-49",)
+    assert rules.bidding_gate.min_calibration_samples == 50
+    # 語意閘門兩檔一致地硬
+    assert rules.gate.require_known_grade and rules.gate.require_card_specific_level
 
 
 def test_model_fallback_needs_an_interval(stub_model):
