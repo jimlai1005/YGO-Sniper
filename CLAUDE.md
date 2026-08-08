@@ -165,6 +165,25 @@ Seller Alpha 一開始的設計是「賣家售價 vs 我們模型的公允價」
    `len(listings)`（商業篩選後剩幾個）。量錯東西的指標比沒有指標更糟：
    曾經因此產生 12 次假的 `parser_broken` 告警
 4. 重建物件時**不要手工列舉欄位**，用 dataclass 反射——手寫清單一定會跟定義漂移
+5. **推論不得直接觸發會動資料的動作**——2026-08-07 事故：一鍵清除信任
+   `disappeared_at`（「掃描窗蓋得到卻沒看到」的推論），清掉 43 筆，
+   **誤殺率 100%**——那個欄位量的是掃描盲區，不是售出。修法是**驗證取代推論**：
+   gone 候選逐筆開商品頁實證（`verify_departed.py`），只清 SOLD／DELISTED；
+   STILL_LIVE 解除離場標記；UNVERIFIABLE（被擋／讀不到）一律保留並大聲回報。
+   **讀不到 ≠ 已離場**——這與全域原則「讀不到錢 ≠ 錢虧光」是同一條
+
+**「已復活」有兩本帳，語意不同，永遠不要合併或互相 fallback**：
+
+| 欄位 | 量什麼 | 用途 |
+|---|---|---|
+| `signals.restored_count` | 清除功能**誤殺**後自癒的次數 | 功能自己的錯誤率（`expiry-stats`） |
+| `signals.verified_restored_count` | **實證下架**後又重新上架的次數 | 給使用者的議價訊號（dashboard 徽章） |
+| `listing_obs.revived_count` | 觀測層「消失後又出現」 | 離場判定的誤判率（`revive-rate`） |
+
+三者的分母完全不同。徽章只認 `verified_restored_count`（實證帳）——
+把誤判帳畫到使用者臉上，等於拿我們自己的 bug 當成商品行為賣給他。
+戳記機制：實證清除時 `cleared_verified=1`，還原時轉進實證帳並歸零。
+另注意徽章只認**同一個商品 ID**——賣家撤掉「重新刊登」會產生新 key，不會累計。
 
 ---
 
@@ -238,6 +257,9 @@ ygo-sniper corpus-diff         # 全語料雙向比對（改過濾／解析規�
 ygo-sniper venue-study         # 平台價差研究
 ygo-sniper revive-rate         # 離場判定的復活率（調 gone_confidence 前必跑）
 ygo-sniper expiry-stats        # 清除功能自己的誤殺率（清掉的有幾成又回來了）
+ygo-sniper clear-departed      # 清離場標的：逐筆開頁實證，只清 SOLD/DELISTED
+                               #   --state watching|asked_seller|offer_sent
+                               #   --dry-run 只驗不寫（與 dashboard 清除按鈕同路徑）
 make schedule / make unschedule # launchd 排程（分時段，一天 15 個觸發點）
 ```
 
