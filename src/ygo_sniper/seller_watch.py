@@ -53,10 +53,14 @@ auto、擠不到才擠 supply（不比分數，任選 supply 軌內最低分的�
 
 ## 誠實邊界（2026-08-04）
 
-- 賣家頁列舉目前有 **eBay**、**PayPay（Yahoo!フリマ）**、**Yahoo 拍賣** 三站。
+- 賣家頁列舉目前有 **eBay**、**PayPay（Yahoo!フリマ）**、**Yahoo 拍賣**、
+  **Buyee Mercari 鏡像** 四站。
   Yahoo 拍賣是 2026-08-04 補上的（`yahoo.YahooAuctionSource.search_seller`）
   ——在那之前名單上 16 個賣家有 6 個是 `buyee_yahoo`（含分數最高的三個
   79.8／67.5／66.3）全部掃不到，是當時最大的覆蓋缺口。
+  Mercari 是 2026-08-09 補上的（`buyee.BuyeeSource.search_seller`，走
+  `buyee.jp/mercari/search?seller={id}`＋WafSession，與關鍵字掃描同一條路）
+  ——釘選軌收 tw.mercari／jp.mercari 賣家進 `buyee_mercari` 鍵，靠這個才掃得到。
   仍然沒有列舉實作的站台會被**明確記成「來源尚未支援」**，不是安靜地跳過
   （安靜跳過與「這個賣家最近沒上架」外顯一模一樣）。
 - **Yahoo 拍賣的賣家頁沒有已售出清單**（實測），所以那一站的成交歷史仍然
@@ -83,12 +87,22 @@ SOURCE_MANUAL = "manual"
 #: 便宜多少），supply 的 score 是供給契合度（跟便宜與否無關）。存在同一個
 #: `score` 欄位裡是為了 schema 不動，但**跨軌不准比大小**，見 `_evictable`。
 SOURCE_SUPPLY = "supply"
+#: 釘選軌（2026-08-09）：使用者貼賣家頁 URL 明確要求長期追蹤的賣家。
+#: 三個結構性差異，每一個都是「使用者明講 > 演算法入選」的化身：
+#: 1. **不佔 30 名額**——上限檢查與名額顯示都把 pinned 排除，否則釘幾個
+#:    就偷吃幾個演算法名額，兩邊都變差。
+#: 2. **永不被淘汰**——`_evictable` 的候選池裡根本沒有它。
+#: 3. **進每一批輪替**（見 `due_sellers`）——效果是每個輪替時段掃一次
+#:    （60 分 vs 其他軌 240 分），這就是「優先權更高」的實作。
+#: score 一律 None：釘選是使用者的意志，不是任何一把尺量出來的分數。
+SOURCE_PINNED = "pinned"
 
 #: 各軌的中文標籤（訊息用；不要在別處手打字串）。
 SOURCE_LABEL: dict[str, str] = {
     SOURCE_AUTO: "Alpha 軌",
     SOURCE_SUPPLY: "供給軌",
     SOURCE_MANUAL: "手動",
+    SOURCE_PINNED: "釘選（不佔名額）",
 }
 
 #: site → 具備「賣家頁列舉」能力的 source 名稱。實測依據見
@@ -99,12 +113,14 @@ SELLER_PAGE_SOURCE: dict[str, str] = {
     # 2026-08-04 補上（名單上分數最高的三個賣家都是這一站）。賣家頁的
     # `__NEXT_DATA__` 與 closedsearch 同一條路徑，見 yahoo.py `_SELLER_LISTING_PATH`。
     "buyee_yahoo": "yahoo_direct",
+    # 2026-08-09 補上（釘選軌 Phase 2）：Buyee Mercari 鏡像的賣家頁
+    # `buyee.jp/mercari/search?seller={id}`，見 buyee.BuyeeSource.search_seller。
+    "buyee_mercari": "buyee_mercari",
 }
 
 #: 還沒有列舉實作的站台 → 一句話說明。**要說得出「為什麼沒掃」**。
 UNSUPPORTED_SITE_NOTE: dict[str, str] = {
-    "buyee_mercari": "Mercari 賣家頁尚未實測（走 Buyee 鏡像需要 WAF 挑戰）",
-    "mercari_tw": "Mercari 台灣賣家頁尚未實測",
+    "mercari_tw": "Mercari 台灣賣家頁尚未實測（新釘選的 tw.mercari 賣家已收進 buyee_mercari，掃得到）",
     "ruten": "露天賣家頁尚未實測（這條管道目前只跑 canary）",
 }
 
@@ -257,6 +273,13 @@ def add_watch(
 
     規則：
     - 已經在名單上 → 不動它，回 `already=True`（重複加入不是錯誤）。
+      例外：候選是 **pinned** 時把該列**升級成 pinned** 並更新 reason——
+      使用者明講要追蹤，永遠優先於演算法入選；批次用 `batch_of` 重算，
+      同一個鍵永遠算出同一批，所以升級不會讓它換批。
+      反向（已是 pinned、auto/supply/manual 再加）維持不動它：釘選不被降級。
+    - **pinned 不受上限管**：不檢查名額、不淘汰任何人、score 一律 None
+      （見 `SOURCE_PINNED` 的註解）。其他軌檢查上限時把 pinned 列**排除**
+      在計數外——否則釘選會偷吃 30 名額，釘選軌「不佔名額」的承諾就破了。
     - 名單未滿 → 直接加。
     - 名單已滿：
         * **manual 永不被自動淘汰**（那是使用者明講要追蹤的人）。
@@ -277,11 +300,27 @@ def add_watch(
             f"賣家鍵格式應為 `{{site}}:{{seller_id}}`（例：ebay:psa），收到 {seller_key!r}",
             code=REJECT_MALFORMED_KEY,
         )
-    if source == SOURCE_MANUAL:
+    if source in (SOURCE_MANUAL, SOURCE_PINNED):
         score = None
 
     existing = store.get_seller_watch(seller_key)
     if existing and existing.get("active"):
+        if source == SOURCE_PINNED:
+            # 使用者明講要追蹤 > 演算法入選：把既有列升級成 pinned（已是
+            # pinned 就等於更新 reason——「修改備註」走的也是這條）。
+            # batch 用 `batch_of` 重算＝原值（同鍵永遠同批），輪替表不動。
+            old_source = str(existing.get("source") or "")
+            batch = batch_of(seller_key, params.batches)
+            store.upsert_seller_watch(
+                seller_key, source=SOURCE_PINNED, reason=reason,
+                batch=batch, score=None, now=now,
+            )
+            detail = (
+                "已更新釘選備註" if old_source == SOURCE_PINNED
+                else f"已從 {SOURCE_LABEL.get(old_source, old_source)} 升級為釘選"
+                     "（使用者明講要追蹤 > 演算法入選；不佔名額、永不淘汰）"
+            )
+            return WatchAddResult(True, seller_key, detail, batch=batch, already=True)
         return WatchAddResult(
             True, seller_key,
             f"已經在監控名單上（{existing.get('source')}，批次 {existing.get('batch')}）",
@@ -289,13 +328,29 @@ def add_watch(
         )
 
     active = store.list_seller_watch(active_only=True)
+    if source == SOURCE_PINNED:
+        # 釘選不受上限管、不淘汰任何人：直接落庫。
+        batch = batch_of(seller_key, params.batches)
+        store.upsert_seller_watch(
+            seller_key, source=SOURCE_PINNED, reason=reason,
+            batch=batch, score=None, now=now,
+        )
+        return WatchAddResult(
+            True, seller_key,
+            f"已釘選（不佔名額，目前名單 {len(_non_pinned(active))}/{params.max_sellers}；"
+            f"批次 {batch}/{params.batches}，但釘選列每一批都會掃）",
+            batch=batch,
+        )
+
     evicted: str | None = None
-    if len(active) >= params.max_sellers:
+    # 上限只數非 pinned 的列：釘選「不佔名額」是對外承諾，數進去就破了。
+    if len(_non_pinned(active)) >= params.max_sellers:
         victim = _evictable(active, source=source, score=score)
         if victim is None:
             return WatchAddResult(
                 False, seller_key,
-                f"監控名單已滿（{len(active)}/{params.max_sellers}）且沒有可淘汰的對象："
+                f"監控名單已滿（{len(_non_pinned(active))}/{params.max_sellers}）"
+                "且沒有可淘汰的對象："
                 + _full_hint(active, source=source, score=score),
                 code=REJECT_LIST_FULL,
             )
@@ -321,6 +376,11 @@ def add_watch(
 
 def _track_rows(active: list[dict[str, Any]], track: str) -> list[dict[str, Any]]:
     return [r for r in active if r.get("source") == track]
+
+
+def _non_pinned(active: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """名額計數用的視圖：釘選列不佔 30 名額，數名額時一律先剔掉它。"""
+    return [r for r in active if r.get("source") != SOURCE_PINNED]
 
 
 def _lowest_scored(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -349,8 +409,13 @@ def _evictable(
     | 候選人 | 可以淘汰 | 不可以淘汰 |
     |---|---|---|
     | manual | 誰都不淘汰 | — |
-    | auto   | 分數更低的 auto；沒有就任一 supply（不比分數） | manual |
-    | supply | 只有分數更低的 supply | manual、auto |
+    | pinned | 誰都不淘汰（也不需要——它不佔名額，見 `add_watch`） | — |
+    | auto   | 分數更低的 auto；沒有就任一 supply（不比分數） | manual、pinned |
+    | supply | 只有分數更低的 supply | manual、auto、pinned |
+
+    **pinned 永遠不會被選為 victim**：候選池只從同軌（auto／supply）與
+    supply 軌撈，pinned 天然不在池裡——這是結構保證，不是條件判斷，
+    由 `test_pinned_is_never_evicted` 釘死。
 
     auto 擠 supply 時挑「supply 軌內分數最低的那一個」——那個「最低」是
     supply **軌內**的排序，從頭到尾沒有拿去跟 auto 的分數比過；這樣做只是
@@ -402,9 +467,12 @@ def _track_census(active: list[dict[str, Any]]) -> str:
     n_manual = len(_track_rows(active, SOURCE_MANUAL))
     n_auto = len(_track_rows(active, SOURCE_AUTO))
     n_supply = len(_track_rows(active, SOURCE_SUPPLY))
-    n_other = len(active) - n_manual - n_auto - n_supply
+    n_pinned = len(_track_rows(active, SOURCE_PINNED))
+    n_other = len(active) - n_manual - n_auto - n_supply - n_pinned
     parts = [f"manual {n_manual} 個", f"auto／Alpha 軌 {n_auto} 個",
              f"supply／供給軌 {n_supply} 個"]
+    if n_pinned:
+        parts.append(f"另有釘選 {n_pinned} 個（不佔名額，不在上面的計數裡）")
     if n_other:
         parts.append(f"其他來源 {n_other} 個")
     return "、".join(parts)
@@ -664,17 +732,42 @@ def due_sellers(
 ) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], str]]]:
     """這一批裡真的該掃的賣家 ＋ 被跳過的（含原因）。
 
+    **pinned 列進每一批**（不只自己 `batch_of` 到的那批），而且排在回傳
+    清單最前面。這就是「釘選優先權更高」的實作：其他軌 4 批輪一圈＝每
+    240 分掃一次，pinned 每個輪替時段（60 分）都在場——快 4 倍，而且
+    不用另開一條排程路徑。防暴衝靠的是下面同一條 per-seller 護欄：
+    同一時段內已掃過就跳過，所以「每批都在場」不會變成「每批都重抓」。
+
     per-seller 的護欄只擋「同一個輪替時段內重複掃到同一個人」（例如 force 連按），
     門檻用 `batch_interval_minutes` 而不是 `per_seller_interval_minutes`：
     後者剛好等於輪替週期，兩個門檻貼在一起時，排程早跑幾秒就會整批被自己擋掉。
+
+    **pinned 列的門檻要再乘 0.9 留餘裕**（2026-08-09 審查 F1）：pinned 的目標
+    節奏（每批 60 分）與護欄門檻（60 分）零餘裕，而 mark 恆晚於 claim 幾秒
+    （claim 在輪替開頭、掃完才 mark）。下一輪 claim 整整 60 分後到來時
+    age ≈ 59.9 分 → 被跳過；pipeline 的 skip 路徑又會用 mark 重寫
+    `last_scanned_at`，把資格再推走一整輪——掃描頻率就這樣靜默退化成兩輪
+    一次。非 pinned 列維持原門檻：它們的掃描間隔 240 分對 60 分門檻餘裕充足。
     """
     now = now or datetime.now(UTC)
-    rows = store.list_seller_watch(active_only=True, batch=batch)
+    batch_rows = store.list_seller_watch(active_only=True, batch=batch)
+    # 釘選列從全量另撈再合併（去重）：它們不管 `batch_of` 落在哪一批，
+    # 每一批都要在場。排最前面＝同一輪請求預算裡使用者指定的人先掃。
+    pinned_rows = [
+        r for r in store.list_seller_watch(active_only=True)
+        if r.get("source") == SOURCE_PINNED
+    ]
+    pinned_keys = {r["seller_key"] for r in pinned_rows}
+    rows = pinned_rows + [r for r in batch_rows if r["seller_key"] not in pinned_keys]
     due: list[dict[str, Any]] = []
     skipped: list[tuple[dict[str, Any], str]] = []
     for r in rows:
         age = _age_minutes(r.get("last_scanned_at"), now)
-        if age is not None and age < params.batch_interval_minutes:
+        # pinned 每批都在場，門檻乘 0.9 留餘裕（理由見 docstring 的 F1 時序）。
+        guard = params.batch_interval_minutes * (
+            0.9 if r.get("source") == SOURCE_PINNED else 1.0
+        )
+        if age is not None and age < guard:
             skipped.append((r, f"{age:.0f} 分鐘前才掃過（同一輪替時段內不重複掃）"))
             continue
         site = str(r.get("site") or "")
@@ -752,6 +845,7 @@ __all__ = [
     "SOURCE_AUTO",
     "SOURCE_LABEL",
     "SOURCE_MANUAL",
+    "SOURCE_PINNED",
     "SOURCE_SUPPLY",
     "UNSUPPORTED_SITE_NOTE",
     "WATCH_ROTATION_META_KEY",

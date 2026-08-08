@@ -163,16 +163,19 @@ def test_due_sellers_skips_recently_scanned_and_unsupported(store):
     """跳過的兩種原因都要說得出來：剛掃過、以及**來源還沒支援賣家頁列舉**。
 
     2026-08-04：`buyee_yahoo` 從「尚未支援」變成**已支援**（賣家頁解析器
-    上線），所以未支援那一半改用 `buyee_mercari`——而 Yahoo 賣家必須真的
-    進 due，那正是這次要修的覆蓋缺口。
+    上線）。2026-08-09：`buyee_mercari` 也轉正（Buyee 鏡像賣家頁上線，
+    釘選軌 Phase 2）——它必須真的進 due；未支援的那一半改用 `mercari_tw`
+    （台灣站自己的賣家頁仍未實測）。
     """
     now = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
     add_watch(store, "ebay:a", source=SOURCE_MANUAL, reason="t", params=PARAMS)
     add_watch(store, "buyee_yahoo:zzz", source=SOURCE_MANUAL, reason="t", params=PARAMS)
     add_watch(store, "buyee_mercari:m1", source=SOURCE_MANUAL, reason="t", params=PARAMS)
+    add_watch(store, "mercari_tw:m2", source=SOURCE_MANUAL, reason="t", params=PARAMS)
     b_ebay = batch_of("ebay:a", 4)
     b_yahoo = batch_of("buyee_yahoo:zzz", 4)
     b_mercari = batch_of("buyee_mercari:m1", 4)
+    b_tw = batch_of("mercari_tw:m2", 4)
 
     due, skipped = due_sellers(store, PARAMS, b_ebay, now=now)
     assert "ebay:a" in [r["seller_key"] for r in due]
@@ -187,8 +190,14 @@ def test_due_sellers_skips_recently_scanned_and_unsupported(store):
     assert "buyee_yahoo:zzz" in [r["seller_key"] for r in due]
     assert not any("Yahoo" in reason for _r, reason in skipped)
 
-    _due, skipped = due_sellers(store, PARAMS, b_mercari, now=now)
-    assert any("Mercari" in reason for _r, reason in skipped)
+    # Buyee Mercari 鏡像賣家頁已實作（2026-08-09）→ 同樣必須進 due
+    due, skipped = due_sellers(store, PARAMS, b_mercari, now=now)
+    assert "buyee_mercari:m1" in [r["seller_key"] for r in due]
+    assert not any(r["seller_key"] == "buyee_mercari:m1" for r, _reason in skipped)
+
+    _due, skipped = due_sellers(store, PARAMS, b_tw, now=now)
+    assert any(r["seller_key"] == "mercari_tw:m2" and "Mercari" in reason
+               for r, reason in skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -1151,3 +1160,431 @@ def test_no_rejections_prints_nothing():
         digest = summarize_rejections(empty)
         assert digest.total == 0
         assert digest.summary_lines == [] and digest.alert_lines == []
+
+
+# ---------------------------------------------------------------------------
+# 10. 釘選軌（pinned）：使用者貼 URL 明講要追蹤的賣家（2026-08-09）
+#
+# 三個結構性承諾，每一條各自釘死：不佔 30 名額、永不被自動淘汰、
+# 進每一批輪替（＝每個輪替時段掃一次，比其他軌快 4 倍）。
+# ---------------------------------------------------------------------------
+from ygo_sniper.seller_watch import SOURCE_PINNED  # noqa: E402
+
+
+def test_pinned_ignores_the_cap(store):
+    """名單滿 30 之後釘選照樣進得去——使用者明講要追蹤 > 名額規則。"""
+    _fill(store, 30)
+    res = add_watch(store, "ebay:pinme", source=SOURCE_PINNED,
+                    reason="使用者釘選", params=PARAMS)
+    assert res.ok and not res.already
+    assert res.evicted is None                       # 也沒有擠掉任何人
+    row = store.get_seller_watch("ebay:pinme")
+    assert row["active"] == 1 and row["source"] == SOURCE_PINNED
+    assert row["score"] is None                      # 釘選不假裝有分數
+    assert len(store.list_seller_watch()) == 31      # 30 名額 + 1 釘選
+
+
+def test_pinned_does_not_eat_quota(store):
+    """先釘 3 個，30 個 auto 名額必須**一個都不少**；名額競爭照常運作。"""
+    for i in range(3):
+        add_watch(store, f"ebay:pin{i}", source=SOURCE_PINNED,
+                  reason="使用者釘選", params=PARAMS)
+    _fill(store, 30)                                 # 分數 50..79
+    active = store.list_seller_watch()
+    assert len(active) == 33                         # 3 釘選 + 30 auto，無人被拒
+    # 第 31 個 auto 進來：名額邏輯照常（擠掉最低分 auto），與釘選無關
+    res = add_watch(store, "ebay:better", source=SOURCE_AUTO, reason="t",
+                    params=PARAMS, score=999.0)
+    assert res.ok and res.evicted == "ebay:auto0"
+    # 低分 auto 候選則照常被拒，拒絕訊息裡的名額計數不含釘選（30/30 不是 33/30）
+    res = add_watch(store, "ebay:worse", source=SOURCE_AUTO, reason="t",
+                    params=PARAMS, score=1.0)
+    assert not res.ok and "30/30" in res.reason
+
+
+def test_pinned_is_never_evicted(store):
+    """任何軌、任何分數的候選人都碰不到釘選列。"""
+    params = WatchParams(max_sellers=1)
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="使用者釘選",
+              params=params)
+    add_watch(store, "buyee_yahoo:sup", source=SOURCE_SUPPLY, reason="供給",
+              params=params, score=10.0)
+    # auto 高分候選：唯一合法 victim 是 supply，絕不是 pinned
+    res = add_watch(store, "ebay:hot", source=SOURCE_AUTO, reason="t",
+                    params=params, score=999.0)
+    assert res.ok and res.evicted == "buyee_yahoo:sup"
+    assert store.get_seller_watch("ebay:pinme")["active"] == 1
+    # 名額被 auto 佔滿後，supply 候選找不到 victim → 拒絕，而不是動釘選
+    res = add_watch(store, "ebay:sup2", source=SOURCE_SUPPLY, reason="t",
+                    params=params, score=999.0)
+    assert not res.ok
+    assert store.get_seller_watch("ebay:pinme")["active"] == 1
+
+
+def test_pinning_an_existing_auto_upgrades_it(store):
+    """已在名單上（演算法選的）再 pin ＝ 升級成釘選：
+    使用者明講要追蹤 > 演算法入選。批次用 batch_of 重算＝不變。"""
+    add_watch(store, "ebay:seller1", source=SOURCE_AUTO, reason="自動入選",
+              params=PARAMS, score=55.0)
+    before_batch = store.get_seller_watch("ebay:seller1")["batch"]
+    res = add_watch(store, "ebay:seller1", source=SOURCE_PINNED,
+                    reason="使用者釘選", params=PARAMS)
+    assert res.ok and res.already                    # 是升級，不是新增
+    row = store.get_seller_watch("ebay:seller1")
+    assert row["source"] == SOURCE_PINNED
+    assert row["score"] is None                      # 升級後不保留舊軌的分數
+    assert row["reason"] == "使用者釘選"
+    assert row["batch"] == before_batch == batch_of("ebay:seller1", PARAMS.batches)
+
+
+def test_pinning_twice_updates_the_reason(store):
+    """已是釘選再 pin ＝「修改備註」。"""
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="第一版備註",
+              params=PARAMS)
+    res = add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="第二版備註",
+                    params=PARAMS)
+    assert res.ok and res.already
+    row = store.get_seller_watch("ebay:pinme")
+    assert row["source"] == SOURCE_PINNED and row["reason"] == "第二版備註"
+
+
+def test_repinning_preserves_the_scan_bookkeeping(store):
+    """F3 回歸（2026-08-09 審查）：對既有列再 pin（改備註或升級軌道）不得
+    抹掉掃描簿記。先前 upsert 是 INSERT OR REPLACE：`last_scanned_at` 變
+    NULL（防重掃護欄當它「從沒掃過」）、`last_result` 清空、`added_at`
+    重寫——dashboard 的「上次掃描」憑空消失，而測試只斷言 reason 有更新
+    所以一直是綠的。"""
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="第一版",
+              params=PARAMS)
+    store.mark_seller_watch_scanned("ebay:pinme", result="OK 75 筆")
+    before = store.get_seller_watch("ebay:pinme")
+    assert before["last_scanned_at"] and before["last_result"]  # 前提：簿記有值
+
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="第二版",
+              params=PARAMS)
+    after = store.get_seller_watch("ebay:pinme")
+    assert after["last_scanned_at"] == before["last_scanned_at"]
+    assert after["last_result"] == before["last_result"]
+    assert after["added_at"] == before["added_at"]
+    assert after["reason"] == "第二版"
+
+
+def test_pinned_is_not_downgraded_by_a_later_auto_candidate(store):
+    """釘選之後，同一個賣家又被演算法選中——不得降級回 auto（沿用 already 路徑）。"""
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="使用者釘選",
+              params=PARAMS)
+    res = add_watch(store, "ebay:pinme", source=SOURCE_AUTO, reason="自動入選",
+                    params=PARAMS, score=80.0)
+    assert res.ok and res.already
+    row = store.get_seller_watch("ebay:pinme")
+    assert row["source"] == SOURCE_PINNED and row["score"] is None
+
+
+def test_pinned_enters_every_batch_and_comes_first(store):
+    """釘選列進**每一批**且排最前——這就是「優先權更高」的實作
+    （每個輪替時段掃一次＝60 分，其他軌 240 分）。"""
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="使用者釘選",
+              params=PARAMS)
+    add_watch(store, "ebay:normal", source=SOURCE_MANUAL, reason="t", params=PARAMS)
+    for batch in range(PARAMS.batches):
+        due, _skipped = due_sellers(store, PARAMS, batch)
+        keys = [r["seller_key"] for r in due]
+        assert "ebay:pinme" in keys, f"第 {batch} 批少了釘選列"
+        assert keys[0] == "ebay:pinme", f"第 {batch} 批釘選列沒有排最前：{keys}"
+    # 而 normal 只出現在自己 sha1 到的那一批
+    own = batch_of("ebay:normal", PARAMS.batches)
+    for batch in range(PARAMS.batches):
+        due, _ = due_sellers(store, PARAMS, batch)
+        assert ("ebay:normal" in [r["seller_key"] for r in due]) == (batch == own)
+
+
+def test_pinned_is_not_duplicated_in_its_own_batch(store):
+    """釘選列 sha1 剛好落在本批時，合併必須去重（不是掃兩次）。"""
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="t", params=PARAMS)
+    own = batch_of("ebay:pinme", PARAMS.batches)
+    due, _ = due_sellers(store, PARAMS, own)
+    assert [r["seller_key"] for r in due].count("ebay:pinme") == 1
+
+
+def test_pinned_respects_the_rescan_guard(store):
+    """防重複掃護欄對釘選一樣生效：同一輪替時段內不重掃（force 連按不暴衝）。"""
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="t", params=PARAMS)
+    store.mark_seller_watch_scanned("ebay:pinme", result="ok", now=now.isoformat())
+    for batch in range(PARAMS.batches):
+        due, skipped = due_sellers(store, PARAMS, batch, now=now + timedelta(minutes=5))
+        assert "ebay:pinme" not in [r["seller_key"] for r in due]
+        assert any(r["seller_key"] == "ebay:pinme" and "才掃過" in reason
+                   for r, reason in skipped)
+    # 過了輪替時段（60 分）就該再掃
+    due, _ = due_sellers(store, PARAMS, 0, now=now + timedelta(minutes=61))
+    assert "ebay:pinme" in [r["seller_key"] for r in due]
+
+
+def test_pinned_is_due_next_slot_even_when_mark_lags_claim(store):
+    """F1 回歸（2026-08-09 審查）：釘選的目標節奏（每批 60 分）與護欄門檻
+    貼死在一起時，掃描節奏會靜默退化成兩輪一次。
+
+    真實時序：claim 在 T、掃完 mark 在 T+幾秒（mark 恆晚於 claim）。下一輪
+    claim 在 T+60 分，此時 age ≈ 59.9 分——若門檻是整整 60 分，釘選列被跳過；
+    而 pipeline 的 skip 路徑又會用 mark 重寫 `last_scanned_at`，把資格再推走
+    一整輪。修法是給 pinned 列 0.9 倍的餘裕門檻。
+    """
+    claim0 = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="t", params=PARAMS)
+    # 上一輪：claim 於 12:00，掃完 mark 於 12:00:05（晚 5 秒）
+    store.mark_seller_watch_scanned(
+        "ebay:pinme", result="ok", now=(claim0 + timedelta(seconds=5)).isoformat()
+    )
+    # 下一輪：claim 整整 60 分後（排程準點）。age ≈ 59.92 分，必須是 due。
+    due, skipped = due_sellers(store, PARAMS, 0, now=claim0 + timedelta(minutes=60))
+    assert "ebay:pinme" in [r["seller_key"] for r in due], (
+        f"釘選列在下一輪整點被護欄跳過（掃描頻率靜默退化）：skipped={skipped}"
+    )
+
+
+def test_rescan_guard_margin_applies_only_to_pinned(store):
+    """0.9 餘裕只給 pinned：非 pinned 列的間隔是 240 分、門檻 60 分，餘裕
+    本來就充足——55 分鐘前掃過的 manual 列仍然要被跳過（門檻維持 60 分）。"""
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    add_watch(store, "ebay:a", source=SOURCE_MANUAL, reason="t", params=PARAMS)
+    store.mark_seller_watch_scanned(
+        "ebay:a", result="ok", now=(now - timedelta(minutes=55)).isoformat()
+    )
+    due, skipped = due_sellers(store, PARAMS, batch_of("ebay:a", PARAMS.batches), now=now)
+    assert "ebay:a" not in [r["seller_key"] for r in due]
+    assert any(r["seller_key"] == "ebay:a" and "才掃過" in reason
+               for r, reason in skipped)
+
+
+def test_pinned_on_an_unsupported_site_is_kept_and_skipped_loudly(store):
+    """釘一個還沒有列舉實作的站台：留在名單、每批都報「為什麼沒掃」，
+    不是安靜消失（安靜跳過與「賣家沒上架」外顯一模一樣）。
+
+    2026-08-09：`buyee_mercari` 已轉正（賣家頁列舉上線），改用 `mercari_tw`
+    當未支援樣本——它是舊資料可能殘留的孤兒站台。
+    """
+    add_watch(store, "mercari_tw:448657621", source=SOURCE_PINNED,
+              reason="t", params=PARAMS)
+    due, skipped = due_sellers(store, PARAMS, 0)
+    assert "mercari_tw:448657621" not in [r["seller_key"] for r in due]
+    assert any(r["seller_key"] == "mercari_tw:448657621" and "Mercari" in reason
+               for r, reason in skipped)
+
+
+def test_pinned_buyee_mercari_seller_is_now_scannable(store):
+    """釘選軌 Phase 2 的驗收點：`buyee_mercari` 釘選列不再被跳過，
+    每一批都進 due（釘選列進每一批＋站台已有列舉實作）。"""
+    add_watch(store, "buyee_mercari:448657621", source=SOURCE_PINNED,
+              reason="t", params=PARAMS)
+    for batch in range(PARAMS.batches):
+        due, skipped = due_sellers(store, PARAMS, batch)
+        assert "buyee_mercari:448657621" in [r["seller_key"] for r in due]
+        assert not any(r["seller_key"] == "buyee_mercari:448657621"
+                       for r, _reason in skipped)
+
+
+def test_remove_watch_works_on_pinned(store):
+    """釘選只有使用者能移除——remove_watch 對它照常可用（手動刪除）。"""
+    add_watch(store, "ebay:pinme", source=SOURCE_PINNED, reason="t", params=PARAMS)
+    assert remove_watch(store, "ebay:pinme", reason="手動解除釘選")
+    row = store.get_seller_watch("ebay:pinme")
+    assert row["active"] == 0 and "解除釘選" in row["reason"]
+
+
+# ---------------------------------------------------------------------------
+# 11. dashboard 的釘選端點（POST /api/sellers/pin）
+#     fixture 照抄 tests/test_card_bucket.py:189-220（web.app 在 import 時就
+#     開 db，load_config 必須先換到 tmp，換完 assert 真的換到了）。
+# ---------------------------------------------------------------------------
+import importlib  # noqa: E402
+from dataclasses import replace  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    import ygo_sniper.config as config_mod
+
+    db = tmp_path / "web.db"
+    real_load = config_mod.load_config
+
+    def _tmp_config(*a, **kw):
+        c = real_load(*a, **kw)
+        return replace(c, storage={**c.storage, "db_path": str(db)})
+
+    monkeypatch.setattr(config_mod, "load_config", _tmp_config)
+    monkeypatch.syspath_prepend(str(ROOT))
+    for mod in ("web.app", "web"):
+        sys.modules.pop(mod, None)
+    app_mod = importlib.import_module("web.app")
+    try:
+        # 承重的斷言，不是裝飾：這一行紅掉就代表測試正在開正式庫。
+        assert app_mod.store.db_path == db, (
+            f"web.app 的 store 沒有指到 tmp（{app_mod.store.db_path}）——"
+            "測試絕不能碰正式庫 data/sniper.db"
+        )
+        from fastapi.testclient import TestClient
+
+        yield TestClient(app_mod.app), app_mod
+    finally:
+        for mod in ("web.app", "web"):
+            sys.modules.pop(mod, None)
+
+
+def test_pin_endpoint_parses_the_url_and_pins(client):
+    c, app_mod = client
+    r = c.post("/api/sellers/pin",
+               json={"url": "https://www.ebay.com/usr/collectiblemore"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] and body["seller_key"] == "ebay:collectiblemore"
+    assert body["unsupported_note"] is None          # ebay 有列舉實作
+    row = app_mod.store.get_seller_watch("ebay:collectiblemore")
+    assert row["active"] == 1 and row["source"] == SOURCE_PINNED
+    assert row["score"] is None
+
+
+def test_pin_endpoint_no_longer_flags_buyee_mercari_as_unlistable(client):
+    """2026-08-09 賣家頁列舉上線後，tw.mercari 釘選（→ buyee_mercari 鍵）
+    必須自然轉正：不再帶「掃不到」的注記。"""
+    c, _app_mod = client
+    r = c.post("/api/sellers/pin",
+               json={"url": "https://tw.mercari.com/zh-hant/seller/448657621"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["seller_key"] == "buyee_mercari:448657621"
+    assert body["unsupported_note"] is None
+
+
+def test_pin_endpoint_reports_an_unlistable_site_loudly(client):
+    """站台還掃不到必須明講，不是回 ok 就當沒事。四個 URL 站台都已支援
+    列舉，所以未支援樣本改走「現成鍵」路徑（endpoint 也收 site:id）。"""
+    c, _app_mod = client
+    r = c.post("/api/sellers/pin", json={"url": "ruten:someone"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["seller_key"] == "ruten:someone"
+    assert body["unsupported_note"] and "露天" in body["unsupported_note"]
+
+
+def test_pin_endpoint_rejects_a_bad_url_with_400_and_the_reason(client):
+    c, _app_mod = client
+    r = c.post("/api/sellers/pin", json={"url": "https://example.com/whatever"})
+    assert r.status_code == 400
+    assert "auctions.yahoo.co.jp/seller" in r.json()["detail"]   # 列出支援形式
+
+
+def test_pin_endpoint_resolves_an_ebay_store_url(client, monkeypatch):
+    """/str/ 店鋪頁：連網解析出真實帳號（這裡 mock 掉抓取，零網路），
+    釘的是 `ebay:{username}` 不是店名，reason 註明來源店鋪 slug。"""
+    import ygo_sniper.seller_resolve as resolve_mod
+
+    calls: list[str] = []
+
+    def _fake_resolve(url, cfg=None, *, fetcher=None):
+        calls.append(url)
+        return "merry_tcg"
+
+    monkeypatch.setattr(resolve_mod, "resolve_ebay_store", _fake_resolve)
+    c, app_mod = client
+    r = c.post("/api/sellers/pin",
+               json={"url": "https://www.ebay.com/str/merrycorporation"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["seller_key"] == "ebay:merry_tcg"       # 帳號，不是店鋪 slug
+    assert body["unsupported_note"] is None
+    assert "merrycorporation" in body["message"]        # 出處看得見
+    assert calls == ["https://www.ebay.com/str/merrycorporation"]
+    row = app_mod.store.get_seller_watch("ebay:merry_tcg")
+    assert row["active"] == 1 and row["source"] == SOURCE_PINNED
+    assert "merrycorporation" in row["reason"]          # 出處也留在名單上
+
+
+def test_pin_endpoint_store_resolution_failure_is_400_pointing_to_usr(client, monkeypatch):
+    """解析失敗（抽不到帳號／被擋）→ 400＋原文，訊息保留 /usr/ 指引；
+    絕不退回「拿 slug 當帳號」。"""
+    import ygo_sniper.seller_resolve as resolve_mod
+    from ygo_sniper.seller_links import SellerUrlError
+
+    def _fail(url, cfg=None, *, fetcher=None):
+        raise SellerUrlError(
+            "店鋪頁 merrycorporation 讀不到賣家帳號。請改貼 ebay.com/usr/帳號 頁"
+        )
+
+    monkeypatch.setattr(resolve_mod, "resolve_ebay_store", _fail)
+    c, app_mod = client
+    r = c.post("/api/sellers/pin",
+               json={"url": "https://www.ebay.com/str/merrycorporation"})
+    assert r.status_code == 400
+    assert "usr" in r.json()["detail"]
+    # 失敗就是失敗：不准偷偷用 slug 釘一個幽靈賣家
+    assert app_mod.store.get_seller_watch("ebay:merrycorporation") is None
+
+
+def test_unpin_reuses_the_existing_watch_remove_endpoint(client):
+    c, app_mod = client
+    c.post("/api/sellers/pin", json={"url": "https://www.ebay.com/usr/somebody"})
+    r = c.post("/api/sellers/ebay:somebody/watch", json={"action": "remove"})
+    assert r.status_code == 200 and r.json()["removed"]
+    assert app_mod.store.get_seller_watch("ebay:somebody")["active"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 12. CLI 的 /str/ 釘選路徑（watch-seller pin，mock 抓取、零網路）
+#     fixture 照抄 tests/test_expiry_clear.py 的 cli_env 模式。
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def cli_env(tmp_path, monkeypatch):
+    """臨時 db 的 CLI 環境。承重斷言：CLI 測試絕不能碰正式庫。"""
+    import ygo_sniper.cli as cli_mod
+    import ygo_sniper.config as config_mod
+
+    db = tmp_path / "cli.db"
+    base = config_mod.load_config()
+    test_cfg = replace(base, storage={**base.storage, "db_path": str(db)})
+    monkeypatch.setattr(cli_mod, "load_config", lambda: test_cfg)
+    assert test_cfg.db_path == db, "CLI 測試的 cfg 沒有指到 tmp db"
+
+    from typer.testing import CliRunner
+
+    return CliRunner(), Store(db), cli_mod
+
+
+def test_cli_pin_resolves_an_ebay_store_url(cli_env, monkeypatch):
+    import ygo_sniper.seller_resolve as resolve_mod
+
+    monkeypatch.setattr(
+        resolve_mod, "resolve_ebay_store",
+        lambda url, cfg=None, *, fetcher=None: "merry_tcg",
+    )
+    runner, store, cli_mod = cli_env
+    result = runner.invoke(
+        cli_mod.app,
+        ["watch-seller", "pin", "https://www.ebay.com/str/merrycorporation"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "merry_tcg" in result.output
+    assert "merrycorporation" in result.output      # 店鋪 → 帳號的解析要說出來
+    row = store.get_seller_watch("ebay:merry_tcg")
+    assert row and row["active"] == 1 and row["source"] == SOURCE_PINNED
+    assert "merrycorporation" in row["reason"]      # 出處留在名單上
+
+
+def test_cli_pin_store_resolution_failure_exits_loudly(cli_env, monkeypatch):
+    import ygo_sniper.seller_resolve as resolve_mod
+    from ygo_sniper.seller_links import SellerUrlError
+
+    def _fail(url, cfg=None, *, fetcher=None):
+        raise SellerUrlError("店鋪頁 x 抓取失敗。請改貼 ebay.com/usr/帳號 頁")
+
+    monkeypatch.setattr(resolve_mod, "resolve_ebay_store", _fail)
+    runner, store, cli_mod = cli_env
+    result = runner.invoke(
+        cli_mod.app, ["watch-seller", "pin", "https://www.ebay.com/str/x"]
+    )
+    assert result.exit_code == 1
+    assert "usr" in result.output                   # 指路 /usr/
+    assert store.list_seller_watch() == []          # 失敗不落任何一筆

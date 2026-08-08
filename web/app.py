@@ -914,10 +914,26 @@ def sellers(limit: int = 50):
     params = _watch_params()
     from ygo_sniper.seller_watch import rotation_state
 
+    from ygo_sniper.seller_watch import (
+        SELLER_PAGE_SOURCE,
+        SOURCE_PINNED,
+        UNSUPPORTED_SITE_NOTE,
+    )
+
     watch_rows = store.list_seller_watch(active_only=False)
     for r in watch_rows:
         r["url"] = seller_page_url(r["seller_key"])
+        # 站台還掃不到的要在畫面上講清楚（灰字註記）——「釘了但永遠 0 筆」
+        # 與「沒在掃」外顯一樣，差別必須看得見（CLAUDE.md 第五節）。
+        site = str(r["seller_key"]).partition(":")[0]
+        r["unsupported_note"] = (
+            None if site in SELLER_PAGE_SOURCE
+            else UNSUPPORTED_SITE_NOTE.get(site, f"{site} 沒有賣家頁列舉實作")
+        )
     watch_active = {r["seller_key"]: r for r in watch_rows if r["active"]}
+    # 名額計數不含 pinned（釘選不佔 30 名額）；畫面上的 N/30 必須跟
+    # add_watch 的上限判準同源，混進 pinned 就是兩把尺。
+    n_pinned = sum(1 for r in watch_active.values() if r["source"] == SOURCE_PINNED)
     ranked = [
         {**_score_dict(s), "metrics": _metrics_brief(m),
          "watch": watch_active.get(s.seller_key)}
@@ -933,7 +949,8 @@ def sellers(limit: int = 50):
         "ranked": ranked,
         "rejected": rejected,
         "watch": watch_rows,
-        "watch_active": len(watch_active),
+        "watch_active": len(watch_active) - n_pinned,
+        "watch_pinned": n_pinned,
         "rotation": rotation_state(store),
         "params": {
             "enabled": params.enabled,
@@ -1038,6 +1055,63 @@ def set_seller_watch(seller_key: str, body: WatchUpdate):
     return {
         "ok": res.ok, "already": res.already, "seller_key": res.seller_key,
         "message": res.reason, "batch": res.batch, "evicted": res.evicted,
+    }
+
+
+class PinRequest(BaseModel):
+    url: str
+    reason: str | None = None
+
+
+@app.post("/api/sellers/pin")
+def pin_seller(body: PinRequest):
+    """貼賣家頁 URL → 釘選（不佔名額、永不淘汰、每個輪替時段都掃）。
+
+    URL 解析失敗回 **400＋SellerUrlError 的訊息原文**（訊息本身列出支援的
+    URL 形式，前端照原文顯示即可）；也接受現成的 `site:id` 鍵（與 CLI 的
+    `watch-seller pin` 同一條判準，兩邊共用 `seller_resolve.resolve_seller_target`）。
+    eBay `/str/` 店鋪頁會**連網**解析出真實帳號（slug ≠ username，不猜），
+    解析出處寫進 reason。政策只有 `seller_watch.add_watch` 一份，這裡不重複判斷名額。
+    """
+    from ygo_sniper.seller_links import SellerUrlError
+    from ygo_sniper.seller_resolve import resolve_seller_target
+    from ygo_sniper.seller_watch import (
+        SELLER_PAGE_SOURCE,
+        SOURCE_PINNED,
+        UNSUPPORTED_SITE_NOTE,
+        add_watch,
+    )
+
+    raw = (body.url or "").strip()
+    try:
+        key, store_slug = resolve_seller_target(raw, cfg)
+    except SellerUrlError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    reason_text = body.reason or "從 dashboard 釘選（貼賣家頁 URL）"
+    if store_slug:
+        # 店鋪頁是連網解析來的：出處進 reason，日後看名單知道這個鍵哪來的
+        reason_text += f"（從店鋪頁 {store_slug} 解析）"
+    res = add_watch(
+        store, key, source=SOURCE_PINNED,
+        reason=reason_text,
+        params=_watch_params(),
+    )
+    if not res.ok:
+        # add_watch 的拒絕（例如鍵格式錯誤）也是使用者貼錯東西——一樣 400
+        # ＋原文，不包裝成 200 讓前端自己猜。
+        raise HTTPException(400, res.reason)
+    site = key.partition(":")[0]
+    note = (
+        None if site in SELLER_PAGE_SOURCE
+        else UNSUPPORTED_SITE_NOTE.get(site, f"{site} 沒有賣家頁列舉實作")
+    )
+    message = res.reason
+    if store_slug:
+        message += f"；店鋪頁 {store_slug} → 帳號 {key.partition(':')[2]}"
+    return {
+        "ok": True, "already": res.already, "seller_key": res.seller_key,
+        "message": message, "batch": res.batch,
+        "unsupported_note": note,
     }
 
 

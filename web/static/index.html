@@ -336,6 +336,7 @@
         color:var(--dim);white-space:nowrap}
   .sv-tag.manual{border-color:var(--accent);color:var(--accent)}
   .sv-tag.auto{border-color:var(--good);color:var(--good)}
+  .sv-tag.pinned{border-color:var(--warn);color:var(--warn)}
   .comp-bar{height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden;
         min-width:60px;border:1px solid var(--line)}
   .comp-bar i{display:block;height:100%;background:var(--accent)}
@@ -2361,6 +2362,8 @@ const svScore = r => r.ok
 
 function svWatchTag(w){
   if(!w) return `<span class="sv-tag">未監控</span>`;
+  if(w.source === "pinned")
+    return `<span class="sv-tag pinned" title="不佔名額、永不被自動淘汰、每個輪替時段都掃">📌 釘選</span>`;
   const cls = w.source === "manual" ? "manual" : "auto";
   return `<span class="sv-tag ${cls}">${w.source === "manual" ? "手動" : "自動"}·批 ${w.batch}</span>`;
 }
@@ -2414,12 +2417,19 @@ async function loadSellers(){
 
   const p = d.params || {};
   const rot = d.rotation || {};
-  const wrows = (d.watch || []).filter(w => w.active).map(w => `
+  /* 釘選列排最前（使用者明講要追蹤的人 > 演算法選的），其餘維持後端排序。
+     釘選列額外顯示灰字的「站台掃不到」註記（unsupported_note）——
+     「釘了但永遠 0 筆」與「沒在掃」外顯一樣，差別必須畫在臉上。 */
+  const wact = (d.watch || []).filter(w => w.active);
+  const wsorted = [...wact.filter(w => w.source === "pinned"),
+                   ...wact.filter(w => w.source !== "pinned")];
+  const wrows = wsorted.map(w => `
     <tr>
-      <td><a href="#" onclick="openSeller('${escapeHtml(w.seller_key)}');return false">${escapeHtml(w.seller_key)}</a>${sellerExtLink(w.url)}</td>
+      <td><a href="#" onclick="openSeller('${escapeHtml(w.seller_key)}');return false">${escapeHtml(w.seller_key)}</a>${sellerExtLink(w.url)}
+        ${w.unsupported_note ? `<div style="color:var(--dim);font-size:11px">⚠️ ${escapeHtml(w.unsupported_note)}</div>` : ""}</td>
       <td>${svWatchTag(w)}</td>
-      <td>${w.score == null ? `<span class="noscore" title="手動加入的賣家沒有分數——不假裝它有">—</span>` : w.score.toFixed(1)}</td>
-      <td>${w.batch}</td>
+      <td>${w.score == null ? `<span class="noscore" title="手動加入／釘選的賣家沒有分數——不假裝它有">—</span>` : w.score.toFixed(1)}</td>
+      <td>${w.source === "pinned" ? `<span title="釘選列每一批都掃">全部</span>` : w.batch}</td>
       <td>${w.last_scanned_at ? escapeHtml(String(w.last_scanned_at).slice(0,16).replace("T"," ")) : "還沒掃過"}</td>
       <td style="white-space:normal">${escapeHtml(w.last_result || "—")}</td>
       <td><button onclick="toggleWatch('${escapeHtml(w.seller_key)}','remove')">移出</button></td>
@@ -2427,12 +2437,27 @@ async function loadSellers(){
   document.getElementById("sv-watch").innerHTML = `
     <div class="row" style="gap:8px">
       <span class="pill">名單 <b>${d.watch_active}</b>/${p.max_sellers}</span>
+      <span class="pill">📌 釘選 <b>${d.watch_pinned || 0}</b> 組（不佔名額）</span>
       <span class="pill">${p.batches} 批輪替 · 每批 ${Math.round(p.batch_interval_minutes)} 分
-        → 每賣家 ${Math.round(p.per_seller_interval_minutes)} 分一次</span>
+        → 每賣家 ${Math.round(p.per_seller_interval_minutes)} 分一次；釘選每批都掃</span>
       <span class="pill">自動入選門檻 <b>${p.auto_min_score}</b> 分</span>
       ${rot.batch != null ? `<span class="pill">上次輪替 第 <b>${rot.batch}</b> 批 ·
         ${escapeHtml(String(rot.claimed_at||"").slice(0,16).replace("T"," "))}</span>` : ""}
       ${p.enabled ? "" : `<span class="pill" style="color:var(--danger)">監控掃描已關閉</span>`}
+    </div>
+    <!-- 樣式比照鑑價／關鍵字搜尋（.apr-form）：三處都是「貼一個網址／關鍵字
+         → 按一個鈕」，長說明一律放下面的 .hint，不塞進 placeholder。 -->
+    <form class="apr-form" style="margin-top:10px" onsubmit="pinSeller(event)">
+      <input id="sv-pin-url" type="text" autocomplete="off" spellcheck="false"
+             placeholder="https://auctions.yahoo.co.jp/seller/… / https://jp.mercari.com/user/profile/… / https://tw.mercari.com/zh-hant/seller/… / https://www.ebay.com/usr/…">
+      <button type="submit" id="sv-pin-btn">📌 釘選</button>
+    </form>
+    <div class="hint">
+      支援 Yahoo 拍賣、Mercari 日本／<b>台灣</b>、<b>eBay</b> 的賣家頁 URL，也可以直接輸入
+      <code>site:seller_id</code>。eBay 店鋪頁（<code>ebay.com/str/…</code>）會即時抓頁面解析出真實帳號，
+      <b>約需 1-2 秒</b>——店鋪名稱與帳號是兩回事，解析不出來時會拒絕而不是亂猜。
+      釘選的賣家<b>不佔 30 組名額、永不被自動淘汰</b>，而且每個輪替時段都掃
+      （約 60 分一次，其他名單是 240 分）。
     </div>
     <!-- 2026-08-05 實測：自動入選已有 16 個（Alpha 軌）＋ manual 1 個，
          下面這句只是名單真的清空時的 fallback 文案，實務上很少出現。 -->
@@ -2551,6 +2576,42 @@ function svTable(rows, ranked){
         ${svCaveats(r.caveats)}</td></tr>` : ""}`;
   }).join("");
   return head + `<tbody>${body || `<tr><td colspan="7">目前沒有——這是誠實的答案，不是壞掉。</td></tr>`}</tbody>`;
+}
+
+async function pinSeller(ev){
+  // 表單化之後 submit 是唯一入口（Enter 與按鈕走同一條路），預設送出要擋掉。
+  if(ev) ev.preventDefault();
+  const input = document.getElementById("sv-pin-url");
+  const btn = document.getElementById("sv-pin-btn");
+  const url = (input.value || "").trim();
+  if(!url){ toast("先貼一個賣家頁 URL"); return; }
+  // eBay 店鋪頁要連網解析帳號（1-2 秒），比照鑑價：跑的時候鎖住按鈕，
+  // 不然使用者會以為沒反應而連按，送出多個重複請求。
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.innerHTML = `<span class="spin"></span>釘選中`;
+  try{
+    const r = await api("/api/sellers/pin", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({url}),
+    });
+    // 後端拒絕（URL 認不得）走 400，api() 會 throw 並帶原文——
+    // SellerUrlError 的訊息本身列出支援形式，照原文顯示即可。
+    toast("📌 " + (r.message || "已釘選")
+      + (r.unsupported_note ? `｜⚠️ 此站尚無列舉實作，暫時掃不到：${r.unsupported_note}` : ""));
+    input.value = "";
+    svData = null;
+    await loadSellers();
+  }catch(e){
+    // HTTPException 的 body 是 {"detail": "..."}——把原文挖出來給使用者看
+    // （訊息列出支援的 URL 形式，比「釘選失敗」有行動性），挖不到就照原樣。
+    let msg = e.message;
+    try{ msg = JSON.parse(msg).detail || msg; }catch(_){ /* 非 JSON 就照原樣 */ }
+    toast("釘選失敗：" + msg, 6000);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 }
 
 async function toggleWatch(key, action){
