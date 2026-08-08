@@ -1995,8 +1995,14 @@ class Store:
                 # `AND state = ?`：讀（list_signals）與寫之間狀態可能被改
                 # （正式庫每 30 分鐘有排程在寫，dashboard 也隨時能按）。
                 # 少了這道護欄會蓋掉新狀態，還記下一個錯的 cleared_from。
+                # cleared_verified = 1：走到這裡的每一筆都有實證——ended 是
+                # end_time 已過的事實，gone 是 verifier 開頁拿到的 SOLD/DELISTED
+                # （沒實證的根本進不了 doomed，見上方分流）。這個戳記是
+                # 「實證下架後又上架」徽章帳的依據，還原時轉進
+                # verified_restored_count（restore_revived_signals）。
                 c.execute(
-                    f"UPDATE signals SET state = ?, cleared_at = ?, cleared_from = ? "
+                    f"UPDATE signals SET state = ?, cleared_at = ?, cleared_from = ?, "
+                    f"cleared_verified = 1 "
                     f"WHERE key IN ({marks}) AND state = ?",
                     [TriageState.EXPIRED.value, now, state, *chunk, state],
                 )

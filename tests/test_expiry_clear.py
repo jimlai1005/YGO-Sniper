@@ -197,6 +197,47 @@ def test_verified_migration_is_idempotent(tmp_path):
     assert set(VERIFIED_COLUMNS) <= _columns(db)
 
 
+def test_clear_stamps_cleared_verified_on_every_cleared_row(store):
+    """2026-08-07 起清除的兩條路徑都是實證：ended（end_time 已過的事實）與
+    gone 經 verifier 判 SOLD/DELISTED。**每一筆**被清的列都要蓋 cleared_verified=1
+    ——徽章帳的分母就是從這個戳記來的。"""
+    _insert(store, "buyee_yahoo:ended-1", payload=json.dumps(
+        {"listing": {"end_time": "2026-01-01T00:00:00+00:00"}}
+    ))
+    _insert(store, "buyee_yahoo:gone-1")
+    _mark_gone(store, "buyee_yahoo:gone-1")
+
+    result = store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
+
+    assert result["cleared"] == 2
+    for key in ("buyee_yahoo:ended-1", "buyee_yahoo:gone-1"):
+        row = store.get_signal(key)
+        assert row["state"] == TriageState.EXPIRED.value
+        assert row["cleared_verified"] == 1
+
+
+def test_uncleared_rows_never_get_the_stamp(store):
+    """STILL_LIVE／UNVERIFIABLE／live 的列沒被清，戳記必須維持 0。"""
+    _insert(store, "buyee_yahoo:phantom")
+    _mark_gone(store, "buyee_yahoo:phantom")
+    _insert(store, "buyee_yahoo:blocked")
+    _mark_gone(store, "buyee_yahoo:blocked")
+    _insert(store, "buyee_yahoo:live-1")
+
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW,
+        verifier=_verifier({
+            "buyee_yahoo:phantom": "STILL_LIVE",
+            "buyee_yahoo:blocked": "UNVERIFIABLE",
+        }),
+    )
+
+    for key in ("buyee_yahoo:phantom", "buyee_yahoo:blocked", "buyee_yahoo:live-1"):
+        assert store.get_signal(key)["cleared_verified"] == 0
+
+
 def test_list_signals_brings_obs_columns(store):
     _insert(store, "a")
     _mark_gone(store, "a", when="2026-08-05T00:00:00+00:00")
