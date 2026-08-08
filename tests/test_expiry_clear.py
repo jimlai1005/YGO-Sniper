@@ -663,6 +663,66 @@ def _mark_gone_again(store: Store, key: str) -> None:
         )
 
 
+def test_verified_clear_then_comeback_bumps_both_counters(store):
+    """實證清除 → 重新掃到 → 還原：舊帳（restored_count）與新帳
+    （verified_restored_count）都 +1，戳記歸 0（下一輪要重新取證）。"""
+    key = "buyee_yahoo:proof-1"
+    _insert(store, key)
+    _mark_gone(store, key)
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
+    assert store.get_signal(key)["cleared_verified"] == 1
+
+    _rescan(store, key)
+    assert store.restore_revived_signals()["restored"] == 1
+
+    row = store.get_signal(key)
+    assert row["state"] == "watching"
+    assert row["restored_count"] == 1
+    assert row["verified_restored_count"] == 1
+    assert row["cleared_verified"] == 0
+
+
+def test_legacy_clear_comeback_does_not_count_as_verified(store):
+    """舊時代（推論清除）殘留的 expired 列：沒有戳記，回來時只加舊帳。
+    這正是「17 個舊徽章自動消失」的機制——舊帳不流進新徽章。"""
+    key = "buyee_yahoo:legacy-1"
+    _insert(store, key)
+    _mark_gone(store, key)
+    with sqlite3.connect(store.db_path) as c:
+        # 手動模擬舊時代清除：有 cleared_from、沒有實證戳記
+        c.execute(
+            "UPDATE signals SET state = 'expired', cleared_from = 'watching', "
+            "cleared_at = '2026-08-05T00:00:00+00:00', cleared_verified = 0 "
+            "WHERE key = ?",
+            (key,),
+        )
+
+    _rescan(store, key)
+    assert store.restore_revived_signals()["restored"] == 1
+
+    row = store.get_signal(key)
+    assert row["state"] == "watching"
+    assert row["restored_count"] == 1            # 誤殺帳照記，語意不動
+    assert row["verified_restored_count"] == 0   # 沒實證就不進徽章帳
+
+
+def test_verified_restore_counts_accumulate(store):
+    """反覆「實證下架→又上架」的標的要累加——徽章的 ×N 就是它。"""
+    key = "buyee_yahoo:flappy-verified"
+    _insert(store, key)
+    _mark_gone(store, key)
+    for expected in (1, 2):
+        store.clear_expired_signals(
+            "watching", gone_confidence=LOW, verifier=_sold_verifier()
+        )
+        _rescan(store, key)
+        store.restore_revived_signals()
+        assert store.get_signal(key)["verified_restored_count"] == expected
+        _mark_gone_again(store, key)
+
+
 def test_clear_expired_survives_more_keys_than_sqlite_takes_host_params(store):
     """`WHERE key IN (?,?,…)` 的參數上限是 SQLITE_MAX_VARIABLE_NUMBER（32766），
     而取資料那一側寫的是 `limit=100_000`——兩個上限對不起來就是一顆定時炸彈。

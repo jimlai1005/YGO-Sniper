@@ -2070,10 +2070,17 @@ class Store:
                 marks = ",".join("?" * len(chunk))
                 # `state = cleared_from` 逐列取自己的原狀態；WHERE 重覆一次
                 # 守衛條件（讀寫之間使用者可能已經自己動過這一筆）。
+                # restored_count（舊誤判帳）照舊無條件 +1；verified_restored_count
+                # 只加 cleared_verified（0 或 1）——只有**實證清除後**又回來的才算
+                # 「實證下架後重新上架」。同一句 UPDATE 裡把戳記歸 0 是安全的：
+                # SQLite 的 SET 全部以**更新前**的列值求值，順序不影響結果。
                 c.execute(
                     f"UPDATE signals SET state = cleared_from, cleared_at = NULL, "
                     f"cleared_from = NULL, "
-                    f"restored_count = COALESCE(restored_count, 0) + 1 "
+                    f"restored_count = COALESCE(restored_count, 0) + 1, "
+                    f"verified_restored_count = COALESCE(verified_restored_count, 0) "
+                    f"  + COALESCE(cleared_verified, 0), "
+                    f"cleared_verified = 0 "
                     f"WHERE key IN ({marks}) AND state = ? AND cleared_from IS NOT NULL",
                     [*chunk, TriageState.EXPIRED.value],
                 )
