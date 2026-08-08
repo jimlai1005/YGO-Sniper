@@ -171,6 +171,13 @@ Seller Alpha 一開始的設計是「賣家售價 vs 我們模型的公允價」
    gone 候選逐筆開商品頁實證（`verify_departed.py`），只清 SOLD／DELISTED；
    STILL_LIVE 解除離場標記；UNVERIFIABLE（被擋／讀不到）一律保留並大聲回報。
    **讀不到 ≠ 已離場**——這與全域原則「讀不到錢 ≠ 錢虧光」是同一條
+6. **識別碼是命名空間，不是字串**——2026-08-09 釘選功能：eBay 店鋪 slug
+   （`/str/merrycorporation`）與 Browse API 的帳號（`merry_tcg`）是兩個命名
+   空間，長得像但不相等。猜「slug 就是帳號」猜錯時，系統會安靜地追蹤一個
+   不存在的賣家（永遠 0 筆，與「這人最近沒上架」外顯一模一樣）。修法：
+   抓店鋪頁抽真帳號，且**同一個值要同時出現在 `username` 與 `sellerId`
+   兩種鍵下才採信**——單鍵孤證可能是頁上殘留的別家賣家標記，寧可拒絕並
+   要使用者改貼 `/usr/` 頁（`seller_resolve.py`）
 
 **「已復活」有兩本帳，語意不同，永遠不要合併或互相 fallback**：
 
@@ -250,7 +257,11 @@ ygo-sniper notify-preview      # 只算不送，調門檻時用這個
 ygo-sniper health              # 各來源健康 ＋ 告警表
 ygo-sniper sellers --rank      # Seller Alpha 排行榜
 ygo-sniper seller <key>        # 單一賣家 drill-down
-ygo-sniper watch-seller list   # 監控名單
+ygo-sniper watch-seller list   # 監控名單（含 📌 釘選區塊）
+ygo-sniper watch-seller pin <URL或key>    # 釘選賣家：貼 profile URL 即可，
+                               #   不佔 30 名額、每批都掃（~60 分一次）、永不淘汰
+                               #   eBay /str/ 店鋪頁會即時解析出真帳號（店名≠帳號）
+ygo-sniper watch-seller unpin <URL或key>  # 解除釘選
 ygo-sniper coverage-groups     # 分群覆蓋率（調門檻前必跑）
 ygo-sniper backfill-sale-kind  # 回填 comps 成交型態（競標結標／定價成交），冪等
 ygo-sniper corpus-diff         # 全語料雙向比對（改過濾／解析規則前後必跑，見第一節）

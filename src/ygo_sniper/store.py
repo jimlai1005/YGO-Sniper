@@ -1337,20 +1337,44 @@ class Store:
         score: float | None = None,
         now: str | None = None,
     ) -> None:
-        """加入（或重新啟用）一個監控賣家。
+        """加入、重新啟用、或更新一個監控賣家。三種情況一條 SQL 分流：
 
-        重新啟用時 `added_at` 會被重寫成現在——那是「這一次開始追蹤」的時間，
-        而輪替與冷卻都以它為基準。`last_scanned_at` 一律清空：重新加入之後
-        第一次輪到它就該掃，不該沿用上次移除前的時間戳。
+        - **新列**：INSERT，`added_at` ＝ 現在。
+        - **重新啟用**（既有列 `active=0`）：`added_at` 重寫成現在——那是
+          「這一次開始追蹤」的時間，輪替與冷卻都以它為基準；`last_scanned_at`
+          一律清空：重新加入之後第一次輪到它就該掃，不該沿用移除前的時間戳。
+        - **更新活躍列**（2026-08-09 審查 F3）：**保留** `added_at`／
+          `last_scanned_at`／`last_result`。升級成 pinned、改備註走的都是
+          這條——先前用 INSERT OR REPLACE 會把三欄簿記整列抹掉：防重掃
+          護欄當它「從沒掃過」，dashboard 的「上次掃描」也跟著消失。
+          只更新 source／reason／batch／score，active 歸 1、removed_at 歸 NULL。
         """
         site, _, sid = seller_key.partition(":")
         stamp = now or _now_iso()
         with self._conn() as c:
             c.execute(
-                """INSERT OR REPLACE INTO seller_watch
+                """INSERT INTO seller_watch
                    (seller_key, site, seller_id, source, reason, added_at,
                     active, batch, score, last_scanned_at, last_result, removed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, '', NULL)""",
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, '', NULL)
+                   ON CONFLICT(seller_key) DO UPDATE SET
+                     site = excluded.site,
+                     seller_id = excluded.seller_id,
+                     source = excluded.source,
+                     reason = excluded.reason,
+                     batch = excluded.batch,
+                     score = excluded.score,
+                     active = 1,
+                     removed_at = NULL,
+                     added_at = CASE WHEN seller_watch.active = 1
+                                     THEN seller_watch.added_at
+                                     ELSE excluded.added_at END,
+                     last_scanned_at = CASE WHEN seller_watch.active = 1
+                                            THEN seller_watch.last_scanned_at
+                                            ELSE NULL END,
+                     last_result = CASE WHEN seller_watch.active = 1
+                                        THEN seller_watch.last_result
+                                        ELSE '' END""",
                 (seller_key, site, sid, source, reason or "", stamp, int(batch),
                  None if score is None else float(score)),
             )

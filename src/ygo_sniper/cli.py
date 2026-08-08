@@ -1255,6 +1255,89 @@ def watch_seller_add(
     console.print(f"[{tone}]{res.seller_key}[/{tone}]：{res.reason}")
 
 
+def _resolve_seller_key(arg: str, cfg) -> tuple[str, str | None]:
+    """`pin`／`unpin` 的參數：URL（`http` 開頭）就解析，否則當現成的 site:id 鍵。
+
+    回 `(seller_key, 店鋪 slug 或 None)`——slug 只在 eBay `/str/` 店鋪頁那條
+    路上有值（那條路會連網把 slug 解析成真實帳號，見 `seller_resolve`），
+    呼叫端拿它註明「這個鍵是從哪個店鋪頁解析來的」。
+    解析失敗**直接紅字＋exit 1**（`SellerUrlError` 的訊息本身已列出支援形式），
+    不回退、不猜——貼錯網址與釘選成功必須長得完全不一樣。
+    """
+    from .seller_links import SellerUrlError
+    from .seller_resolve import resolve_seller_target
+
+    try:
+        return resolve_seller_target(arg, cfg)
+    except SellerUrlError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+def _warn_if_unlistable(seller_key: str) -> None:
+    """釘選成功但站台還掃不到時，**大聲**講清楚（不是安靜地讓它永遠 0 筆）。"""
+    from .seller_watch import SELLER_PAGE_SOURCE, UNSUPPORTED_SITE_NOTE
+
+    site = seller_key.partition(":")[0]
+    if site in SELLER_PAGE_SOURCE:
+        return
+    note = UNSUPPORTED_SITE_NOTE.get(site, f"{site} 沒有賣家頁列舉實作")
+    console.print(
+        f"[bold yellow]⚠️ 已釘選，但此站尚無賣家頁列舉實作，暫時掃不到"
+        f"（原因：{note}）。名單會留著，列舉實作上線後自動開始掃。[/bold yellow]"
+    )
+
+
+@watch_app.command("pin")
+def watch_seller_pin(
+    target: str = typer.Argument(
+        ..., help="賣家頁 URL（http 開頭）或現成的賣家鍵（如 ebay:psa）"
+    ),
+    reason: str = typer.Option("", help="為什麼釘選（已釘選再 pin ＝ 更新這段備註）"),
+):
+    """釘選一個賣家：**不佔 30 名額、永不被自動淘汰、每個輪替時段都掃**。
+
+    使用者明講要追蹤的賣家永遠優先於演算法選的——已在名單上（任何軌）的
+    賣家再 pin 會直接升級成釘選。移除用 `watch-seller unpin`。
+    """
+    from .seller_watch import SOURCE_PINNED, add_watch
+
+    _cfg, store, params = _watch_ctx()
+    key, store_slug = _resolve_seller_key(target, _cfg)
+    reason_text = reason or "使用者釘選（貼賣家頁 URL 要求長期追蹤）"
+    if store_slug:
+        # 店鋪頁是連網解析來的：把出處寫進 reason，日後看名單才知道
+        # `ebay:merry_tcg` 這個鍵是從 /str/merrycorporation 來的。
+        reason_text += f"（從店鋪頁 {store_slug} 解析）"
+        console.print(f"店鋪頁 {store_slug} → 帳號 {key.partition(':')[2]}")
+    res = add_watch(
+        store, key, source=SOURCE_PINNED,
+        reason=reason_text, params=params,
+    )
+    if not res.ok:
+        console.print(f"[red]沒有釘選 {res.seller_key}[/red]：{res.reason}")
+        raise typer.Exit(1)
+    console.print(f"[green]📌 {res.seller_key}[/green]：{res.reason}")
+    _warn_if_unlistable(res.seller_key)
+
+
+@watch_app.command("unpin")
+def watch_seller_unpin(
+    target: str = typer.Argument(
+        ..., help="賣家頁 URL（http 開頭）或賣家鍵（如 ebay:psa）"
+    ),
+):
+    """解除釘選（軟刪除，歷史留著）。"""
+    from .seller_watch import remove_watch
+
+    _cfg, store, _params = _watch_ctx()
+    key, _store_slug = _resolve_seller_key(target, _cfg)
+    if remove_watch(store, key, reason="手動解除釘選"):
+        console.print(f"[green]已解除釘選：{key}[/green]")
+    else:
+        console.print(f"[yellow]{key} 本來就不在（active）名單上[/yellow]")
+
+
 @watch_app.command("remove")
 def watch_seller_remove(
     key: str = typer.Argument(..., help="賣家鍵，如 ebay:psa"),
@@ -1274,28 +1357,60 @@ def watch_seller_remove(
 def watch_seller_list(
     all_rows: bool = typer.Option(False, "--all", help="連已移除的也列出來"),
 ):
-    """看目前的監控名單（含批次、上次掃描時間與結果）。"""
-    from .seller_watch import rotation_state
+    """看目前的監控名單（含批次、上次掃描時間與結果）。釘選列獨立成塊放最上面。"""
+    from .seller_watch import (
+        SELLER_PAGE_SOURCE,
+        SOURCE_PINNED,
+        UNSUPPORTED_SITE_NOTE,
+        rotation_state,
+    )
 
     _cfg, store, params = _watch_ctx()
     rows = store.list_seller_watch(active_only=not all_rows)
     active = [r for r in rows if r.get("active")]
+    # 名額顯示不含 pinned（釘選不佔 30 名額——計數混進去，畫面上的 N/30
+    # 就跟 add_watch 實際的上限判準不同源了）。
+    pinned = [r for r in active if r.get("source") == SOURCE_PINNED]
+    quota_used = [r for r in active if r.get("source") != SOURCE_PINNED]
+    rows = [r for r in rows if not (r.get("active") and r.get("source") == SOURCE_PINNED)]
     st = rotation_state(store)
     console.print(
-        f"[bold]監控名單[/bold] {len(active)}/{params.max_sellers} 個"
-        f"（{params.batches} 批輪替、每批間隔 {params.batch_interval_minutes:.0f} 分"
-        f" → 每賣家 {params.per_seller_interval_minutes:.0f} 分一次）"
+        f"[bold]監控名單[/bold] {len(quota_used)}/{params.max_sellers} 個"
+        + (f"，另有釘選 {len(pinned)} 組（不佔名額）" if pinned else "")
+        + f"（{params.batches} 批輪替、每批間隔 {params.batch_interval_minutes:.0f} 分"
+        f" → 每賣家 {params.per_seller_interval_minutes:.0f} 分一次；"
+        "釘選列每批都掃）"
         + ("" if params.enabled else "  [red]⚠️ 監控掃描已關閉（watch_enabled=false）[/red]")
     )
+    if pinned:
+        tp = Table(title=f"📌 釘選（不佔名額，{len(pinned)} 組）")
+        for col in ("seller_key", "上次掃描", "上次結果", "理由", "站台狀態"):
+            tp.add_column(col, overflow="fold")
+        for r in pinned:
+            site = str(r["seller_key"]).partition(":")[0]
+            site_note = (
+                "可掃" if site in SELLER_PAGE_SOURCE
+                else f"⚠️ 掃不到：{UNSUPPORTED_SITE_NOTE.get(site, f'{site} 沒有賣家頁列舉實作')}"
+            )
+            tp.add_row(
+                _seller_cell(r["seller_key"]),
+                (r["last_scanned_at"] or "—")[:19],
+                (r["last_result"] or "—")[:60],
+                (r["reason"] or "")[:60],
+                site_note,
+            )
+        console.print(tp)
     if st:
         console.print(
             f"[dim]上次輪替：第 {st.get('batch')} 批 @ {str(st.get('claimed_at'))[:19]}[/dim]"
         )
     if not rows:
-        console.print(
-            "[dim]名單是空的。`ygo-sniper watch-seller add <key>` 手動加，"
-            "或跑一次 `ygo-sniper sellers --rank --sync-watch` 讓過門檻的自動入選。[/dim]"
-        )
+        if not pinned:
+            console.print(
+                "[dim]名單是空的。`ygo-sniper watch-seller add <key>` 手動加、"
+                "`ygo-sniper watch-seller pin <賣家頁URL>` 釘選，"
+                "或跑一次 `ygo-sniper sellers --rank --sync-watch` 讓過門檻的自動入選。[/dim]"
+            )
         return
     t = Table(title=f"seller_watch（{len(rows)} 列）")
     for col in ("seller_key", "來源", "分數", "批次", "上次掃描", "上次結果", "狀態", "理由"):

@@ -234,6 +234,103 @@ class BuyeeSource:
         return result
 
     # ------------------------------------------------------------------
+    # 賣家頁列舉（釘選軌 Phase 2，2026-08-09）
+    # ------------------------------------------------------------------
+    def build_seller_url(self, seller_id: str) -> str:
+        """賣家頁網址：`/mercari/search?seller={純數字ID}`。
+
+        這個形態是從生產 cache 的商品頁連結實證出來的（2026-08-09 用生產路徑
+        WafSession＋httpx 實測 seller=448657621：598KB、75 個唯一商品、
+        版型與搜尋頁同構 `ul.item-lists`）。**刻意不帶任何其他參數**
+        （lang／page／order-sort 都沒有）：實測過的 URL 就是這一個形，而這
+        個站對沒實測過的參數組合可能靜默忽略、也可能整頁壞掉（PayPay 排序
+        值事故，見 `_SITE_SPEC` 註解）——沒實測就不加。
+
+        `urlencode`：seller_id 目前全是純數字，但髒 ID 要被 encode 而
+        不是靜默改寫 query 結構（與 yahoo.build_seller_url 同一立場）。
+        """
+        return f"{self.spec['search_base']}?{urlencode({'seller': str(seller_id)})}"
+
+    def search_seller(
+        self, seller_id: str, *, pages: int | None = None, sold: bool = False
+    ) -> SearchResult:
+        """單一賣家的在架清單（釘選軌／輪替監控）。
+
+        介面與 `yahoo_direct.search_seller`／`paypay_direct.search_seller`
+        對齊（回 `SearchResult`、帶 `parsed_count`、健康判定），呼叫端是
+        `pipeline._scan_watched_sellers` 經 `run_source_search`。
+        抓取走 self.fetcher——生產環境那是 WafSession（見 sources/__init__.py），
+        與關鍵字搜尋完全同一條路：被 WAF 擋会拋 BlockedError，這裡轉成
+        BLOCKED 健康碼，絕不與「0 筆」混同。
+
+        `sold=True` 學 yahoo：**警告＋回空**。Buyee 鏡像的賣家頁沒有已售
+        清單（`status=sold_out` 搭 `seller=` 未實測，未實測的參數組合不准
+        憑印象送出）；靜默回在架等於把「有人開的價」當成交寫進行情。
+
+        **固定 1 頁**：實測賣家頁顯示「1〜100 件目」＝一頁 100 筆，遠大於
+        單一賣家的在架量（實測 75 筆）；翻頁參數搭 `seller=` 未實測，
+        `pages` 收在介面上是為了與其他 source 同形，>1 會降回 1 並印警告
+        （與 paypay_direct 同一做法）。
+        """
+        if sold:
+            print(f"[warn] {self.name} 賣家頁沒有已售出清單，sold=True 回空清單")
+            return SearchResult(
+                source=self.name, site=self.site.value,
+                query=f"seller:{seller_id}", url=self.build_seller_url(seller_id),
+                health=ParseHealth.EMPTY_CONFIRMED,
+                detail="Buyee Mercari 鏡像無賣家已售清單（sold 搭 seller 未實測，不猜）",
+            )
+        if pages and int(pages) > 1:
+            print(f"[warn] {self.name} 賣家頁翻頁尚未實測，pages={pages} 降為 1")
+
+        url = self.build_seller_url(seller_id)
+        result = SearchResult(
+            source=self.name, site=self.site.value,
+            query=f"seller:{seller_id}", url=url,
+        )
+        try:
+            html = self.fetcher.get(url)
+        except BlockedError as exc:
+            # 被 WAF 擋走不到 parser，與「這個賣家沒貨」嚴格分開
+            result.health = ParseHealth.BLOCKED
+            result.detail = f"被擋：{exc}"
+            return result
+        except FetchError as exc:
+            # 抓不到 = 對這個賣家「什麼都不知道」，跟「他沒上架」是兩件事
+            result.health = ParseHealth.FETCH_FAILED
+            result.detail = f"抓取失敗：{exc}"
+            return result
+
+        result.pages_fetched = 1
+        result.html_bytes = len(html)
+        soup = BeautifulSoup(html, "html.parser")
+        batch = self._parse_soup(soup, sold=False)
+        health, detail = self._judge_health(soup, len(batch))
+        if health is not ParseHealth.OK:
+            result.health = health
+            result.detail = detail
+            return result
+
+        for lst in batch:
+            # 賣家頁上每一筆都屬於這個賣家——搜尋頁解析器抓不到 seller_id，
+            # 但這裡我們**確知**主人是誰。填上它，觀測與 Seller Alpha 的
+            # 折價帳才有歸屬（listing_obs.seller_id 是同儕比較的鍵）。
+            lst.seller_id = str(seller_id)
+            result.listings.append(lst)
+            # 與 search_detailed 同一立場：明確填 parsed_count，不讓 canary
+            # 回頭數 listings（哪天加了篩選，健康判定不該跟著位移）。
+            result.parsed_count += 1
+        if result.parsed_count >= 100:
+            # 2026-08-09 審查 F5：一頁滿 100 筆時，第 2 頁的存在與否無從得知
+            # ——固定 1 頁是紀律（翻頁搭 seller= 未實測），但「可能漏抓」
+            # 必須說出來，不能讓大賣家的長尾靜默消失（CLAUDE.md 第五節）。
+            result.detail = (
+                "已達單頁上限 100 筆，可能有下一頁未抓"
+                "（翻頁搭 seller= 未實測，暫不翻）"
+            )
+        return result
+
+    # ------------------------------------------------------------------
     def _judge_health(self, soup: BeautifulSoup, parsed: int) -> tuple[ParseHealth, str]:
         """Buyee 的 0 筆判定只能是**結構性**的（RECON §3 實測含截圖）：
 
