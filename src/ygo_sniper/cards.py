@@ -98,7 +98,12 @@ _YAML_YUGI_URL = "https://raw.githubusercontent.com/DawnbrandBots/yaml-yugi/aggr
 #:   ② 英文標點 . , ! ? # & : ; " ( ) [ ] ' ’ / —— 英文卡名進索引之後才需要：
 #:      「Fiend Reflection #2」「Ray & Temperature」「Yu-Gi-Oh!」的標點在賣家
 #:      標題裡寫法不一，不折掉就等於英文索引只對「標點打得跟官方一樣」的標題有效。
-_DROP = frozenset("・•·∙‧‐‑‒–—―-~〜") | frozenset("−゠─━'’.,!?#&:;\"()[]/")
+#:
+#: 2026-08-08 追加 ③ 引號 『』「」——官方卡名帶引號（『守備』封じ、『攻撃』封じ、
+#:   死のメッセージ「Ａ」…主檔實測 6 個年代內、52 個年代外卡名），賣家一律不寫，
+#:   實際誤殺過「遊戯王 初期 守備封じ スーパーレア PSA8」。折掉後全主檔鍵零碰撞
+#:   （實測），半形 ｢｣ 由 NFKC 先折成 「」 一併涵蓋。
+_DROP = frozenset("・•·∙‧‐‑‒–—―-~〜") | frozenset("−゠─━'’.,!?#&:;\"()[]/") | frozenset("『』「」")
 
 _RUBY_BLOCK = re.compile(r"<ruby>([^<]*)<rt>[^<]*</rt></ruby>")
 _RUBY_WHOLE = re.compile(r"^<ruby>([^<]+)<rt>([^<]+)</rt></ruby>$")
@@ -118,6 +123,77 @@ _TITLE_CODE_RE = re.compile(
 #: 允許的地區碼。**單字母的歐版碼（E/F/G/I/P/S）刻意不收**：實測歐版與美版
 #: 的編號不同步（LOB-E040 是 Yami、LOB-EN040 是伝説の剣），混進來就是撞號。
 _CODE_REGION_TAGS = frozenset({"", "EN", "JP", "JA", "A", "K", "KR"})
+
+#: 年代外量產卡的**年代內特典印刷**（2026-08-08，誤殺重放修洞）。
+#: 鍵＝主檔 out_of_era 的卡名；值＝{正規化卡號（`extract_title_codes` 的鍵格式）:
+#: 該印刷的日期或 None}。
+#:
+#: 為什麼需要這張表：主檔的 in_era 判準是 ocg_date＝**量產版**首發日。三幻神的
+#: 量產版是 2008-2011，但 G4-01/02/03（遊戯王DM4 GB 特典）與 GBI-001/002/003
+#: （同家族海外版特典）是 1998-2004 的印刷——name-match 的年代外判定會蓋過標題裡
+#: 的特典卡號，把正中目標輪廓的 PSA9-10 特典件靜默丟掉（實際誤殺 4 筆 signals）。
+#: 修的是「卡號沒被當年代證據」那一層，**不改**量產版的 ocg_date（那個日期是對的）。
+#:
+#: 年代依據（不上網；主檔內部證據＋語料旁證，詳見 tests/test_cards_recall.py）：
+#:   G4-   主檔 15 張年代內卡帶 G4- 卡號、ocg_date 一致＝2000-12-07（DM4 發售日）；
+#:         語料 49 筆 G4-0[123] 標題大量標「2期／初期／2000年／プロモ／GB特典」。
+#:         三神編號由語料釘死：G4-01=オシリス、G4-02=オベリスク、G4-03=ラー
+#:         （「PSA10 連番 オシリス オベリスク ラー … G4-01 02 03 2000」）。
+#:   GBI-  語料 6 筆 GBI 標題全部是三幻神特典輪廓（特典／英語版／ウルトラレア／初期），
+#:         「…GBI 通常版 特典 PSA9 ３連番」的三神列序與 G4 一致（001=オシリス…）；
+#:         主檔 set_names 純度清單含 DM International 系列（該系列只印過年代內卡）。
+#:         無標題直書年份，信心低於 G4——依「誤殺靜默、誤放看得見」偏向收；
+#:         特典日期查不到就誠實留 None（in_era 判定不需要它）。
+ERA_PRINTINGS: dict[str, dict[str, str | None]] = {
+    "オシリスの天空竜": {"G4-1": "2000-12-07", "GBI-1": None},
+    "オベリスクの巨神兵": {"G4-2": "2000-12-07", "GBI-2": None},
+    "ラーの翼神竜": {"G4-3": "2000-12-07", "GBI-3": None},
+}
+
+#: 一字卡名（山／森／氷／海／闇）的確認詞（2026-08-08，**原始標題**形態：
+#: NFKC 後、未折疊）。一字鍵只有以獨立 token 出現、且後接這些詞時才算命中。
+#: 詞表三類：稀有度（對應 parsers/rarity.py 的封閉詞表）、鑑定機構、期別詞。
+#:
+#: 為什麼在原標題（而不是折疊字串）上確認：fold() 會移除空白與引號，
+#: 「拡張パック第5弾「神秘なる山」PSA9」（寶可夢）折完是 …なる山psa9…，
+#: 與真標的「山 PSA9」不可分——全語料 diff 實際抓到這筆誤配。原標題上
+#: 「山」的前一字是 る（詞中），用 `(?<!\w)` 就擋得掉；空白／括號則放行。
+#: 全語料 41,491 筆實測：規則命中的全部是真一字卡標的（山／氷）或本來就被
+#: 「枚セット」排除的多卡 lot，誤配 0。
+_SINGLE_CONFIRM_WORDS = (
+    # 稀有度
+    "スーパー|ウルトラ|シークレット|レリーフ|アルティメット|パラレル|ノーマル|レア|シク"
+    # 鑑定機構（re.I 涵蓋小寫 psa9 這種寫法）
+    "|PSA|ARS|BGS"
+    # 期別詞（NFKC 後全形數字已折半形）
+    "|初期|一期|1期|二期|2期|三期|3期"
+)
+
+_SINGLE_CONFIRM_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _single_confirm_re(ch: str) -> re.Pattern[str]:
+    pat = _SINGLE_CONFIRM_RE_CACHE.get(ch)
+    if pat is None:
+        # (?<!\w)：一字名必須是獨立 token 的開頭（「岡山」「神秘なる山」的
+        # 山是詞尾、「海馬」的海是詞頭但後面接的不是確認詞——兩道各擋一類）。
+        # (?=\W*(…))：後面隔著空白／括號緊接確認詞（fold 前的原標題有空白）。
+        pat = re.compile(rf"(?<!\w){re.escape(ch)}(?=\W*(?:{_SINGLE_CONFIRM_WORDS}))", re.I)
+        _SINGLE_CONFIRM_RE_CACHE[ch] = pat
+    return pat
+
+
+def _confirmed_single_chars(title: str, chars: frozenset[str]) -> frozenset[str]:
+    """這個標題裡，哪些一字卡名以「獨立 token ＋ 後接確認詞」的形態出現。
+
+    以「漢字一字名折疊後仍是原字」為前提（目前主檔的一字名全是漢字＋
+    NFKC 後變 ASCII 的「７」；假名一字名若未來出現，折疊會轉平假名，
+    這裡要跟著擴充）。
+    """
+    if not chars:
+        return frozenset()
+    t = unicodedata.normalize("NFKC", title)
+    return frozenset(ch for ch in chars if _single_confirm_re(ch).search(t))
 
 
 def strip_ruby(name_ja: str) -> str:
@@ -194,15 +270,20 @@ def _is_usable_key(key: str, min_len: int, min_ascii_len: int) -> bool:
     """太短的鍵會把整個索引變成雜訊產生器。
 
     實測 1998-2004 子集裡有「森」「氷」「山」「海」「闇」「７」這種單字卡名——
-    「闇」出現在幾乎每個遊戲王標題裡，收進索引等於每一筆都誤判。
+    「闇」出現在幾乎每個遊戲王標題裡，無條件收進索引等於每一筆都誤判。
     純英數的短鍵（PSA10 裡的 "7"）同理。
+
+    2026-08-08 窄放行：**非英數的一字鍵**（山／森／氷／海／闇）可以進索引，
+    但比對時要過 `_single_key_ok` 的鄰接條件（見 `_at`）——實際誤殺過
+    「遊戯王 初期 山 スーパーレア PSA7」。「７」NFKC 後是 ASCII 的 7，
+    出現在每個分數與卡號裡，維持不進索引。
 
     純英數的門檻另外拉高（`min_ascii_len`，預設 6）：英文卡名進索引之後，
     「Yami」（LOB-051）這種四字母名會被標題裡的「YAMI YUGI」誤觸發，
     而漏掉一張 Yami 的代價是退回 L3，配錯的代價是拿別張卡的行情去出價。
     """
     if len(key) < min_len:
-        return False
+        return len(key) == 1 and not key.isascii()
     return not (key.isascii() and key.isalnum() and len(key) < min_ascii_len)
 
 
@@ -280,6 +361,12 @@ class CardIndex:
             for lst in bucket.values():
                 lst.sort(key=lambda kv: -len(kv[0]))
 
+        # 一字鍵清單：比對時要先過 `_confirmed_single_chars` 的確認（見 `_at`）。
+        self._single_chars: frozenset[str] = frozenset(
+            k for b in (self._era, self._other) for lst in b.values() for k, _ in lst
+            if len(k) == 1
+        )
+
         # 套組名剝除清單：折疊後長度夠、而且**本身不是任何一個卡名鍵**
         # （不然「青眼の白龍伝説」那種以卡名命名的套組會把卡名一起剝掉）。
         keys = {k for b in (self._era, self._other) for lst in b.values() for k, _ in lst}
@@ -347,9 +434,43 @@ class CardIndex:
 
         卡名全部比不到時，才用卡號反查當**後備**（`match_by_code`）。
         次序與它的兩道閘門為什麼長這樣，見模組頂註第 3 條。
+
+        比中**年代外**卡片時多走一步：標題若帶著這張卡自己的年代內特典卡號
+        （`ERA_PRINTINGS`），年代判定翻成 in_era——量產版的 ocg_date 說的是
+        量產那一刷，不是手上這一刷（三幻神 G4/GBI 特典的誤殺修法）。
         """
         hit = self.match_by_name(title)
-        return hit if hit is not None else self.match_by_code(title)
+        if hit is None:
+            return self.match_by_code(title)
+        if not hit.in_era:
+            promo = self._era_printing_of(hit, title)
+            if promo is not None:
+                return promo
+        return hit
+
+    def _era_printing_of(self, hit: CardMatch, title: str) -> CardMatch | None:
+        """name-match 到年代外卡片時，看標題卡號是不是**這張卡自己的**年代內特典印刷。
+
+        只翻年代、不翻卡片身分：卡是誰由卡名決定（比卡號可靠，見頂註第 3 條），
+        卡號在這裡只回答「是哪一刷」。不做全庫卡號反查，所以不受
+        `looks_like_yugioh` 閘門管——能走到這裡代表標題已經比中一個卡名，
+        「園藝鋸的型號長得像卡號」那個風險不存在。
+        """
+        printings = ERA_PRINTINGS.get(hit.name_ja)
+        if not printings:
+            return None
+        for code in extract_title_codes(title):
+            if code in printings:
+                return CardMatch(
+                    name_ja=hit.name_ja,
+                    in_era=True,
+                    card_id=hit.card_id,
+                    name_en=hit.name_en,
+                    ocg_date=printings[code],
+                    matched_key=f"{hit.matched_key}+{code}",
+                    via="name",
+                )
+        return None
 
     def match_by_name(self, title: str) -> CardMatch | None:
         """只走卡名／別名／英文名這條路。比對前先剝掉套組名（頂註第 2 條）。"""
@@ -359,9 +480,10 @@ class CardIndex:
                 # 換成一個不可能出現在任何鍵裡的字元，而不是刪掉——刪掉會讓
                 # 前後兩段黏起來，憑空造出原本不存在的子字串。
                 folded = folded.replace(name, "\x00")
+        singles = _confirmed_single_chars(title, self._single_chars)
         for i in range(len(folded)):
-            era_key, era_hit = self._at(self._era, folded, i)
-            other_key, other_hit = self._at(self._other, folded, i)
+            era_key, era_hit = self._at(self._era, folded, i, singles)
+            other_key, other_hit = self._at(self._other, folded, i, singles)
             if era_hit and (other_hit is None or len(era_key) >= len(other_key)):
                 return _with_key(era_hit, era_key)
             if other_hit:
@@ -380,11 +502,21 @@ class CardIndex:
 
     @staticmethod
     def _at(
-        bucket: dict[str, list[tuple[str, CardMatch]]], folded: str, i: int
+        bucket: dict[str, list[tuple[str, CardMatch]]],
+        folded: str,
+        i: int,
+        singles: frozenset[str] = frozenset(),
     ) -> tuple[str, CardMatch | None]:
-        """從 folded[i] 起算的最長命中。桶內已按長度遞減，第一個命中就是最長。"""
+        """從 folded[i] 起算的最長命中。桶內已按長度遞減，第一個命中就是最長。
+
+        一字鍵（山／森／氷／海／闇）只在 `singles`（本標題已確認的一字名，
+        見 `_confirmed_single_chars`）裡才算命中——它們排在桶的最尾（最短），
+        所以任何較長的命中都先於它們回傳。
+        """
         for key, match in bucket.get(folded[i], ()):
             if folded.startswith(key, i):
+                if len(key) == 1 and key not in singles:
+                    continue
                 return key, match
         return "", None
 
