@@ -171,3 +171,27 @@ def test_confirm_text_mentions_the_hidden_rows():
     body = text[text.index("function askClearExpired()"):]
     body = body[: body.index("\n}")]
     assert "hidden" in body, "確認框沒有講出被篩選隱藏的筆數"
+
+
+# ---------------------------------------------------------------------------
+# 已復活徽章改綁實證帳＋在架天數掛載（2026-08-08）
+# ---------------------------------------------------------------------------
+def _function_body(name: str) -> str:
+    text = INDEX.read_text(encoding="utf-8")
+    start = text.index(f"function {name}(")
+    return text[start : text.index("\nfunction ", start + 10)]
+
+
+def test_revived_badge_reads_the_verified_counter():
+    """「已復活」只認實證帳（verified_restored_count）。restored_count 是舊誤判
+    時代的錯誤帳（清除功能自己的誤殺率），拿它當議價訊號是混源。"""
+    body = _function_body("expiryBadges")
+    assert "verified_restored_count" in body, "徽章沒有改綁實證帳"
+    assert "it.restored_count" not in body, "徽章仍在讀舊誤判帳 restored_count"
+
+
+def test_both_cards_mount_the_shelf_age():
+    """兩個卡片掛載點（觀察卡 card、競標卡 auctionCard）都要顯示在架天數
+    ——與 expiryBadges 同一條教訓：只掛一邊，另一邊就看不到。"""
+    for fn in ("card", "auctionCard"):
+        assert "shelfAge(it)" in _function_body(fn), f"{fn} 沒有掛在架天數"

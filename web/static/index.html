@@ -253,6 +253,8 @@
   .xp.gone{border:1px solid #6b5322;background:#33280f;color:var(--warn)}
   .xp.low{opacity:.75}
   .xp.back{border:1px solid #3f6b5f;background:#153029;color:var(--good)}
+  /* 在架天數：低調小字，不是徽章——資訊性標註不能搶過 .xp 系列的行動性徽章 */
+  .shelf-age{font-size:10.5px;color:var(--dim);margin-left:6px;white-space:nowrap;font-weight:400}
   .card.expired{opacity:.62}
   .bid-why{font-size:11.5px;color:var(--dim);line-height:1.65}
 
@@ -702,12 +704,32 @@ function expiryBadges(it){
       ? `<span class="xp ${xp.kind}${xp.confidence === "low" ? " low" : ""}"${
           xp.note ? ` title="${escapeHtml(xp.note)}"` : ""}>${escapeHtml(xp.detail)}</span>`
       : "",
-    // 自動還原過的：讓「誤殺又被救回來」這件事看得見，不是只有統計數字。
-    back: it.restored_count > 0
-      ? `<span class="xp back" title="這筆被清除過 ${it.restored_count} 次，後來又上架了">已復活</span>`
+    // 已復活＝**實證下架後又重新上架**（verified_restored_count，2026-08-08
+    // 重定義）。舊帳 restored_count 是清除功能的誤殺率，不是議價訊號——
+    // 綁它的 17 個舊徽章因此消失，這是預期行為。
+    back: it.verified_restored_count > 0
+      ? `<span class="xp back" title="實證下架後重新上架 ${it.verified_restored_count} 次">已復活${
+          it.verified_restored_count >= 2 ? ` ×${it.verified_restored_count}` : ""}</span>`
       : "",
   };
 }
+
+/* ==== SHELF-AGE-LOGIC:BEGIN ========================================= *
+ * 「在架 ≥N 天」。純函式：now 由參數傳入（不傳退回 Date.now()），因為它被
+ * tests/test_shelf_age.py 抽出來丟進 node 直接跑。
+ * N = floor((now − obs_first_seen)/86400000)，N ≥ 1 才顯示。
+ * 「≥」是誠實標示：obs_first_seen 是首次**觀測**（listing_obs.first_seen，
+ * 觀測自 2026-08-01 開始），實際上架時間只會更早——這是下界，不是真實在架時長。
+ * 解析不出時間一律回空字串——**不猜**。
+ * ------------------------------------------------------------------- */
+function shelfAge(it, nowMs){
+  const t = new Date((it && it.obs_first_seen) || "").getTime();
+  if(isNaN(t)) return "";
+  const days = Math.floor(((nowMs != null ? nowMs : Date.now()) - t) / 86400000);
+  if(days < 1) return "";
+  return `<span class="shelf-age" title="自首次觀測起算的下界（觀測自 2026-08-01 開始），實際上架時間只會更早">在架 ≥${days} 天</span>`;
+}
+/* ==== SHELF-AGE-LOGIC:END =========================================== */
 
 /* ==== AUCTION-VIEW-LOGIC:BEGIN ====================================== *
  * 競標視圖的可行動性排序。這一段是**純函式**，不碰 DOM、不讀全域狀態，
@@ -943,7 +965,7 @@ function card(it){
   <article class="card ${hot?'hot':''} ${trig?'trig':''} ${gone?'expired':''}">
     ${shot(it.image_url, it.title)}
     <div class="body">
-      <h3 class="title"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>${badge}${bucketChip(it)}${xpBadge}${backBadge}</h3>
+      <h3 class="title"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>${badge}${bucketChip(it)}${xpBadge}${backBadge}${shelfAge(it)}</h3>
       <div class="money">${nt(it.landed_twd)}<small>到手 · ${escapeHtml(it.route || "")}</small></div>
       <div class="cmp">${comps} · ${pWorth(it)}</div>
       <div class="cmp">${escapeHtml(it.grader || "")} ${it.grade ?? ""} ${escapeHtml(it.set_code || "")}</div>
@@ -1650,7 +1672,7 @@ function auctionCard(it){
     <div class="body">
       <h3 class="title">
         <a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
-        <span class="badge">🔨 競標中</span>${tierChip(tier)}${bucketChip(it)}${xpb.xp}${xpb.back}</h3>
+        <span class="badge">🔨 競標中</span>${tierChip(tier)}${bucketChip(it)}${xpb.xp}${xpb.back}${shelfAge(it)}</h3>
       <div class="bid-row">
         <span>目前出價 <b>${cash(cur)}</b>${
           it.payload?.listing?.bids != null ? `（${it.payload.listing.bids} 次出價）` : ""}</span>
