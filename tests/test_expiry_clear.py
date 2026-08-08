@@ -247,6 +247,21 @@ def test_list_signals_brings_obs_columns(store):
     assert row["obs_revived_count"] == 0
 
 
+def test_list_signals_brings_obs_first_seen(store):
+    """在架天數的分子：listing_obs.first_seen（首次觀測，只進不退——
+    store.py 對它的規則是「永不改寫」）。"""
+    _insert(store, "a")
+    _mark_gone(store, "a")     # helper 寫入 first_seen='2026-08-01T00:00:00+00:00'
+    row = store.list_signals(state="watching")[0]
+    assert row["obs_first_seen"] == "2026-08-01T00:00:00+00:00"
+
+
+def test_list_signals_without_obs_row_has_null_first_seen(store):
+    """沒有觀測列 → obs_first_seen 是 None，前端不顯示天數（不猜）。"""
+    _insert(store, "solo")
+    assert store.list_signals(state="watching")[0]["obs_first_seen"] is None
+
+
 def test_list_signals_join_does_not_clobber_signals_columns(store):
     """兩表有 11 個同名欄位（last_seen / landed_twd / grade …）。
     JOIN 之後 signals 那一側的值必須原封不動——這是 CLAUDE.md 第三節的混源陷阱。
@@ -999,6 +1014,21 @@ def test_signals_api_carries_expiry(client):
     assert by_key["buyee_yahoo:gone-1"]["expiry"]["kind"] == "gone"
     assert "消失" in by_key["buyee_yahoo:gone-1"]["expiry"]["detail"]
     assert by_key["buyee_yahoo:live-1"]["expiry"]["kind"] == "live"
+
+
+def test_signals_api_carries_verified_badge_and_shelf_age_fields(client):
+    """A6 的確認：payload 是 `SELECT s.*`＋JOIN 的 obs_ 欄位，新欄位自動流到
+    前端，web/app.py 一行都不用改——這條測試釘住「自動」不會被日後的
+    欄位白名單重構弄掉。"""
+    c, app_mod = client
+    _insert(app_mod.store, "buyee_yahoo:gone-1")
+    _mark_gone(app_mod.store, "buyee_yahoo:gone-1")
+
+    item = c.get("/api/signals?state=watching").json()["items"][0]
+
+    assert item["verified_restored_count"] == 0
+    assert item["cleared_verified"] == 0
+    assert item["obs_first_seen"] == "2026-08-01T00:00:00+00:00"
 
 
 _ENDED_PAYLOAD = json.dumps({"listing": {"end_time": "2026-01-01T00:00:00+00:00"}})

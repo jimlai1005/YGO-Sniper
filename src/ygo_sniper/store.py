@@ -634,7 +634,11 @@ class Store:
         q = (
             "SELECT s.*, o.disappeared_at AS obs_disappeared_at, "
             "o.window_exit_at AS obs_window_exit_at, "
-            "COALESCE(o.revived_count, 0) AS obs_revived_count "
+            "COALESCE(o.revived_count, 0) AS obs_revived_count, "
+            # 在架天數的分子。obs_ 前綴同上：signals 自己也有 first_seen
+            # （首次成為候選），與觀測帳的首次觀測是兩件事，不加前綴會被
+            # 靜默覆蓋（CLAUDE.md 第三節的混源陷阱）。
+            "o.first_seen AS obs_first_seen "
             "FROM signals s LEFT JOIN listing_obs o ON o.key = s.key "
             "WHERE s.score >= ?"
         )
