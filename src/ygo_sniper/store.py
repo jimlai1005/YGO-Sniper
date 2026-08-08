@@ -56,7 +56,13 @@ CREATE TABLE IF NOT EXISTS signals (
     -- restored_count 是這個功能自己的誤殺率：清掉的東西有幾成又回來了。
     cleared_at      TEXT,
     cleared_from    TEXT,
-    restored_count  INTEGER DEFAULT 0
+    restored_count  INTEGER DEFAULT 0,
+    -- 實證復活帳（2026-08-08）。cleared_verified 是**戳記**：這一次清除有頁面
+    -- 實證（ended 事實、或 verifier 判 SOLD/DELISTED）。verified_restored_count
+    -- 是**帳本**：實證下架後又重新上架的次數——這才是議價訊號，「已復活」
+    -- 徽章綁它。restored_count 是舊誤判帳（清除功能自己的誤殺率），語意不動。
+    cleared_verified        INTEGER NOT NULL DEFAULT 0,
+    verified_restored_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_signals_state ON signals(state);
 CREATE INDEX IF NOT EXISTS idx_signals_score ON signals(score DESC);
@@ -353,6 +359,10 @@ _SIGNALS_MIGRATE_COLUMNS: dict[str, str] = {
     "cleared_at": "TEXT",
     "cleared_from": "TEXT",
     "restored_count": "INTEGER DEFAULT 0",
+    # 實證復活帳（2026-08-08，見 _SCHEMA 的欄位註解）。NOT NULL DEFAULT 0：
+    # SQLite 的 ADD COLUMN 會用 DEFAULT 回填既有列，舊列直接是 0 不是 NULL。
+    "cleared_verified": "INTEGER NOT NULL DEFAULT 0",
+    "verified_restored_count": "INTEGER NOT NULL DEFAULT 0",
 }
 
 

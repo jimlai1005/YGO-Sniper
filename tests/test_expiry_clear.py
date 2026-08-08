@@ -21,6 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 NEW_COLUMNS = ("cleared_at", "cleared_from", "restored_count")
 
+#: 實證復活徽章（2026-08-08）：戳記＋帳本。
+VERIFIED_COLUMNS = ("cleared_verified", "verified_restored_count")
+
 LOW = {"_default": "low"}
 
 
@@ -163,6 +166,35 @@ def test_migration_is_idempotent(tmp_path):
     for _ in range(3):
         Store(db)
     assert set(NEW_COLUMNS) <= _columns(db)
+
+
+def test_migration_adds_verified_columns_with_zero_default(tmp_path):
+    """舊 db 補上實證欄位，既有列一律 0（不是 NULL——後面 `+ cleared_verified`
+    遇到 NULL 會得到 NULL，與 `_migrate_signals` 對 restored_count 的顧慮同款）。"""
+    db = tmp_path / "legacy.db"
+    _legacy_db(db)
+    assert not (set(VERIFIED_COLUMNS) & _columns(db))
+
+    Store(db)
+
+    assert set(VERIFIED_COLUMNS) <= _columns(db)
+    with sqlite3.connect(db) as c:
+        rows = c.execute(
+            "SELECT cleared_verified, verified_restored_count FROM signals"
+        ).fetchall()
+        assert rows and all(cv == 0 and vr == 0 for cv, vr in rows)
+        # 既有列的狀態原封不動（additive migration 的底線）
+        states = dict(c.execute("SELECT key, state FROM signals").fetchall())
+        assert states == {"old-a": "watching", "old-b": "bought"}
+
+
+def test_verified_migration_is_idempotent(tmp_path):
+    """正式庫每 30 分鐘被排程開啟一次，冪等是必要條件不是加分項。"""
+    db = tmp_path / "legacy.db"
+    _legacy_db(db)
+    for _ in range(3):
+        Store(db)
+    assert set(VERIFIED_COLUMNS) <= _columns(db)
 
 
 def test_list_signals_brings_obs_columns(store):
