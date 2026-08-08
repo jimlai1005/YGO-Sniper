@@ -694,18 +694,20 @@ class Store:
         就有這筆」一模一樣（CLAUDE.md 第五節）。
 
         `restored_count` **不歸零**：那是這個功能自己的錯誤帳本，不是狀態。
+        `verified_restored_count` 同理不歸零；`cleared_verified` 是**戳記**不是
+        帳本，跟 cleared_at/cleared_from 一起歸零。
         """
         with self._conn() as c:
             if note is None:
                 c.execute(
                     "UPDATE signals SET state = ?, cleared_at = NULL, "
-                    "cleared_from = NULL WHERE key = ?",
+                    "cleared_from = NULL, cleared_verified = 0 WHERE key = ?",
                     (state, key),
                 )
             else:
                 c.execute(
                     "UPDATE signals SET state = ?, note = ?, cleared_at = NULL, "
-                    "cleared_from = NULL WHERE key = ?",
+                    "cleared_from = NULL, cleared_verified = 0 WHERE key = ?",
                     (state, note, key),
                 )
 

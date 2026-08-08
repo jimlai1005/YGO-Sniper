@@ -640,6 +640,49 @@ def test_update_state_clears_the_clear_marks(store):
     assert row["restored_count"] == 0
 
 
+def test_update_state_resets_the_verified_stamp(store):
+    """人工接管＝那段「程式做了什麼」的歷史失效，戳記跟 cleared_at/cleared_from
+    一起歸零。留著的話：使用者拉回 → 標的自己回到搜尋結果 → 還原機制不會跑
+    （cleared_from 已清），但下一次程式再清、再還原時會把**上一輪**的實證
+    誤記進帳——戳記描述的必須是「最近一次清除」，不是殘影。"""
+    key = "buyee_yahoo:handover"
+    _insert(store, key)
+    _mark_gone(store, key)
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
+    assert store.get_signal(key)["cleared_verified"] == 1
+
+    store.update_state(key, "watching")            # note=None 的那一句
+    assert store.get_signal(key)["cleared_verified"] == 0
+
+    # note 非 None 走另一句 UPDATE，兩句都要歸零
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
+    assert store.get_signal(key)["cleared_verified"] == 1
+    store.update_state(key, "watching", note="我再看看")
+    assert store.get_signal(key)["cleared_verified"] == 0
+
+
+def test_update_state_does_not_zero_verified_restored_count(store):
+    """帳本欄位不歸零：verified_restored_count 與 restored_count 同一條規則
+    （store.py update_state docstring：帳本不是狀態）。"""
+    key = "buyee_yahoo:keeper"
+    _insert(store, key)
+    _mark_gone(store, key)
+    store.clear_expired_signals(
+        "watching", gone_confidence=LOW, verifier=_sold_verifier()
+    )
+    _rescan(store, key)
+    store.restore_revived_signals()
+    assert store.get_signal(key)["verified_restored_count"] == 1
+
+    store.update_state(key, "skipped", note="不追了")
+
+    assert store.get_signal(key)["verified_restored_count"] == 1
+
+
 def test_restore_counts_accumulate(store):
     """反覆進出的標的，誤殺計數要累加——它就是這個功能的錯誤率。"""
     key = "buyee_yahoo:flappy"
