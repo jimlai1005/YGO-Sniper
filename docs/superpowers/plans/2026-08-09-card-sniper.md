@@ -2264,16 +2264,28 @@ def build_recommendation(
 
     exact_sales = [s for s in sales if s.get("tier") == TIER_EXACT]
     if exact_sales:
-        stamps = sorted(str(s.get("sold_at") or "")[:10] for s in exact_sales if s.get("sold_at"))
-        kinds = {s.get("sale_kind") for s in exact_sales}
-        # ⚠️ 這句**只要有成交就一定要講**（不是只在 >= 2 筆時）：一筆的時候更需要
-        # 知道那不是全部歷史，否則使用者會把「檔案裡只有 1 次」讀成「一年只出現 1 次」。
+        # ⚠️ **只有帶真實成交時刻的才進「什麼時候／幾次」的宣稱。**
+        # Mercari／露天的搜尋頁給不出落札時間（實測 99/206 筆 sold_at 是空的），
+        # 把它們算進次數或期間，就是拿兩種基準的東西合成一個數字
+        # （CLAUDE.md 第三節；comps 的 sold_at_is_ingest 是同一個立場）。
+        dated = [s for s in exact_sales if s.get("sold_at")]
+        undated_n = len(exact_sales) - len(dated)
+        stamps = sorted(str(s.get("sold_at"))[:10] for s in dated)
+        kinds = {s.get("sale_kind") for s in dated}
         span = f"（{stamps[0]} → {stamps[-1]}）" if stamps else ""
-        lines.append(
-            f"出現頻率：成交檔案裡 {len(exact_sales)} 次{span}"
-            f"——**這是檔案涵蓋期間內的次數，不是全部歷史**（Yahoo 落札相場約"
-            f"保留 150-180 天，更早的已經被平台刪掉，我們挖不到）。"
-        )
+        if dated:
+            # 這句**只要有帶日期的成交就一定要講**（不是只在 >= 2 筆時）：一筆的時候
+            # 更需要知道那不是全部歷史，否則會把「檔案裡只有 1 次」讀成「一年只出現 1 次」。
+            lines.append(
+                f"出現頻率：成交檔案裡 {len(dated)} 次{span}"
+                f"——**這是檔案涵蓋期間內的次數，不是全部歷史**（Yahoo 落札相場約"
+                f"保留 150-180 天，更早的已經被平台刪掉，我們挖不到）。"
+            )
+        if undated_n:
+            lines.append(
+                f"另有 {undated_n} 筆同款成交**來源沒給成交時刻**（Mercari／露天的"
+                f"搜尋頁沒有落札時間）——它們只答得出價格，不列入上面的次數與期間。"
+            )
         if kinds == {"auction"}:
             lines.append(
                 "全部走競標成交——結標時段（台灣 18:00-22:30）是關鍵，"
@@ -3086,14 +3098,17 @@ def _print_dossier(store: Store, watch_id: int) -> None:
                       "Yahoo 落札相場約保留 150-180 天，更早的平台已刪除。[/dim]")
         for s in d.sales:
             if s["tier"] == "near":
-                continue     # near 太多（實測 96/100），只在 dashboard 全量顯示
+                continue     # near 量大（實測一次挖掘 202/206），只在 dashboard 全量顯示
             mark = "🎯" if s["tier"] == "exact" else "👀"
             price = s.get("price_native")
             price_s = (f"{s.get('currency', '')} {price:,.0f}"
                        if price is not None else "—")
             kind = {"auction": "競標", "fixed": "定價"}.get(s.get("sale_kind"), "型態不明")
+            # 沒有成交時刻的來源（Mercari／露天）不要印一個空日期讓人以為是資料壞了，
+            # 明講「日期不明」——它只答得出價格。
+            when = str(s["sold_at"])[:10] if s.get("sold_at") else "日期不明　"
             console.print(
-                f"  {mark} {str(s['sold_at'])[:10]} {price_s:>12}（{kind}"
+                f"  {mark} {when} {price_s:>12}（{kind}"
                 f"{'／' + str(s['bid_count']) + ' 出價' if s.get('bid_count') and s.get('sale_kind') == 'auction' else ''}）"
                 f" 賣家 {str(s.get('seller_id') or '—')[:16]}"
             )
