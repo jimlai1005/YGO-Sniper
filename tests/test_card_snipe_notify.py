@@ -1,0 +1,162 @@
+"""規則 4（指定卡狙擊）：終身去重、🎯 不受總量上限、👀 有小上限、formatter。"""
+from __future__ import annotations
+
+from dataclasses import replace
+
+import pytest
+
+from ygo_sniper.card_snipe import build_notify_context
+from ygo_sniper.notify_rules import (
+    RULE_CARD_SNIPE,
+    NotifyRules,
+    evaluate,
+)
+from ygo_sniper.store import Store
+
+WATCH_KW = dict(
+    grader="ARS", grade=10.0, grade_label="10",
+    name_ja="魔法の筒", name_en="Magic Cylinder",
+    aliases=["マジック・シリンダー"], code_raw="P4-06", code_norm="P4-6",
+)
+
+
+@pytest.fixture
+def store(tmp_path):
+    return Store(tmp_path / "t.db")
+
+
+def _hit(store, wid, key, tier="exact", title="【ARS10】魔法の筒 P4-06"):
+    store.upsert_card_watch_hit(
+        wid, key, tier=tier, title=title, url=f"https://example.test/{key}",
+        site="buyee_yahoo", seller_id="s1", price_native=50000.0, currency="JPY",
+        end_time="2026-08-09T22:00:00+09:00",
+    )
+
+
+def _rules(cfg, **overrides):
+    return replace(NotifyRules.from_config(cfg), **overrides)
+
+
+class TestRule4:
+    def test_exact_hit_flows_to_send_and_dedupes_for_life(self, store, cfg):
+        wid = store.insert_card_watch(**WATCH_KW)
+        _hit(store, wid, "buyee_yahoo:x1")
+        rules = _rules(cfg)
+        out = evaluate([], rules=rules, notified=store.notify_log_map(),
+                       snipe_ctx=build_notify_context(store))
+        assert [m.rule for m in out.to_send] == [RULE_CARD_SNIPE]
+        assert out.to_send[0].key == f"{wid}:buyee_yahoo:x1"
+        # 模擬送成功落帳 → 之後每一輪都不再送（終身一次）
+        store.mark_rule_notified([(out.to_send[0].key, RULE_CARD_SNIPE)])
+        out2 = evaluate([], rules=rules, notified=store.notify_log_map(),
+                        snipe_ctx=build_notify_context(store))
+        assert out2.to_send == []
+
+    def test_exact_is_exempt_from_global_cap(self, store, cfg):
+        wid = store.insert_card_watch(**WATCH_KW)
+        for i in range(3):
+            _hit(store, wid, f"buyee_yahoo:x{i}")
+        out = evaluate([], rules=_rules(cfg, max_items_per_run=1),
+                       notified=store.notify_log_map(),
+                       snipe_ctx=build_notify_context(store))
+        # cap=1 也擋不住狙擊命中：三筆全部要送
+        assert len([m for m in out.to_send if m.rule == RULE_CARD_SNIPE]) == 3
+
+    def test_partial_has_its_own_small_cap(self, store, cfg):
+        from ygo_sniper.card_snipe import PARTIAL_MAX_PER_RUN
+
+        wid = store.insert_card_watch(**WATCH_KW)
+        for i in range(PARTIAL_MAX_PER_RUN + 2):
+            _hit(store, wid, f"buyee_yahoo:p{i}", tier="partial")
+        out = evaluate([], rules=_rules(cfg), notified=store.notify_log_map(),
+                       snipe_ctx=build_notify_context(store))
+        sent = [m for m in out.to_send if m.rule == RULE_CARD_SNIPE]
+        assert len(sent) == PARTIAL_MAX_PER_RUN
+        # 溢出的有講（skipped），沒落帳 → 下輪還會排隊
+        assert len(out.skips_for("疑似命中已達上限")) == 2
+
+    def test_no_ctx_no_crash(self, cfg):
+        out = evaluate([], rules=_rules(cfg), notified={}, snipe_ctx=None)
+        assert out.card_snipe == [] and out.to_send == []
+
+
+class TestFormatter:
+    def test_message_contains_the_essentials(self, store, cfg):
+        wid = store.insert_card_watch(**WATCH_KW)
+        store.update_card_watch_census(
+            wid, census_url="u", census_json='{"9": 5, "10": 5, "10+": 1}',
+            census_total=11)
+        _hit(store, wid, "buyee_yahoo:x1")
+        out = evaluate([], rules=_rules(cfg), notified=store.notify_log_map(),
+                       snipe_ctx=build_notify_context(store))
+        from ygo_sniper.notify import format_card_snipe
+
+        text = format_card_snipe(out.to_send[0], "http://127.0.0.1:8321")
+        assert "🎯" in text
+        assert "ARS10 魔法の筒 P4-06" in text
+        assert "【ARS10】魔法の筒 P4-06" in text          # 標題原文
+        assert "全世界 5 張" in text                       # census
+        assert "https://example.test/buyee_yahoo:x1" in text
+        assert "JPY 50,000" in text
+        assert "非成交價" in text                          # 現在価格語意講清楚
+
+    def test_partial_message_is_marked(self, store, cfg):
+        wid = store.insert_card_watch(**WATCH_KW)
+        _hit(store, wid, "buyee_yahoo:p1", tier="partial",
+             title="魔法の筒 ARS鑑定品")
+        out = evaluate([], rules=_rules(cfg), notified=store.notify_log_map(),
+                       snipe_ctx=build_notify_context(store))
+        from ygo_sniper.notify import format_card_snipe
+
+        text = format_card_snipe(out.to_send[0], "http://x")
+        assert "👀" in text and "未全符" in text
+
+
+def test_rule4_appears_in_the_cli_counts(store, cfg, capsys):
+    """規則 4 的命中數必須印得出來——0 與「沒在跑」不能長一樣。"""
+    import ygo_sniper.cli as cli_mod
+
+    wid = store.insert_card_watch(**WATCH_KW)
+    _hit(store, wid, "buyee_yahoo:x1")
+    out = evaluate([], rules=_rules(cfg), notified=store.notify_log_map(),
+                   snipe_ctx=build_notify_context(store))
+    cli_mod._print_rule_counts(out)
+    printed = capsys.readouterr().out
+    assert "指定卡狙擊" in printed
+    assert "🎯 1" in printed
+
+
+def test_store_and_notify_rules_agree_on_the_rule_name():
+    """`store.CARD_SNIPE_RULE` 與 `notify_rules.RULE_CARD_SNIPE` 必須是同一個值。
+
+    兩份定義漂移的話，`list_card_watch_hits` 的 `sent_at` 會恆為 NULL
+    → 每輪都判定「這筆沒送過」而重複推播，而且**壞掉的樣子與「真的還沒送過」
+    完全一樣**（CLAUDE.md 第五節）。這條測試就是那個結構性守門員——
+    不能改成註解或提醒（CLAUDE.md 的 meta-rule：別用更多流程補流程漏洞）。
+    """
+    from ygo_sniper.store import CARD_SNIPE_RULE
+
+    assert CARD_SNIPE_RULE == RULE_CARD_SNIPE
+
+
+def test_preview_table_renders_a_snipe_hit_without_crashing(store, cfg, capsys):
+    """規則 4 的 Match 沒有 p_worth——preview 的 else 分支會 TypeError。
+    命中 0 筆時這個迴圈根本不執行，所以只有這條測試擋得住它。"""
+    import ygo_sniper.cli as cli_mod  # noqa: F401
+    from ygo_sniper.notify_rules import RULE_CARD_SNIPE, RULE_LABEL
+
+    wid = store.insert_card_watch(**WATCH_KW)
+    _hit(store, wid, "buyee_yahoo:x1")
+    out = evaluate([], rules=_rules(cfg), notified=store.notify_log_map(),
+                   snipe_ctx=build_notify_context(store))
+    m = out.to_send[0]
+    assert m.p_worth is None            # 正是會炸的前提
+    w = m.row.get("watch") or {}
+    price = m.row.get("price_native")
+    price_s = (f"{m.row.get('currency') or ''} {price:,.0f}"
+               if price is not None else "價格不明")
+    mark = "🎯" if m.row.get("tier") == "exact" else "👀"
+    detail = (f"{mark} {w.get('grader', '')}{w.get('grade_label', '')} "
+              f"{w.get('name_ja', '')}｜{price_s}")
+    assert "🎯" in detail and "ARS10" in detail and "JPY 50,000" in detail
+    assert RULE_LABEL[RULE_CARD_SNIPE] == "規則 4 指定卡狙擊"

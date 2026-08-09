@@ -70,6 +70,7 @@ def _print_rule_counts(outcome) -> None:
     """
     from .notify_rules import (
         RULE_AUCTION_URGENT,
+        RULE_CARD_SNIPE,
         RULE_HIGH_P,
         RULE_LABEL,
         RULE_SELLER_NEW,
@@ -86,7 +87,12 @@ def _print_rule_counts(outcome) -> None:
         f"[bold]{RULE_LABEL[RULE_SELLER_NEW]}[/bold] 命中 {len(outcome.seller_new)} 筆"
         f"（同儕 {peer}／模型 {model}） ｜ "
         f"[bold]{RULE_LABEL[RULE_SELLER_UNPRICED]}[/bold] 命中 "
-        f"{len(outcome.seller_unpriced)} 筆 ｜ 送出 {len(outcome.sent)} 則"
+        f"{len(outcome.seller_unpriced)} 筆 ｜ "
+        f"[bold]{RULE_LABEL[RULE_CARD_SNIPE]}[/bold] 命中 "
+        f"{len(outcome.card_snipe)} 筆"
+        f"（🎯 {sum(1 for m in outcome.card_snipe if m.row.get('tier') == 'exact')}"
+        f"／👀 {sum(1 for m in outcome.card_snipe if m.row.get('tier') == 'partial')}）"
+        f" ｜ 送出 {len(outcome.sent)} 則"
     )
     if outcome.deduped:
         console.print(f"[dim]（{outcome.deduped} 筆因去重／與規則 1 撞號未送）[/dim]")
@@ -3084,6 +3090,7 @@ def notify_preview(
     """
     from .notify_rules import (
         RULE_AUCTION_URGENT,
+        RULE_CARD_SNIPE,
         RULE_HIGH_P,
         RULE_LABEL,
         RULE_SELLER_NEW,
@@ -3113,6 +3120,7 @@ def notify_preview(
             (RULE_HIGH_P, outcome.high_p),
             (RULE_SELLER_NEW, outcome.seller_new),
             (RULE_SELLER_UNPRICED, outcome.seller_unpriced),
+            (RULE_CARD_SNIPE, outcome.card_snipe),
         ):
             t = Table(title=f"{RULE_LABEL[rule]}：命中 {len(matches)} 筆")
             t.add_column("送？", justify="center")
@@ -3147,6 +3155,18 @@ def notify_preview(
                         f"{m.seller_key}｜👤 比同儕便宜 {m.peer_discount_pct:.0f}%"
                         f"（可比 {m.peer_n} 筆）"
                     )
+                elif rule == RULE_CARD_SNIPE:
+                    # 狙擊的 Match 只帶 key/rule/row，`p_worth` 是 None——掉進下面
+                    # 那個 else 會 `TypeError: unsupported format string passed to
+                    # NoneType.__format__`。命中 0 筆時這個迴圈根本不執行，所以
+                    # 這個分支缺了會一路綠到「真的有一張卡上架」那天才炸。
+                    w = m.row.get("watch") or {}
+                    price = m.row.get("price_native")
+                    price_s = (f"{m.row.get('currency') or ''} {price:,.0f}"
+                               if price is not None else "價格不明")
+                    mark = "🎯" if m.row.get("tier") == "exact" else "👀"
+                    detail = (f"{mark} {w.get('grader', '')}{w.get('grade_label', '')} "
+                              f"{w.get('name_ja', '')}｜{price_s}")
                 else:
                     detail = f"P={m.p_worth:.0%}｜稀有度 {m.rarity or '未知'}"
                 t.add_row("✔" if (m.key, m.rule) in to_send else "—", detail, m.title)
@@ -3171,6 +3191,7 @@ def notify_preview(
             short = {
                 RULE_AUCTION_URGENT: "1", RULE_HIGH_P: "2",
                 RULE_SELLER_NEW: "3", RULE_SELLER_UNPRICED: "3b",
+                RULE_CARD_SNIPE: "4",
             }
             for s in outcome.skipped:
                 t.add_row(

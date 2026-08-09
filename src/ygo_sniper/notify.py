@@ -465,6 +465,62 @@ def format_seller_unpriced(match, dashboard_url: str) -> str:
     return "\n".join(lines)
 
 
+def format_card_snipe(match, dashboard_url: str) -> str:
+    """規則 4：指定卡狙擊。回答「你在等的那張卡出現了：在哪、多少錢、多快結標」。
+
+    exact 與 partial 共用一支：差別只在標頭（🎯／👀）。價格語意要講清楚——
+    競標的「現在価格」會漲，不是可成交價（第一課的教訓）。
+    """
+    row = match.row
+    w = row.get("watch") or {}
+    tier = str(row.get("tier") or "")
+    label = f"{w.get('grader', '')}{w.get('grade_label', '')} {w.get('name_ja', '')}"
+    code = w.get("code_raw") or w.get("code_norm") or ""
+    if code:
+        label += f" {code}"
+    head = "🎯 狙擊命中" if tier == "exact" else "👀 狙擊疑似（同卡，條件未全符）"
+    lines = [f"<b>{head}</b>｜{_esc(label)}", _esc(str(row.get("title") or ""))]
+    price = row.get("price_native")
+    if price is not None:
+        lines.append(
+            f"價格：{_esc(str(row.get('currency') or ''))} {price:,.0f}"
+            "（現在価格／售價，非成交價）"
+        )
+    venue = _esc(str(row.get("site") or ""))
+    seller = _esc(str(row.get("seller_id") or ""))
+    lines.append(f"平台：{venue}" + (f"｜賣家：{seller}" if seller else ""))
+    if row.get("end_time"):
+        lines.append(f"結標：{_esc(str(row.get('end_time'))[:16].replace('T', ' '))}")
+    census = _snipe_census_line(w)
+    if census:
+        lines.append(census)
+    url = str(row.get("url") or "")
+    if url:
+        lines.append(f'<a href="{url}">商品頁</a>')
+    lines.append(f'<a href="{dashboard_url}">dashboard</a> 🎯 狙擊分頁看完整檔案')
+    return "\n".join(lines)
+
+
+def _snipe_census_line(watch: dict) -> str:
+    """census_json → 一行存世量。沒抓過就回空字串——證據不足不硬湊數字。"""
+    import json as _json
+
+    raw = watch.get("census_json") or ""
+    if not raw:
+        return ""
+    try:
+        counts = _json.loads(raw)
+    except ValueError:
+        return ""
+    tgt = str(watch.get("grade_label") or "")
+    at = counts.get(tgt)
+    if at is None:
+        return ""
+    total = watch.get("census_total")
+    tail = f"（鑑定總數 {total}）" if total else ""
+    return f"存世量：{watch.get('grader', '')}{tgt} 全世界 {at} 張{tail}"
+
+
 def format_overflow(overflow: list, dashboard_url: str) -> str:
     """超出單次上限的部分併成一則統計（與 alerts 的做法一致：不能讓好貨變洗版）。
 
@@ -790,10 +846,13 @@ class TelegramNotifier:
         跟真的會送出去的必須是同一份，不然調門檻時看到的是另一則訊息。"""
         from .notify_rules import (
             RULE_AUCTION_URGENT,
+            RULE_CARD_SNIPE,
             RULE_SELLER_NEW,
             RULE_SELLER_UNPRICED,
         )
 
+        if match.rule == RULE_CARD_SNIPE:
+            return format_card_snipe(match, self.dashboard_url)
         if match.rule == RULE_AUCTION_URGENT:
             return format_auction_urgent(match, self.dashboard_url)
         if match.rule == RULE_SELLER_NEW:

@@ -114,12 +114,18 @@ RULE_AUCTION_URGENT = "auction_urgent"
 RULE_HIGH_P = "high_p"
 RULE_SELLER_NEW = "seller_new"
 RULE_SELLER_UNPRICED = "seller_unpriced"
+#: 規則 4 指定卡狙擊。**必須與 `store.CARD_SNIPE_RULE` 同值**——`list_card_watch_hits`
+#: 用它 join `notify_log` 取 `sent_at`，兩邊漂移的話 join 永遠不匹配、`sent_at` 恆為
+#: NULL ＝ 每輪重複推播，而且壞掉的樣子與「真的還沒送過」一模一樣。守門的是
+#: `tests/test_card_snipe_notify.py::test_store_and_notify_rules_agree_on_the_rule_name`。
+RULE_CARD_SNIPE = "card_snipe"
 
 RULE_LABEL = {
     RULE_AUCTION_URGENT: "規則 1 競標急件",
     RULE_HIGH_P: "規則 2 高信心標的",
     RULE_SELLER_NEW: "規則 3 監控賣家新上架",
     RULE_SELLER_UNPRICED: "規則 3b 監控賣家·估不了",
+    RULE_CARD_SNIPE: "規則 4 指定卡狙擊",
 }
 
 #: 規則 3 的判定來源。**這一欄要走到訊息上**：同儕相對與模型估值不是同一種宣稱。
@@ -469,6 +475,8 @@ class Outcome:
     seller_new: list[Match] = field(default_factory=list)
     #: 規則 3b：監控賣家上了一件我們估不了的東西（沒有折價宣稱）。
     seller_unpriced: list[Match] = field(default_factory=list)
+    #: 規則 4：指定卡狙擊命中（exact＋partial；near 在脈絡層就不進來）。
+    card_snipe: list[Match] = field(default_factory=list)
     skipped: list[Skip] = field(default_factory=list)
     #: 通過去重、真的要送的（已依總量上限截斷）
     to_send: list[Match] = field(default_factory=list)
@@ -488,8 +496,10 @@ class Outcome:
     @property
     def matched(self) -> int:
         """**有判斷**的命中數。規則 3b 不算在內——它沒有宣稱任何東西便宜，
-        把它加進來會讓「今天有幾個訊號」這個數字失去意義。"""
-        return len(self.urgent) + len(self.high_p) + len(self.seller_new)
+        把它加進來會讓「今天有幾個訊號」這個數字失去意義。
+        規則 4 算在內：它宣稱「你登錄的那張卡出現了」，那是最強的一種判斷。"""
+        return (len(self.urgent) + len(self.high_p) + len(self.seller_new)
+                + len(self.card_snipe))
 
     def skips_for(self, reason_contains: str) -> list[Skip]:
         return [s for s in self.skipped if reason_contains in s.reason]
@@ -504,6 +514,7 @@ def evaluate(
     now: datetime | None = None,
     notified: dict[tuple[str, str], str] | None = None,
     seller_ctx: Any = None,
+    snipe_ctx: Any = None,
 ) -> Outcome:
     """吃候選列，回傳「這一輪該送什麼」。**只判定，不送、不落帳。**
 
@@ -512,6 +523,8 @@ def evaluate(
     掃描當下就存好的 payload，本來就不需要模型）。
     `seller_ctx` 是 `seller_watch.SellerNotifyContext`；None 時規則 3 整條跳過
     （同一個立場：一條規則的資料建不起來，不該讓另外兩條閉嘴）。
+    `snipe_ctx` 是 `card_snipe.SnipeNotifyContext`；None 時規則 4 整條跳過
+    （同一個立場）。
     """
     now = now or datetime.now(UTC)
     notified = notified or {}
@@ -548,6 +561,18 @@ def evaluate(
                 out.seller_new.append(m)
             elif skip is not None:
                 out.skipped.append(skip)
+
+    # 規則 4：狙擊命中不來自 signals 候選池（它們在商業過濾前就被記帳），
+    # 由 snipe_ctx 帶進來。pending 已在脈絡層濾掉 near 與已送過的。
+    if snipe_ctx is not None:
+        for hit in snipe_ctx.pending:
+            # ⚠️ 不要傳 title=：`Match.title` 是唯讀 property，從 row["title"]
+            # 推導。傳了會 TypeError。
+            out.card_snipe.append(Match(
+                key=f"{hit['watch_id']}:{hit['listing_key']}",
+                rule=RULE_CARD_SNIPE,
+                row=hit,
+            ))
 
     _apply_dedupe_and_cap(out, rules, notified, now)
     return out
@@ -1064,6 +1089,14 @@ def _apply_dedupe_and_cap(
       輪替掃到時（預設 4 小時）變成 2，那之後它就永遠不再是「新上架」。
       實測（2026-08-04，本庫）：37 筆命中、上限 3 → 約 4 小時的窗口裡浮得出
       12 筆左右，其餘留在 dashboard。要多看一點就把 `max_per_run` 調大。
+
+    - 規則 4 指定卡狙擊：同一 `{watch_id}:{listing_key}` **這輩子只送一次**
+      （同規則 1／3 的形狀）。🎯 exact **完全不受 `max_items_per_run` 裁切**——
+      使用者登錄的可能是半年才出現一次的東西，被當輪其他規則的音量擠掉一次
+      ＝白等半年，而「被 cap 砍掉」與「今天沒出現」在使用者眼裡一模一樣。
+      👀 partial 另有自己的每輪小上限（`card_snipe.PARTIAL_MAX_PER_RUN`），
+      超量的進 `skipped`、**不落已通知帳**（下輪重新排隊），也**不進 overflow**
+      ——overflow 講的是全域上限砍掉的，兩個機制不能混在同一則統計裡。
     """
     cutoff = now - timedelta(days=rules.dedupe_days)
     urgent_keys = {m.key for m in out.urgent}
@@ -1096,14 +1129,39 @@ def _apply_dedupe_and_cap(
 
     sendable.extend(_unpriced_sendable(out, rules, notified))
 
+    # --- 規則 4：終身一次；🎯 exact 不受總量上限，👀 partial 有自己的小上限 ---
+    from .card_snipe import PARTIAL_MAX_PER_RUN, TIER_EXACT
+
+    snipe_exact: list[Match] = []
+    snipe_partial: list[Match] = []
+    for m in out.card_snipe:
+        if (m.key, RULE_CARD_SNIPE) in notified:
+            out.deduped += 1
+            continue
+        if str(m.row.get("tier") or "") == TIER_EXACT:
+            snipe_exact.append(m)
+        else:
+            snipe_partial.append(m)
+    if len(snipe_partial) > PARTIAL_MAX_PER_RUN:
+        for m in snipe_partial[PARTIAL_MAX_PER_RUN:]:
+            out.skipped.append(Skip(
+                m.key, m.title, RULE_CARD_SNIPE,
+                f"本輪 👀 疑似命中已達上限 {PARTIAL_MAX_PER_RUN} 則——"
+                "未送、沒落帳，下輪重新排隊；dashboard 狙擊分頁看得到全部",
+            ))
+        snipe_partial = snipe_partial[:PARTIAL_MAX_PER_RUN]
+    snipe_sendable = snipe_exact + snipe_partial
+
     # `max_items_per_run <= 0` ＝ 不限（見 DEFAULT_MAX_ITEMS_PER_RUN 的註記）。
     # 不限時 overflow 必須是空 list，否則 notifier 會多送一則「另有 0 筆」的統計。
+    # 狙擊排最前、且**不吃 cap**：使用者等的可能是半年才出現一次的東西，被別的
+    # 規則的音量擠掉一次＝白等半年。它的音量由上面那兩個機制自己管。
     cap = rules.max_items_per_run
     if cap <= 0:
-        out.to_send = sendable
+        out.to_send = snipe_sendable + sendable
         out.overflow = []
         return
-    out.to_send = sendable[:cap]
+    out.to_send = snipe_sendable + sendable[:cap]
     out.overflow = sendable[cap:]
 
 
@@ -1144,6 +1202,7 @@ __all__ = [
     "DEFAULT_SELLER_MODEL_MIN_DISCOUNT",
     "DEFAULT_SELLER_UNPRICED_MAX_PER_RUN",
     "RULE_AUCTION_URGENT",
+    "RULE_CARD_SNIPE",
     "RULE_HIGH_P",
     "RULE_SELLER_NEW",
     "RULE_SELLER_UNPRICED",
