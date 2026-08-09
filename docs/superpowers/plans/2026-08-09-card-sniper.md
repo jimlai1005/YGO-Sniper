@@ -1009,7 +1009,7 @@ def scan_queries(
 .venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
-預期：`28 passed`（10 store ＋ 16 tier ＋ 2 observe/queries）。
+預期：`32 passed`（14 store ＋ 16 tier ＋ 2 observe/queries）。
 
 - [ ] **Step 5: Commit**
 
@@ -2310,7 +2310,7 @@ def build_notify_context(store: Any) -> SnipeNotifyContext:
 .venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
-預期：`35 passed`（28 ＋ 政策層 7）。
+預期：`39 passed`（32 ＋ 政策層 7）。
 
 - [ ] **Step 5: Commit**
 
@@ -2910,7 +2910,7 @@ class TestPipelineHook:
 .venv/bin/pytest tests/ -k "pipeline or scan"
 ```
 
-預期：`37 passed`（35 ＋ pipeline 掛鉤 2）；既有 pipeline 測試全綠。
+預期：`41 passed`（39 ＋ pipeline 掛鉤 2）；既有 pipeline 測試全綠。
 
 - [ ] **Step 5: Commit**
 
@@ -3401,7 +3401,7 @@ def _mine_snipes_daily(pipe) -> None:
 .venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
-預期：`43 passed`（37 ＋ daily 重挖節流 2 ＋ CLI 4）。
+預期：`47 passed`（41 ＋ daily 重挖節流 2 ＋ CLI 4）。
 
 - [ ] **Step 5: Commit**
 
