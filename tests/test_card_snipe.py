@@ -11,6 +11,7 @@ from ygo_sniper.card_snipe import (
     TIER_NEAR,
     TIER_PARTIAL,
     WatchMatcher,
+    classify,
     load_matchers,
     match_tier,
     observe_listings,
@@ -190,7 +191,9 @@ class TestCardWatchStore:
 
 class TestMatchTier:
     def test_exact_on_the_real_sold_title(self, matcher):
-        # 2026-07-01 ¥6,350 真實結標標題
+        # 這一個標題對應**兩筆**真實成交（2026-07-01 ¥6,350 與 2026-05-27 ¥7,750，
+        # 同賣家、同刊登模板，標題逐位元組相同），兩筆都沒有卡號 P4-06——
+        # 真標的靠的是「卡名＋機構分數」，這正是現代版標記不能降到不推播的理由。
         t = "【ARS10】魔法の筒 Magic Cylinder ウルトラ 鑑定書付 遊戯王 ARS鑑定10 PSA 芸術品"
         assert match_tier(matcher, t) == TIER_EXACT
 
@@ -204,11 +207,6 @@ class TestMatchTier:
     def test_ars10_plus_is_exact_by_design(self, matcher):
         # parse_grade 把 10+ 折成 10.0（既定行為）；10+ 全球只有 1 張、比 10 更稀，通知是對的
         assert match_tier(matcher, "ARS10+ 魔法の筒 P4-06") == TIER_EXACT
-
-    def test_the_other_real_sold_title_is_exact(self, matcher):
-        # 2026-05-27 ¥7,750 真實結標標題（與上一筆同賣家、同樣沒有卡號）
-        t = "【ARS10】魔法の筒 Magic Cylinder ウルトラ 鑑定書付 遊戯王 ARS鑑定10 PSA 芸術品"
-        assert match_tier(matcher, t) == TIER_EXACT
 
     def test_rush_duel_same_name_is_demoted_to_partial_still_notified(self, matcher):
         # 現代版只降到 👀（照樣推播）——降到不推播的話，詞表寫錯一個字就靜默漏標的
@@ -230,8 +228,6 @@ class TestMatchTier:
         assert match_tier(matcher, "ARS10 魔法の筒 P4-06 プリズマティック") == TIER_EXACT
 
     def test_classify_explains_every_demotion(self, matcher):
-        from ygo_sniper.card_snipe import classify
-
         tier, why = classify(matcher, "PSA8 遊戯王　魔法の筒　P4-06　第２期")
         assert tier == TIER_NEAR and "PSA" in why and "ARS" in why
         tier, why = classify(matcher, "【ARS10】魔法の筒 プリズマティック")
@@ -258,6 +254,61 @@ class TestMatchTier:
     def test_unrelated_title_is_none(self, matcher):
         assert match_tier(matcher, "PSA10 ブラック・マジシャン 初期") is None
 
+    def test_ars_target_with_psa_claim_is_partial_not_near(self, matcher):
+        """賣家慣用寫法：ARS 鑑定品，標題再宣稱「相當於 PSA10 以上」。
+
+        `以上` 不在 `parsers/grade.py` 的 `_CLAIM_SUFFIX`，而 PSA 的 pattern 排在
+        ARS 前面，所以 `parse_grade` 回 PSA。直接判 near ＝ 靜默漏掉目標卡
+        （CLAUDE.md 第一節）。實測 data/sniper.db 3,239 個標題：998 筆自己寫了
+        ARS＋分數，其中 79 筆（7.9%）被讀成 PSA。
+        """
+        tier, why = classify(matcher, "【ARS10】魔法の筒 Magic Cylinder ARS鑑定10 PSA10以上")
+        assert tier == TIER_PARTIAL and "ARS" in why and "PSA" in why
+
+    def test_real_corpus_ars_title_read_as_psa_is_not_near(self):
+        # data/sniper.db 的真實標題（那 79 筆之一的形狀）
+        m = WatchMatcher.from_row({
+            **WATCH_ROW, "grade": 7.0, "grade_label": "7",
+            "name_ja": "ブラックマジシャン", "name_en": "", "aliases": "[]",
+            "code_raw": "", "code_norm": "",
+        })
+        t = "【ARS7】ブラックマジシャン　初期ウルトラレア　vol.1 PSA7以上"
+        assert match_tier(m, t) == TIER_PARTIAL
+
+    def test_psa_only_title_stays_near_even_with_the_claim_guard(self, matcher):
+        # 反向守衛：標題完全沒有 ARS token 時，寬容條款不得把 near 拉成 partial
+        assert match_tier(matcher, "PSA8 遊戯王　魔法の筒　P4-06　第２期") == TIER_NEAR
+
+    def test_code_hit_does_not_bypass_the_grader_gate(self, matcher):
+        # docstring 的順序就是實作的順序：卡號命中**不會**跳過機構閘門。
+        # 這筆有 ARS token 所以是 partial；沒有 ARS token 的純 PSA 標題仍是 near。
+        assert match_tier(matcher, "【ARS10】魔法の筒 P4-06 遊戯王 PSA10以上") == TIER_PARTIAL
+
+    def test_grader_is_normalized_to_upper(self):
+        # 縱深防禦：CLI 會 upper()，但這裡零成本多一道——小寫會讓每一筆都變 near
+        m = WatchMatcher.from_row({**WATCH_ROW, "grader": " ars "})
+        assert m.grader == "ARS"
+        assert match_tier(m, "ARS10 魔法の筒 P4-06") == TIER_EXACT
+
+    def test_aliases_accept_a_decoded_list(self):
+        # web/CLI 層可能直接傳已解碼的 list：json.loads 會拋 TypeError，
+        # 被吞掉的話別名整組消失，只寫片假名的標的就靜默漏掉
+        m = WatchMatcher.from_row({**WATCH_ROW, "aliases": ["マジック・シリンダー"]})
+        assert match_tier(m, "ARS10 マジックシリンダー 初期") == TIER_EXACT
+
+    def test_broken_aliases_warn_loudly(self, capsys):
+        m = WatchMatcher.from_row({**WATCH_ROW, "aliases": "{壞掉的 json"})
+        assert "[warn]" in capsys.readouterr().out
+        assert match_tier(m, "ARS10 魔法の筒 P4-06") == TIER_EXACT   # 主名還在
+
+
+def test_no_modern_marker_folds_to_empty():
+    """`"" in folded` 恆為真——一個 fold 後變空的標記詞會讓**每一筆** exact 靜默降級。"""
+    from ygo_sniper.card_snipe import _MODERN_FOLDED, _MODERN_MARKERS
+
+    assert all(_MODERN_FOLDED)
+    assert len(_MODERN_FOLDED) == len(_MODERN_MARKERS)
+
 
 class TestObserveAndQueries:
     def test_observe_writes_hits_and_is_idempotent(self, store):
@@ -276,6 +327,49 @@ class TestObserveAndQueries:
         assert h["tier"] == "exact" and h["listing_key"] == "buyee_yahoo:x1"
         assert h["site"] == "buyee_yahoo" and h["seller_id"] == "s1"
         assert h["price_native"] == 50000.0 and h["currency"] == "JPY"
+
+    def test_observe_records_near_too(self, store):
+        """near 不推播不是丟棄——dashboard 狙擊分頁每一筆都看得到（CLAUDE.md 第一節）。"""
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        wid = store.insert_card_watch(**WATCH_KW)
+        lst = Listing(site=Site.BUYEE_YAHOO, external_id="p8",
+                      title="PSA8 遊戯王　魔法の筒　ウルトラレア！　P4-06　第２期",
+                      url="https://example.test/p8", price=3000.0, currency=Currency.JPY)
+        assert observe_listings(store, load_matchers(store), [lst]) == 1
+        hits = store.list_card_watch_hits(watch_id=wid)
+        assert len(hits) == 1 and hits[0]["tier"] == "near"
+
+    def test_observe_handles_null_price_and_end_time(self, store):
+        from datetime import UTC, datetime
+
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        wid = store.insert_card_watch(**WATCH_KW)
+        title = "【ARS10】魔法の筒 P4-06"
+        no_price = Listing(site=Site.BUYEE_YAHOO, external_id="np", title=title,
+                           url="u", price=None, currency=Currency.JPY)
+        with_end = Listing(site=Site.BUYEE_YAHOO, external_id="e1", title=title,
+                           url="u", price=1.0, currency=Currency.JPY,
+                           end_time=datetime(2026, 8, 9, 13, 0, tzinfo=UTC))
+        assert observe_listings(store, load_matchers(store), [no_price, with_end]) == 2
+        by_key = {h["listing_key"]: h for h in store.list_card_watch_hits(watch_id=wid)}
+        assert by_key["buyee_yahoo:np"]["price_native"] is None
+        assert by_key["buyee_yahoo:np"]["end_time"] == ""      # 沒有結標時間 ≠ 0
+        assert by_key["buyee_yahoo:e1"]["end_time"] == "2026-08-09T13:00:00+00:00"
+
+    def test_one_listing_records_a_row_per_matching_watch(self, store):
+        """同一筆標的可能同時是 A 卡的 🎯 與 B 卡的 near——兩本帳各自要有。"""
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        a = store.insert_card_watch(**WATCH_KW)
+        b = store.insert_card_watch(**{**WATCH_KW, "grader": "PSA"})
+        lst = Listing(site=Site.BUYEE_YAHOO, external_id="x9",
+                      title="【ARS10】魔法の筒 P4-06", url="u",
+                      price=1.0, currency=Currency.JPY)
+        assert observe_listings(store, load_matchers(store), [lst]) == 2
+        assert [h["tier"] for h in store.list_card_watch_hits(watch_id=a)] == ["exact"]
+        assert [h["tier"] for h in store.list_card_watch_hits(watch_id=b)] == ["near"]
 
     def test_scan_queries_reuse_base_sources(self, store):
         from ygo_sniper.queries import QuerySpec

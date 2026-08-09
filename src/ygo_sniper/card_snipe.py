@@ -14,16 +14,22 @@ near 不推播不是丟棄：dashboard 狙擊分頁每一筆都看得到。
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from .cards import extract_title_codes, fold
-from .parsers.grade import parse_grade
+from .parsers.grade import normalize, parse_grade
 from .queries import QuerySpec
 
 TIER_EXACT = "exact"
 TIER_PARTIAL = "partial"
 TIER_NEAR = "near"
+
+#: 標題裡「目標機構自己的 token」是否出現（例：目標 ARS → `ARS10`／`ARS 鑑定 9`）。
+#: **用 lookaround 不用 `\b`**：漢字與假名在 Python re 裡算 `\w`，CJK 沒有 word
+#: boundary（CLAUDE.md 第二節，這個 repo 為此出過四次事故）。
+_GRADER_TOKEN_TMPL = r"(?<![A-Za-z0-9]){g}\s*(?:鑑定)?\s*(?:10\+*|[0-9](?:\.5)?)(?!\d)"
 
 #: 現代版標記：命中就從 🎯 降到 👀（**照樣推播**，訊息上註明「疑似現代版」）。
 #: 全部來自 2026-08-09 落札檔案的實際觀測，不是憑空想的。
@@ -40,7 +46,11 @@ _MODERN_MARKERS = (
     "25th", "WCS", "クォーターセンチュリー", "QUARTER CENTURY",
     "レアリティコレクション",
 )
-_MODERN_FOLDED = tuple(fold(t) for t in _MODERN_MARKERS)
+#: fold 後為空的標記詞是災難：`"" in folded` 恆為真，會讓**每一筆** exact 靜默
+#: 降級成 partial。先濾掉空字串，再 assert 一個都沒被濾掉——真的有詞 fold 成空
+#: （例如日後有人只寫了一個中点）就在載入時當場炸掉，而不是安靜地少一個標記詞。
+_MODERN_FOLDED = tuple(f for f in (fold(t) for t in _MODERN_MARKERS) if f)
+assert len(_MODERN_FOLDED) == len(_MODERN_MARKERS), "現代版標記詞 fold 後不得為空字串"
 
 #: partial 每輪推播上限（同 seller_unpriced 的思路：真品類稀少，
 #: 一輪超過這個數多半是比對出了狀況，別讓它洗版）。
@@ -63,16 +73,25 @@ class WatchMatcher:
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> WatchMatcher:
         names = [row.get("name_ja") or "", row.get("name_en") or ""]
+        # `aliases` 兩種形態都要收：store 回的是 JSON 字串，web/CLI 層可能直接
+        # 傳已解碼的 list。只認字串的話 json.loads 會拋 TypeError，別名整組消失，
+        # 而「只寫片假名的標的」就靜默漏掉——所以壞掉要**印出來**，不是 pass。
+        raw = row.get("aliases") or []
         try:
-            names += [str(a) for a in json.loads(row.get("aliases") or "[]")]
-        except (TypeError, ValueError):
-            pass
+            if isinstance(raw, str):
+                raw = json.loads(raw)
+            names += [str(a) for a in raw]
+        except (TypeError, ValueError) as exc:
+            print(f"[warn] card_watch#{row.get('id')} 的 aliases 解析失敗（{exc}），"
+                  f"這張卡的別名比對整組失效：{raw!r}")
         folded = tuple(sorted({fold(n) for n in names if n and fold(n)}))
         return cls(
             row=row,
             names_folded=folded,
             code_norm=str(row.get("code_norm") or ""),
-            grader=str(row.get("grader") or ""),
+            # 縱深防禦：小寫的 grader 會讓每一筆都判成 near，訊息還印
+            # 「鑑定機構是 ARS，不是 ars」。CLI 層會 upper()，這裡零成本再一道。
+            grader=str(row.get("grader") or "").strip().upper(),
             grade=float(row.get("grade") or 0.0),
         )
 
@@ -85,14 +104,18 @@ def match_tier(m: WatchMatcher, title: str) -> str | None:
 def classify(m: WatchMatcher, title: str) -> tuple[str | None, str]:
     """→ (tier, 一句話理由)。理由會走到訊息與 dashboard 上——降級了要說得出為什麼。
 
-    順序即政策：
+    順序即政策（這份清單必須與下面的實作逐步對應——註解描述的是意圖、code 才是
+    行為，兩者不符時改註解，不要改行為）：
     1. 名／號都沒中 → None（與這張卡無關）
-    2. 卡號命中 → 卡號是決定性的，現代版標記不能推翻它
-    3. 機構不符／完全沒鑑定 → near（只入帳，不推播）
-    4. 分數不明或不同 → partial
-    5. 現代版標記 → partial（**照樣推播**，註明疑似現代版）
-    6. 標題只明示別張卡號 → partial
-    7. 其餘 → exact
+    2. `parse_grade` 的機構與目標不符：
+       2a. 但標題自己寫了「目標機構＋分數」→ partial（賣家的宣稱寫法，見下）
+       2b. 否則 → near（只入帳，不推播）
+    3. 分數不明 → partial
+    4. 分數與目標不同 → partial
+    5. 機構分數全符 ＋ 卡號命中 → exact（卡號是決定性的，標記詞推翻不了它）
+    6. 機構分數全符 ＋ 現代版標記 → partial（**照樣推播**，註明疑似現代版）
+    7. 機構分數全符 ＋ 標題只明示別張卡號 → partial
+    8. 其餘（機構分數全符、卡名命中）→ exact
     """
     folded = fold(title)
     name_hit = any(n in folded for n in m.names_folded)
@@ -103,6 +126,18 @@ def classify(m: WatchMatcher, title: str) -> tuple[str | None, str]:
 
     grader, grade = parse_grade(title)
     if grader.value != m.grader:
+        # 賣家常寫「ARS 鑑定品，相當於 PSA10 以上」，而 parse_grade 只回一個勝者，
+        # PSA 的 pattern 又排在 ARS 前面（`以上` 不在它的 _CLAIM_SUFFIX 裡）。
+        # 實測 data/sniper.db 的 3,239 個真實標題：998 筆自己寫了 ARS＋分數，
+        # 其中 79 筆（7.9%）被讀成 PSA——直接判 near 等於靜默漏掉 7.9% 的目標卡。
+        # 標題自己寫了目標機構就至少推播（👀），讓使用者一眼決定。
+        # **不升到 exact**：分數的權威只有 parse_grade 一份，這裡不另立第二把尺。
+        if re.search(_GRADER_TOKEN_TMPL.format(g=re.escape(m.grader)),
+                     normalize(title)):
+            return TIER_PARTIAL, (
+                f"標題同時出現 {m.grader} 與 {grader.value} 的標記"
+                f"（賣家常寫『相當於 {grader.value}』）——需人工確認"
+            )
         got = grader.value if grader.value != "UNKNOWN" else "未鑑定"
         return TIER_NEAR, f"鑑定機構是 {got}，不是 {m.grader}"
     if grade is None:
