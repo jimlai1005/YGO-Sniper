@@ -60,5 +60,11 @@ def parse_auction_page(html: str, *, url: str = "") -> AuctionSnapshot:
 
 
 def fetch_auction_snapshot(url: str, *, fetcher) -> AuctionSnapshot:
-    """fetcher 只需有 CachedFetcher.get 同形的 get(url)。FetchError 由呼叫端分類。"""
-    return parse_auction_page(fetcher.get(url), url=url)
+    """fetcher 只需有 CachedFetcher.get 同形的 get(url)。FetchError 由呼叫端分類。
+
+    **一律 `use_cache=False`**：存證要的是「此刻的真相」。快取裡可能有一份
+    這個拍賣**還在進行中**時抓的副本，那會把中途出價存成成交價、status 存成
+    `open`——一個安靜的錯誤數字，而且方向照例是「看起來很划算」（中途出價
+    必定低於最終落札價）。
+    """
+    return parse_auction_page(fetcher.get(url, use_cache=False), url=url)

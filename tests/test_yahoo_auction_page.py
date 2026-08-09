@@ -42,3 +42,17 @@ def test_fetch_uses_the_injected_fetcher():
 
     snap = fetch_auction_snapshot(URL, fetcher=FakeFetcher())
     assert snap.price == 6350
+
+
+def test_snapshot_never_reads_from_cache():
+    """存證要的是「此刻的真相」。快取可能是這個拍賣還在進行中時抓的，
+    那會把中途出價存成成交價（安靜的錯誤數字，方向還是「看起來很划算」）。"""
+    seen = {}
+
+    class RecordingFetcher:
+        def get(self, url, **kw):
+            seen.update(kw)
+            return PAGE
+
+    fetch_auction_snapshot(URL, fetcher=RecordingFetcher())
+    assert seen.get("use_cache") is False
