@@ -729,7 +729,13 @@ class TestPipelineHook:
         hits = pipeline.store.list_card_watch_hits(watch_id=wid)
         assert len(hits) == 1 and hits[0]["tier"] == "exact"  # 但狙擊帳有
 
-    def test_dry_run_does_not_write_hits(self, pipeline):
+    def test_dry_run_compares_but_does_not_write(self, pipeline):
+        """`scan --dry-run` 的語意是「只掃不寫庫」——**不是「不要比對」**。
+
+        比對是純字串運算、零網路零副作用，跳過它只會讓 dry-run 印出
+        「比對 0 筆」，而那與「掛鉤壞了」外顯一模一樣。dry-run 正是使用者
+        用來確認東西有在動的指令，不能讓它落進 Step 0 要消滅的那個歧義。
+        """
         from ygo_sniper.domain import Currency, Listing, Site
 
         wid = pipeline.store.insert_card_watch(**WATCH_KW)
@@ -739,7 +745,8 @@ class TestPipelineHook:
                       price=1000.0, currency=Currency.JPY)
         pipeline._snipe_write = False                         # dry-run 的旗標
         pipeline._collect_candidates([lst], "test", [])
-        assert pipeline.store.list_card_watch_hits(watch_id=wid) == []
+        assert pipeline.store.list_card_watch_hits(watch_id=wid) == []   # 沒寫帳
+        assert pipeline._snipe_stats == {"compared": 1, "hits": 1}       # 但比對跑了
 
     def test_notification_outcome_carries_snipe_matches(self, pipeline):
         """規則 4 的最後一哩：脈絡沒接進 `evaluate` 的話它恆為 0 命中，

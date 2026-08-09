@@ -3514,6 +3514,12 @@ git commit -m "feat(snipe): CLI 群組 snipe add/list/report/remove（add 可順
 
 ### Task 9: dashboard——🎯 狙擊 tab
 
+> **執行期注意（2026-08-09，Task 7/8 發現）**：
+> 1. **`Pipeline._snipe_cache` 沒有失效機制**。目前每個 `Pipeline` 都是短命的（CLI 每個指令一個、`web/app.py:1160` 每次背景掃描一個），所以無害。**動 web 時務必確認 Pipeline 仍是每次掃描新建**——若改成長命的，掃描途中新登錄的狙擊卡會被安靜略過到重啟為止，而那與「這張卡最近沒出現」外顯一模一樣。
+> 2. **rich 會吃掉方括號**（`[exact]` 被當成樣式標籤整段吞掉，Task 8 實測）。這條只影響 CLI，dashboard 是 HTML 不受影響——但前端一律要走既有的 `escapeHtml()`，理由相同：外部字串不可直接進渲染層。
+>
+> ⚠️ **獨立待辦（不在本計劃範圍）**：`cli.py` 多處 `console.print` 直接內插外部字串（`watch-seller list` 的 reason、`snipe mine` 的 summary 等），標題含半形 `[…]` 時會被 rich 吃掉。建議日後統一走一個 `_safe(text)` helper。
+
 **Files:**
 - Modify: `web/app.py`（pin route（:1066-1115）之後加四個 route；`/api/snipe/{id}` 是數字參數不與其他 route 衝突）
 - Modify: `web/static/index.html`（tab :391 後、view 容器 :592 `</main>` 前、`setView` :2351、JS 函式加在 `loadSellers` 附近）
