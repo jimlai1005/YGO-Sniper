@@ -558,6 +558,33 @@ class TestDossier:
         assert "3 筆" in joined and "沒給成交時刻" in joined   # 缺口要說出來
         assert "4 次" not in joined              # 絕不把無日期的算進次數
 
+    def test_listed_hits_are_never_counted_as_sales(self, store):
+        """**在架 ≠ 賣掉**，兩種基準永遠不相加（CLAUDE.md 第三節，這個專案列了六次）。
+
+        混起來的錯誤方向照例是「看起來很划算」：使用者會把「同一件貨掛在架上很久
+        沒賣掉」讀成「這個賣家供給穩定」，於是決定不必急著出手——而這個數字正是
+        「我該去哪等、要不要現在動手」的依據。
+        """
+        res = add_card_watch(store, PageFetcher({}), grader="ars", grade_input="10",
+                             name_ja="魔法の筒", code="P4-06")
+        store.upsert_card_watch_sale(
+            res.watch_id, "buyee_yahoo:sold1", tier="exact",
+            title="【ARS10】魔法の筒", url="u", site="buyee_yahoo", seller_id="S",
+            price_native=6350.0, currency="JPY",
+            sold_at="2026-07-01T13:53:03+00:00", bid_count=15, sale_kind="auction",
+        )
+        for i in range(2):                       # 同一個賣家目前還掛著兩筆
+            store.upsert_card_watch_hit(
+                res.watch_id, f"buyee_yahoo:live{i}", tier="exact",
+                title="【ARS10】魔法の筒", url="u", site="buyee_yahoo",
+                seller_id="S", price_native=9000.0, currency="JPY")
+
+        d = build_dossier(store, store.get_card_watch(res.watch_id))
+        joined = "\n".join(d.recommendation)
+        assert "賣掉過這張卡 1 次" in joined      # 賣掉的只有那一筆
+        assert "3 次" not in joined              # 1 賣掉 ＋ 2 在架 ≠ 3 次成交
+        assert "在架" in joined and "目前在架 2 筆" in joined   # 在架筆數看得到，不是被丟掉
+
 
 class TestNotifyContext:
     def test_pending_only_contains_unsent_exact_and_partial(self, store):

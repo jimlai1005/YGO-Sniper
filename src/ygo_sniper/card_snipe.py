@@ -668,56 +668,87 @@ def build_recommendation(
     掃到什麼可靠得多（我們的庫實測 0 筆，市場檔案一個請求就 150 天）。
     """
     lines: list[str] = []
+    #: 每個賣家記**三組互不相加的數字**，不是一個 `n`。
+    #: `sold_n`（有成交時刻的已成交）／`undated_n`（成交了但來源沒給時刻）／
+    #: `listed_n`（**目前還在架上**）。分成三個計數器是結構性的：只要共用一個
+    #: 計數器，日後任何一個新來源都能無聲地混進來（CLAUDE.md 第三節的第七項就是
+    #: 「同源要問到機制那一層」）。
     sellers: dict[str, dict[str, Any]] = {}
 
-    def _note(key: str, when: str, price: Any, src: str) -> None:
-        s = sellers.setdefault(
-            key, {"n": 0, "undated": 0, "last": "", "prices": [],
-                  "undated_prices": [], "src": src},
+    def _seller(key: str) -> dict[str, Any]:
+        return sellers.setdefault(
+            key, {"sold_n": 0, "undated_n": 0, "listed_n": 0, "last": "",
+                  "prices": [], "undated_prices": []},
         )
-        # ⚠️ **「幾次」是日期類宣稱，沒有成交時刻的那批不能算進去。**
-        # 實測一次挖掘 206 筆有 77 筆（Mercari／露天）給不出落札時刻；把它們
-        # 併進同一個計數，就是拿兩種基準的東西合成一個數字（CLAUDE.md 第三節）。
-        # 它們照樣列出來（價格是有效資訊），只是自己一個桶、自己講清楚。
+
+    def _note_sale(key: str, when: str, price: Any) -> None:
+        """**已成交**一筆。只有這個函式會動「賣掉幾次」與成交價。
+
+        ⚠️ 「幾次」是日期類宣稱，沒有成交時刻的那批不能算進去：實測一次挖掘
+        206 筆有 77 筆（Mercari／露天）給不出落札時刻，併進同一個計數就是拿
+        兩種基準的東西合成一個數字。它們照樣列出來（價格是有效資訊），
+        只是自己一個桶、自己講清楚。
+        """
+        s = _seller(key)
         if when:
-            s["n"] += 1
+            s["sold_n"] += 1
             if when > s["last"]:
                 s["last"] = when
             if price is not None:
                 s["prices"].append(price)
         else:
-            s["undated"] += 1
+            s["undated_n"] += 1
             if price is not None:
                 s["undated_prices"].append(price)
 
+    def _note_listing(key: str) -> None:
+        """**目前在架**一筆。獨立計數器，永遠不與 `sold_n` 相加。
+
+        在架 ≠ 賣掉：hit 是「買得到的機會」，sale 是「已經成交的行情」，分母與
+        意義都不同。混起來的錯誤方向照例是「看起來很划算」——同一件貨掛在架上
+        三個月沒賣掉，會被讀成「這個賣家供給穩定，不必急」，而那正好是相反的
+        結論（CLAUDE.md 第三節）。
+        在架標的的價格是**要價**不是成交價，所以這裡連價格都不收——收了就會
+        混進上面那串「成交 …」裡。
+        """
+        _seller(key)["listed_n"] += 1
+
     for s in sales:
         if s.get("tier") == TIER_EXACT and s.get("seller_id"):
-            _note(f"{s.get('site') or ''}:{s['seller_id']}",
-                  str(s.get("sold_at") or ""), s.get("price_native"), "成交檔案")
+            _note_sale(f"{s.get('site') or ''}:{s['seller_id']}",
+                       str(s.get("sold_at") or ""), s.get("price_native"))
     for e in evidence:
         if e.get("status") == "ok" and e.get("seller_id"):
-            _note(f"{e.get('site') or 'buyee_yahoo'}:{e['seller_id']}",
-                  str(e.get("sold_at") or ""), e.get("price_native"), "使用者證據")
+            _note_sale(f"{e.get('site') or 'buyee_yahoo'}:{e['seller_id']}",
+                       str(e.get("sold_at") or ""), e.get("price_native"))
     for h in hits:
         if h.get("tier") == TIER_EXACT and h.get("seller_id"):
-            _note(f"{h.get('site') or ''}:{h['seller_id']}",
-                  str(h.get("last_seen") or ""), h.get("price_native"), "在架命中")
+            _note_listing(f"{h.get('site') or ''}:{h['seller_id']}")
 
-    for key, s in sorted(sellers.items(),
-                         key=lambda kv: (-(kv[1]["n"] + kv[1]["undated"]), kv[0])):
-        if s["n"]:
-            what = (f"賣掉過這張卡 {s['n']} 次（最近 {s['last'][:10]}；"
-                    f"成交 {_prices(s['prices'])}）")
-            if s["undated"]:
-                what += (f"，另有 {s['undated']} 筆同款成交沒給成交時刻"
-                         f"（成交 {_prices(s['undated_prices'])}，不算進上面的次數）")
-        else:
-            what = (f"賣掉過這張卡 {s['undated']} 筆、但來源都沒給成交時刻"
-                    f"（成交 {_prices(s['undated_prices'])}——只答得出價格，"
-                    f"答不出何時）")
+    # 排序也不把三個數字加起來：依序比「賣掉過幾次 → 幾筆無時刻 → 在架幾筆」。
+    for key, s in sorted(
+        sellers.items(),
+        key=lambda kv: (-kv[1]["sold_n"], -kv[1]["undated_n"], -kv[1]["listed_n"],
+                        kv[0]),
+    ):
+        facts: list[str] = []
+        if s["sold_n"]:
+            facts.append(f"賣掉過這張卡 {s['sold_n']} 次（最近 {s['last'][:10]}；"
+                         f"成交 {_prices(s['prices'])}）")
+            if s["undated_n"]:
+                facts.append(f"另有 {s['undated_n']} 筆同款成交沒給成交時刻"
+                             f"（成交 {_prices(s['undated_prices'])}，"
+                             f"不算進上面的次數）")
+        elif s["undated_n"]:
+            facts.append(f"賣掉過這張卡 {s['undated_n']} 筆、但來源都沒給成交時刻"
+                         f"（成交 {_prices(s['undated_prices'])}——只答得出價格，"
+                         f"答不出何時）")
+        if s["listed_n"]:
+            # 0 就不印（不洗版）；有就一定要印——在架筆數是「去哪等」的直接依據。
+            facts.append(f"目前在架 {s['listed_n']} 筆（要價，不是成交價）")
         lines.append(
-            f"賣家 {key} {what}——建議釘選（每批都掃、不佔名額）："
-            f"ygo-sniper watch-seller pin {key}"
+            f"賣家 {key} " + "；".join(facts)
+            + f"——建議釘選（每批都掃、不佔名額）：ygo-sniper watch-seller pin {key}"
         )
     if not sellers:
         lines.append(
