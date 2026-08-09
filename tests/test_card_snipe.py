@@ -21,6 +21,7 @@ from ygo_sniper.card_snipe import (
     load_matchers,
     match_tier,
     observe_listings,
+    refresh_watch_census,
     scan_queries,
 )
 from ygo_sniper.store import CARD_SNIPE_RULE, Store
@@ -87,6 +88,32 @@ class TestCardWatchStore:
             wid, census_url="u", census_json="{}", census_total=1) is True
         assert store.update_card_watch_census(
             wid + 999, census_url="u", census_json="{}", census_total=1) is False
+
+    def test_census_url_only_update_never_touches_the_counts(self, store):
+        """只寫 URL 的那條路徑**不得**碰 json／total／fetched_at。
+
+        抓取失敗時唯一確定的新事實就是「這個 URL 是我們要重試的那個」；
+        存世量與「上次成功抓到的時刻」都還是舊的那一份，覆寫它就是拿
+        「讀不到」當成「不存在」（CLAUDE.md 第五節，與 disappeared_at
+        一鍵清除誤殺率 100% 那次同一類）。
+        """
+        wid = store.insert_card_watch(**WATCH_KW)
+        store.update_card_watch_census(
+            wid, census_url="https://ars-grading.com/old",
+            census_json='{"9": 5, "10": 5, "10+": 1}', census_total=11,
+            now="2026-08-01T00:00:00+00:00",
+        )
+        assert store.update_card_watch_census_url(
+            wid, census_url="https://ars-grading.com/new") is True
+        w = store.get_card_watch(wid)
+        assert w["census_url"] == "https://ars-grading.com/new"
+        assert json.loads(w["census_json"]) == {"9": 5, "10": 5, "10+": 1}
+        assert w["census_total"] == 11
+        # 「上次真的抓到的時刻」也是資料——抓失敗不能讓它看起來剛更新過
+        assert w["census_fetched_at"] == "2026-08-01T00:00:00+00:00"
+        # 同 update_card_watch_census：存到不存在的列要說得出來
+        assert store.update_card_watch_census_url(
+            wid + 999, census_url="u") is False
 
     def test_hit_upsert_is_idempotent_and_updates_last_seen(self, store):
         wid = store.insert_card_watch(**WATCH_KW)
@@ -560,6 +587,86 @@ class TestAddCardWatch:
         ev = store.list_card_watch_evidence(res.watch_id)
         assert ev[0]["status"] == "unsupported"
 
+    def test_unreadable_master_is_not_the_same_message_as_missing_card(
+        self, store, monkeypatch
+    ):
+        """**「主檔讀不到」與「主檔裡沒這張卡」是兩件事，訊息不能長一樣。**
+
+        `data/cards_1998_2004.json` 不在版控裡（`git ls-files data/` 只有 certs）。
+        檔案缺失／損毀時別名會拿到 0 個 → 只寫片假名的標題（マジック・シリンダー）
+        從 exact 變成完全不比對、**永不推播**，而畫面訊息與「主檔正常但沒這張卡」
+        一字不差——那就是靜默漏通知（CLAUDE.md 第五節）。
+        """
+        import ygo_sniper.cards as cards_mod
+
+        monkeypatch.setattr(cards_mod, "DEFAULT_MASTER_PATH",
+                            "data/no_such_master_file.json")
+        res = add_card_watch(store, PageFetcher({}), grader="PSA",
+                             grade_input="10", name_ja="魔法の筒", code="P4-06")
+        joined = "\n".join(res.messages)
+        assert "讀不到" in joined                        # 明說是讀不到
+        assert "data/no_such_master_file.json" in joined  # 連路徑一起講
+        assert "別名" in joined                          # 後果要講：別名不會被比對
+        assert "沒有這張卡" not in joined                # 與「沒這張卡」不是同一句
+        # 讀不到不擋登錄——只是要大聲
+        assert store.get_card_watch(res.watch_id) is not None
+
+    def test_master_without_this_card_says_so_without_crying_wolf(self, store):
+        """主檔正常、只是真的沒收錄這張卡：照舊那一句，別報成讀不到。"""
+        res = add_card_watch(store, PageFetcher({}), grader="PSA",
+                             grade_input="10", name_ja="ぜったいに主檔にないカードZZZ")
+        joined = "\n".join(res.messages)
+        assert "卡名主檔沒有這張卡" in joined
+        assert "讀不到" not in joined
+
+
+class TestCensusRefreshFailure:
+    """**抓不到 ≠ 那些卡不存在。**（CLAUDE.md 第五節）
+
+    ars-grading 暫時連不上／被擋時跑 `snipe report N --refresh-census`，失敗分支
+    若用空字串與 None 覆寫，上一次抓好的存世量就沒了——而 Telegram 訊息裡
+    「存世量：ARS10 全世界 5 張」那整行只是安靜地消失，訊息還說「URL 已存」。
+    """
+
+    class BoomFetcher:
+        def get(self, url, **kw):
+            from ygo_sniper.sources.base import FetchError
+            raise FetchError("connection reset", url=url, status=None)
+
+    def test_failed_refresh_keeps_the_existing_census(self, store):
+        wid = store.insert_card_watch(**WATCH_KW)
+        store.update_card_watch_census(
+            wid, census_url="https://ars-grading.com/old",
+            census_json='{"9": 5, "10": 5, "10+": 1}', census_total=11,
+            now="2026-08-01T00:00:00+00:00",
+        )
+        w = dict(store.get_card_watch(wid))
+        w["census_url"] = "https://ars-grading.com/new"      # 使用者改指了新頁
+        msgs = refresh_watch_census(store, self.BoomFetcher(), w)
+
+        after = store.get_card_watch(wid)
+        assert json.loads(after["census_json"]) == {"9": 5, "10": 5, "10+": 1}
+        assert after["census_total"] == 11
+        assert after["census_fetched_at"] == "2026-08-01T00:00:00+00:00"
+        assert after["census_url"] == "https://ars-grading.com/new"   # URL 有更新
+        joined = "\n".join(msgs)
+        assert "失敗" in joined
+        assert "先前抓到的存世量保留" in joined    # 保留了就要講，不能只說「URL 已存」
+
+    def test_first_time_failure_does_not_claim_it_kept_anything(self, store):
+        """從來沒抓到過的時候不准說「保留了」——沒有的東西保留不了。"""
+        wid = store.insert_card_watch(**WATCH_KW)
+        w = dict(store.get_card_watch(wid))
+        w["census_url"] = "https://ars-grading.com/x"
+        msgs = refresh_watch_census(store, self.BoomFetcher(), w)
+        joined = "\n".join(msgs)
+        assert "失敗" in joined
+        assert "先前抓到的存世量保留" not in joined
+        assert "還沒有存世量資料" in joined
+        after = store.get_card_watch(wid)
+        assert not after["census_json"] and after["census_total"] is None
+        assert after["census_url"] == "https://ars-grading.com/x"
+
 
 class TestDossier:
     def test_three_buckets_stay_separate_and_recommendation_names_the_seller(self, store):
@@ -668,6 +775,13 @@ class TestDossier:
         不去重就把一次成交算成兩次——錯誤方向是「這張卡比實際更常出現」，
         使用者會據此以為供給穩定、不必急著搶（CLAUDE.md 第三節：同一桶價值
         被算兩次）。症狀最直觀的一點是成交價會印兩遍。
+
+        ⚠️ 測資刻意讓兩桶的**事實欄位對不上**（價格差 1 元、證據那筆沒抓到
+        賣家 ID），只留 URL 可以比對——這才測得到主機制（`_sale_identity` 的
+        拍賣 ID 抽取）。兩邊價格與賣家都寫成一樣的話，拍賣 ID 抽取整段壞掉、
+        退回事實三元組仍然併得起來，測試照樣綠：那是一個沒有牙齒的守衛。
+        欄位對不上也是實況：證據快照的 `price` 是落札価格、挖掘那筆可能含稅，
+        賣家 ID 也常常抓不到（存空字串）。
         """
         res = add_card_watch(store, PageFetcher({}), grader="ars", grade_input="10",
                              name_ja="魔法の筒", code="P4-06")
@@ -682,9 +796,9 @@ class TestDossier:
         )
         store.upsert_card_watch_evidence(          # 同一場，使用者自己貼的 URL
             res.watch_id, "https://auctions.yahoo.co.jp/jp/auction/n1235105710",
-            status="ok", title="【ARS10】魔法の筒", price_native=6350.0,
+            status="ok", title="【ARS10】魔法の筒", price_native=6349.0,
             sold_at="2026-07-01T13:53:03+00:00", bids=15,
-            seller_id="AiUkMq1pEUfNxvPeCv5PnfGpsFLrx", seller_name="Natural Cards",
+            seller_id="", seller_name="Natural Cards",
         )
 
         d = build_dossier(store, store.get_card_watch(res.watch_id))
@@ -692,8 +806,10 @@ class TestDossier:
         assert len(d.sales) == 1 and len(d.evidence) == 1
         joined = "\n".join(d.recommendation)
         assert "賣掉過這張卡 1 次" in joined
+        assert "已知 1 次成交" in joined          # 頻率行也只能數一次
         assert "2 次" not in joined
         assert joined.count("6,350") == 1        # 同一筆成交價不得印兩遍
+        assert "6,349" not in joined             # 併掉的那一筆不該另外冒出來
 
     def test_frequency_and_seller_lines_share_one_count(self, store):
         """賣家行與頻率行必須數同一份東西——兩套計次遲早會當著使用者的面打架。

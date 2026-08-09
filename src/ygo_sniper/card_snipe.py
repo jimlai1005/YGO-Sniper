@@ -370,35 +370,61 @@ class AddResult:
     messages: list[str]
 
 
-def _master_card(*, code_norm: str, name_ja: str) -> dict[str, Any] | None:
-    """讀卡名主檔原始 JSON 找這張卡。
+def _master_card(
+    *, code_norm: str, name_ja: str
+) -> tuple[dict[str, Any] | None, str]:
+    """讀卡名主檔原始 JSON 找這張卡 → `(卡片, 讀不到的原因)`。
 
     不能走 CardIndex：它把 aliases 折進內部索引後就丟掉原始卡片 dict，
     而登錄需要的正是 aliases 清單。**路徑一定要 `project_root() / …`**（照抄
     cards.py:394）：`DEFAULT_MASTER_PATH` 是相對路徑字串，直接 `Path(...)` 在
     非 repo 目錄執行 console script 時會讀不到 → aliases 空 → 「マジック・
     シリンダー」那類標題永遠 tier=None、永不推播。誤殺是靜默的。
-    缺檔回 None 不爆。
+
+    ⚠️ **回兩個值是結構性的**：`(None, "")` ＝ 主檔正常、只是沒收錄這張卡；
+    `(None, 原因)` ＝ 主檔根本讀不到／壞了。兩者的後果一樣（別名 0 個），
+    但一個是事實、一個是我們自己的環境壞了，只有後者要人去修——而
+    `data/cards_1998_2004.json` **不在版控裡**（`git ls-files data/` 只有
+    certs），所以「檔案不在」是真的會發生的情境。吞成同一個 None 的話，
+    畫面訊息一字不差，使用者只會覺得「這張卡主檔沒有」然後照樣登錄下去，
+    而那張卡從此永不推播（CLAUDE.md 第五節：靜默失敗）。
+    讀不到仍然**不擋登錄**，只是要大聲。
     """
     from .cards import DEFAULT_MASTER_PATH
     from .config import project_root
 
+    path = project_root() / DEFAULT_MASTER_PATH
     try:
-        data = json.loads(
-            (project_root() / DEFAULT_MASTER_PATH).read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError):
-        return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"卡名主檔讀不到（{path}）：{type(exc).__name__}: {exc}"
     cards = data.get("cards") or []
     if code_norm:
         for c in cards:
             if code_norm in (c.get("set_codes") or []):
-                return c
+                return c, ""
     if name_ja:
         for c in cards:
             if c.get("name_ja") == name_ja:
-                return c
-    return None
+                return c, ""
+    return None, ""
+
+
+def _existing_census_note(store: Any, watch_id: int) -> str:
+    """抓失敗時，講清楚庫裡**現在**還有什麼——「保留了」與「本來就沒有」是兩件事。
+
+    只在確實留著舊資料時才說「保留」：沒有的東西保留不了，硬講會讓使用者
+    以為 dashboard 上該有一行存世量。
+    """
+    w = store.get_card_watch(watch_id) or {}
+    raw = str(w.get("census_json") or "")
+    if not raw:
+        return "這張卡目前還沒有存世量資料（不是被清掉，是從來沒抓到過）"
+    total = w.get("census_total")
+    at = str(w.get("census_fetched_at") or "")[:10]
+    when = f"，{at} 抓的" if at else ""
+    return (f"**先前抓到的存世量保留**（鑑定總數 {total}{when}）"
+            f"——讀不到 ≠ 不存在")
 
 
 def _ingest_census(
@@ -452,9 +478,14 @@ def _ingest_census(
             msgs.append("⚠️ 各級張數讀到了但鑑定總數沒讀到——ARS 總數那行的版型"
                         "可能改了，請人工確認 census 頁")
     except (FetchError, CensusParseError) as exc:
-        store.update_card_watch_census(watch_id, census_url=url, census_json="",
-                                       census_total=None)
-        msgs.append(f"⚠️ census 抓取／解析失敗（{exc}）——URL 已存，"
+        # ⚠️ **只寫 URL，絕不碰 json／total。**（CLAUDE.md 第五節）
+        # 用空字串＋None 覆寫會把上一次抓好的存世量清掉，而症狀只是 Telegram 上
+        # 「存世量：ARS10 全世界 5 張」整行安靜消失——訊息還說「URL 已存」，
+        # 完全不提資料被清了。ars-grading 連不上是 transient 失敗，
+        # 讀不到 ≠ 那些卡不存在（與 disappeared_at 一鍵清除誤殺率 100% 同一類）。
+        store.update_card_watch_census_url(watch_id, census_url=url)
+        kept = _existing_census_note(store, watch_id)
+        msgs.append(f"⚠️ census 抓取／解析失敗（{exc}）——URL 已存，{kept}；"
                     f"之後 --refresh-census 重試")
         return msgs
     store.update_card_watch_census(
@@ -510,7 +541,7 @@ def add_card_watch(
     name_ja = name_ja.strip()
     name_en = name_en.strip()
     aliases: list[str] = []
-    master = _master_card(code_norm=code_norm, name_ja=name_ja)
+    master, master_err = _master_card(code_norm=code_norm, name_ja=name_ja)
     if master is not None:
         aliases = [str(a) for a in (master.get("aliases") or []) if a]
         if not name_en and master.get("name_en"):
@@ -520,6 +551,14 @@ def add_card_watch(
             aliases.append(str(master["name_ja"]))
         msgs.append(f"卡名主檔命中：{master.get('name_ja')}"
                     f"（別名 {len(aliases)} 個一併比對）")
+    elif master_err:
+        # **這一句不能與下面那句長一樣。** 主檔壞掉時別名是 0 個，只寫別名
+        # （マジック・シリンダー）的標題會整批比不到 → 永不推播，而使用者
+        # 看到的訊息若與「主檔沒收錄這張卡」相同，就沒有人會去修檔案。
+        msgs.append(
+            f"⚠️ {master_err}——**別名不會被比對**（只寫別名寫法的標題會整批漏掉，"
+            f"而漏掉是靜默的）。修好主檔後用 `snipe remove` ＋重新登錄這張卡。"
+        )
     else:
         msgs.append("⚠️ 卡名主檔沒有這張卡——比對只用你提供的名字與卡號")
 

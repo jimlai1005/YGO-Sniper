@@ -1581,14 +1581,37 @@ class Store:
         self, watch_id: int, *, census_url: str, census_json: str,
         census_total: int | None = None, now: str | None = None,
     ) -> bool:
-        """回傳「有沒有真的寫到」（同 `deactivate_card_watch` 的形狀）。
-        False ＝ 那個 watch 不存在——「存好了」與「存到空氣」不可以長得一樣。"""
+        """**抓到了**才呼叫這支：URL、各級張數、總數、抓取時刻一起寫。
+
+        回傳「有沒有真的寫到」（同 `deactivate_card_watch` 的形狀）。
+        False ＝ 那個 watch 不存在——「存好了」與「存到空氣」不可以長得一樣。
+
+        ⚠️ 抓取失敗時**不要**拿空字串／None 呼叫這支來「順便存 URL」——那會把
+        上一次抓好的存世量清掉（讀不到 ≠ 不存在）。失敗路徑走
+        `update_card_watch_census_url`。
+        """
         with self._conn() as c:
             cur = c.execute(
                 """UPDATE card_watch SET census_url = ?, census_json = ?,
                    census_total = ?, census_fetched_at = ? WHERE id = ?""",
                 (census_url, census_json, census_total,
                  now or _now_iso(), int(watch_id)),
+            )
+            return cur.rowcount > 0
+
+    def update_card_watch_census_url(self, watch_id: int, *, census_url: str) -> bool:
+        """**只寫 URL**：census json／total／fetched_at 一律不碰。
+
+        抓取失敗時唯一確定的新事實就是「下次要重試的是這個 URL」。存世量還是
+        上一次成功抓到的那一份，`census_fetched_at` 也還是那一次的時刻——這次
+        並沒有抓到任何東西，讓它看起來剛更新過就是在說謊。
+        （CLAUDE.md 第五節：讀不到 ≠ 不存在，與 `disappeared_at` 一鍵清除
+        誤殺率 100% 的事故同一類；欄位分開寫是結構性的，不是靠記得。）
+        """
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE card_watch SET census_url = ? WHERE id = ?",
+                (census_url, int(watch_id)),
             )
             return cur.rowcount > 0
 

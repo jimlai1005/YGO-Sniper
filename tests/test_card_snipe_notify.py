@@ -139,24 +139,49 @@ def test_store_and_notify_rules_agree_on_the_rule_name():
     assert CARD_SNIPE_RULE == RULE_CARD_SNIPE
 
 
-def test_preview_table_renders_a_snipe_hit_without_crashing(store, cfg, capsys):
-    """規則 4 的 Match 沒有 p_worth——preview 的 else 分支會 TypeError。
-    命中 0 筆時這個迴圈根本不執行，所以只有這條測試擋得住它。"""
-    import ygo_sniper.cli as cli_mod  # noqa: F401
-    from ygo_sniper.notify_rules import RULE_CARD_SNIPE, RULE_LABEL
+def test_preview_table_renders_a_snipe_hit_without_crashing(tmp_path, monkeypatch):
+    """打**真正的 `notify-preview` 指令**，命中帳裡有一筆狙擊。
 
+    規則 4 的 Match 沒有 `p_worth`，掉進 preview 那個 `else` 就是
+    `TypeError: unsupported format string passed to NoneType.__format__`。
+    命中 0 筆時那個迴圈根本不執行 → 沒有狙擊命中的日子它一路綠，
+    直到「真的有一張卡上架」那天才炸——所以只有這條測試擋得住它。
+
+    ⚠️ 這條測試必須**呼叫 `notify_preview` 本人**。把 cli 的格式化邏輯抄一份
+    進測試本體是假守衛：實作那段整個刪掉，抄本照樣算得出 detail、照樣全綠
+    （CLAUDE.md 第六節：驗證使用者實際會打的那個指令，不是元件會不會動）。
+    """
+    from dataclasses import replace as dc_replace
+
+    from conftest import FakeFx
+    from typer.testing import CliRunner
+
+    import ygo_sniper.cli as cli_mod
+    import ygo_sniper.config as config_mod
+    import ygo_sniper.pipeline as pipeline_mod
+
+    db = tmp_path / "preview.db"
+    config_mod.load_config.cache_clear()
+    test_cfg = dc_replace(config_mod.load_config(),
+                          storage={**config_mod.load_config().storage,
+                                   "db_path": str(db)})
+    # `notify_preview` 自己 `Pipeline()`（不帶 cfg）→ 走 pipeline 模組的
+    # load_config。承重斷言：這條測試絕不能碰正式庫。
+    monkeypatch.setattr(pipeline_mod, "load_config", lambda: test_cfg)
+    monkeypatch.setattr(pipeline_mod, "FxRates", lambda _cfg: FakeFx())
+    monkeypatch.setattr(pipeline_mod, "build_sources", lambda _cfg, _f=None: {})
+    assert pipeline_mod.load_config().db_path == db, "preview 的 cfg 沒有指到 tmp db"
+
+    store = Store(db)
     wid = store.insert_card_watch(**WATCH_KW)
     _hit(store, wid, "buyee_yahoo:x1")
-    out = evaluate([], rules=_rules(cfg), notified=store.notify_log_map(),
-                   snipe_ctx=build_notify_context(store))
-    m = out.to_send[0]
-    assert m.p_worth is None            # 正是會炸的前提
-    w = m.row.get("watch") or {}
-    price = m.row.get("price_native")
-    price_s = (f"{m.row.get('currency') or ''} {price:,.0f}"
-               if price is not None else "價格不明")
-    mark = "🎯" if m.row.get("tier") == "exact" else "👀"
-    detail = (f"{mark} {w.get('grader', '')}{w.get('grade_label', '')} "
-              f"{w.get('name_ja', '')}｜{price_s}")
-    assert "🎯" in detail and "ARS10" in detail and "JPY 50,000" in detail
-    assert RULE_LABEL[RULE_CARD_SNIPE] == "規則 4 指定卡狙擊"
+
+    try:
+        r = CliRunner().invoke(cli_mod.app, ["notify-preview"])
+        assert r.exit_code == 0, f"{r.output}\n{r.exception!r}"
+        assert "規則 4 指定卡狙擊：命中 1 筆" in r.output
+        # 狙擊那一列真的被排出來了（P= 那個分支會在這裡炸）
+        assert "🎯" in r.output and "ARS10" in r.output
+        assert "JPY 50,000" in r.output
+    finally:
+        config_mod.load_config.cache_clear()
