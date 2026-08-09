@@ -168,16 +168,26 @@ def load_matchers(store: Any) -> list[WatchMatcher]:
 
 def observe_listings(
     store: Any, matchers: list[WatchMatcher], listings: list, *,
-    source_name: str = "",
+    source_name: str = "", write: bool = True,
 ) -> int:
     """對一批**未過濾**的原始 listing 跑狙擊比對，命中寫進 hit 帳（冪等）。
-    回傳寫入（含更新）筆數。"""
+    回傳命中筆數（`write=True` 時等於寫入／更新筆數）。
+
+    `write=False`（`scan --dry-run`）**照樣比對、照樣回報命中數，只是不落庫**。
+    比對本身是純字串運算——零網路、零副作用——沒有理由在 dry-run 時跳過，
+    而跳過的代價很具體：dry-run 會印出「比對 0 筆」，與「掛鉤壞了」外顯一模一樣
+    （CLAUDE.md 第五節）。dry-run 正是使用者用來確認東西有在動的那個指令，
+    它必須證明得了比對有在跑。要跳過的只有 `upsert_card_watch_hit`。
+    """
     n = 0
     for lst in listings:
         title = getattr(lst, "title", "") or ""
         for m in matchers:
             tier = match_tier(m, title)
             if tier is None:
+                continue
+            n += 1
+            if not write:
                 continue
             end = getattr(lst, "end_time", None)
             currency = getattr(lst, "currency", "")
@@ -193,7 +203,6 @@ def observe_listings(
                 # 「只補不抹」，不會把先前抓到的圖覆蓋掉。
                 image_url=getattr(lst, "image_url", None) or "",
             )
-            n += 1
     return n
 
 

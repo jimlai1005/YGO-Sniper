@@ -480,14 +480,18 @@ class Pipeline:
         # （CLAUDE.md 第一節）。掛在這裡是因為關鍵字掃描與賣家頁列舉都走這一支，
         # 兩條路一次蓋到。
         matchers = self._snipe_matchers()
-        if matchers and self._snipe_write:
+        if matchers:
             from .card_snipe import observe_listings
 
-            # 兩個計數同源同處：compared 只在真的送進 observe_listings 的那一批
-            # 上加，hits 就是它的回傳值——分兩個地方各算一次遲早會分岔。
+            # dry_run 只擋**寫帳**，不擋比對：比對是純字串運算、零副作用，
+            # 跳過它只會讓 `scan --dry-run` 印出「比對 0 筆」——而那與「掛鉤壞了」
+            # 外顯一模一樣，正好是這組計數要消滅的歧義（CLAUDE.md 第五節）。
+            # 兩個計數同源同處：compared 是送進去的那一批，hits 是它的回傳值——
+            # 分兩個地方各算一次遲早會分岔。
             self._snipe_stats["compared"] += len(listings)
             self._snipe_stats["hits"] += observe_listings(
-                self.store, matchers, listings, source_name=source_name
+                self.store, matchers, listings, source_name=source_name,
+                write=self._snipe_write,
             )
 
         wl = self.cfg.watchlist
