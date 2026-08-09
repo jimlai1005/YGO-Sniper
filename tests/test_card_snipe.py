@@ -660,6 +660,41 @@ class TestDossier:
         assert "3 次" not in joined              # 1 賣掉 ＋ 2 在架 ≠ 3 次成交
         assert "在架" in joined and "目前在架 2 筆" in joined   # 在架筆數看得到，不是被丟掉
 
+    def test_same_auction_in_both_buckets_is_counted_once(self, store):
+        """使用者貼的證據 URL **就是**落札檔案裡的那幾筆成交（實測：`n1235105710`
+        既是使用者給的 URL，也是挖掘挖到的 exact），所以這在真實資料上必然發生。
+
+        兩個桶的 URL 形態不同（buyee 購買端／yahoo 原生端）卻指向同一場拍賣，
+        不去重就把一次成交算成兩次——錯誤方向是「這張卡比實際更常出現」，
+        使用者會據此以為供給穩定、不必急著搶（CLAUDE.md 第三節：同一桶價值
+        被算兩次）。症狀最直觀的一點是成交價會印兩遍。
+        """
+        res = add_card_watch(store, PageFetcher({}), grader="ars", grade_input="10",
+                             name_ja="魔法の筒", code="P4-06")
+        store.upsert_card_watch_sale(
+            res.watch_id, "buyee_yahoo:n1235105710", tier="exact",
+            title="【ARS10】魔法の筒",
+            url="https://buyee.jp/item/yahoo/auction/n1235105710",
+            origin_url="https://page.auctions.yahoo.co.jp/jp/auction/n1235105710",
+            site="buyee_yahoo", seller_id="AiUkMq1pEUfNxvPeCv5PnfGpsFLrx",
+            price_native=6350.0, currency="JPY",
+            sold_at="2026-07-01T13:53:03+00:00", bid_count=15, sale_kind="auction",
+        )
+        store.upsert_card_watch_evidence(          # 同一場，使用者自己貼的 URL
+            res.watch_id, "https://auctions.yahoo.co.jp/jp/auction/n1235105710",
+            status="ok", title="【ARS10】魔法の筒", price_native=6350.0,
+            sold_at="2026-07-01T13:53:03+00:00", bids=15,
+            seller_id="AiUkMq1pEUfNxvPeCv5PnfGpsFLrx", seller_name="Natural Cards",
+        )
+
+        d = build_dossier(store, store.get_card_watch(res.watch_id))
+        # 三個桶在畫面上仍然各自完整——去重只發生在「賣過幾次」這個聚合數字上
+        assert len(d.sales) == 1 and len(d.evidence) == 1
+        joined = "\n".join(d.recommendation)
+        assert "賣掉過這張卡 1 次" in joined
+        assert "2 次" not in joined
+        assert joined.count("6,350") == 1        # 同一筆成交價不得印兩遍
+
 
 class TestNotifyContext:
     def test_pending_only_contains_unsent_exact_and_partial(self, store):

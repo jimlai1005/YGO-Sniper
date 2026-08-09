@@ -670,6 +670,38 @@ def _prices(values: list[Any]) -> str:
     return "、".join(f"{p:,.0f}" for p in sorted(values)) or "價格不明"
 
 
+#: 三種 URL 形態指向同一場拍賣，差別只在購買端／原生端：
+#:   card_watch_sale.url         https://buyee.jp/item/yahoo/auction/n1235105710
+#:   card_watch_sale.origin_url  https://page.auctions.yahoo.co.jp/jp/auction/n1235105710
+#:   card_watch_evidence.url     https://auctions.yahoo.co.jp/jp/auction/n1235105710
+#: 用 lookaround 不用 `\b`（CLAUDE.md 第二節），這裡靠 `/auction/` 前綴定位。
+_AUCTION_ID_RE = re.compile(r"/auction/([A-Za-z]?\d+)")
+
+
+def _sale_identity(
+    *, url: str, origin_url: str = "", sold_at: str = "",
+    price: Any = None, seller_id: str = "",
+) -> str:
+    """同一場拍賣的身分。**回傳空字串 ＝ 這一筆沒有可比對的身分，不得去重。**
+
+    使用者貼的證據 URL 常常**就是**成交檔案裡挖到的那一筆（實測目標卡的兩個
+    證據 URL 正是落札檔案的兩筆 exact），但兩個桶的 URL 形態不同。不去重就把
+    一次成交算成兩次，而錯誤方向是「這張卡比實際更常出現」——使用者會據此
+    以為供給穩定、不必急著搶（CLAUDE.md 第三節：同一桶價值被算兩次）。
+
+    抽不到拍賣 ID 才退回事實三元組（同賣家、同時刻、同價 ＝ 同一筆）。
+    **`sold_at` 為空時回空字串**：「兩筆都不知道何時賣的」不代表它們是同一筆，
+    併掉就是反方向的錯（低報出現次數，而誤殺是靜默的——第一節）。
+    """
+    for u in (origin_url, url):
+        m = _AUCTION_ID_RE.search(u or "")
+        if m:
+            return f"auction:{m.group(1)}"
+    if sold_at:
+        return f"fact:{seller_id}|{sold_at}|{price}"
+    return ""
+
+
 def build_recommendation(
     watch: dict[str, Any], sales: list[dict[str, Any]],
     evidence: list[dict[str, Any]], hits: list[dict[str, Any]],
@@ -725,12 +757,38 @@ def build_recommendation(
         """
         _seller(key)["listed_n"] += 1
 
+    #: 已經計過次的成交身分。**先跑 `sales` 再跑 `evidence`**：市場檔案是主要
+    #: 來源、欄位較完整（有 origin_url、bid_count、sale_kind），evidence 只補
+    #: sales 沒有的那幾筆。`_note_listing`（在架）不參與——它記的是另一組數字。
+    seen_sales: set[str] = set()
+
+    def _first_time(ident: str) -> bool:
+        if not ident:          # 沒有可比對的身分：一律當成不同筆，不去重
+            return True
+        if ident in seen_sales:
+            return False
+        seen_sales.add(ident)
+        return True
+
     for s in sales:
         if s.get("tier") == TIER_EXACT and s.get("seller_id"):
+            if not _first_time(_sale_identity(
+                url=str(s.get("url") or ""),
+                origin_url=str(s.get("origin_url") or ""),
+                sold_at=str(s.get("sold_at") or ""),
+                price=s.get("price_native"), seller_id=str(s["seller_id"]),
+            )):
+                continue
             _note_sale(f"{s.get('site') or ''}:{s['seller_id']}",
                        str(s.get("sold_at") or ""), s.get("price_native"))
     for e in evidence:
         if e.get("status") == "ok" and e.get("seller_id"):
+            if not _first_time(_sale_identity(
+                url=str(e.get("url") or ""),
+                sold_at=str(e.get("sold_at") or ""),
+                price=e.get("price_native"), seller_id=str(e["seller_id"]),
+            )):
+                continue
             _note_sale(f"{e.get('site') or 'buyee_yahoo'}:{e['seller_id']}",
                        str(e.get("sold_at") or ""), e.get("price_native"))
     for h in hits:
