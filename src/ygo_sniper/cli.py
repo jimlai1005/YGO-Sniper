@@ -56,6 +56,7 @@ def daily(
     try:
         result = pipe.scan(skip_comps=skip_comps)
         _print_scan(result)
+        _mine_snipes_daily(pipe)
         if not no_notify:
             _run_notifications(pipe, result)
     finally:
@@ -108,6 +109,46 @@ def _print_rule_counts(outcome) -> None:
             "[red]⚠️ 賣家同儕脈絡建不起來，本輪規則 3（監控賣家新上架）沒有判定"
             "——這與「名單是空的」是兩件事[/red]"
         )
+
+
+#: 狙擊成交檔案的重挖節流（一天一次就夠——Yahoo 的檔案以天為單位變動）
+_SNIPE_MINE_META_KEY = "snipe_last_mined_date"
+
+
+def _mine_snipes_daily(pipe) -> None:
+    """每天重挖一次市場成交檔案。**失敗只警告，絕不影響掃描與推播。**
+
+    重挖的理由不是「怕漏新成交」（新成交在架時就會被規則 4 抓到），而是
+    **平台的檔案會滾掉**：150-180 天前的成交會被 Yahoo 刪除，沒存下來就
+    永遠沒有了。這張表是市場檔案的記憶體。
+    """
+    from datetime import UTC, datetime
+
+    from .card_snipe import WatchMatcher, mine_sold_archive
+
+    watches = pipe.store.list_card_watch(active_only=True)
+    if not watches:
+        return
+    today = datetime.now(UTC).date().isoformat()
+    if pipe.store.get_meta(_SNIPE_MINE_META_KEY) == today:
+        return
+    problems = 0
+    for w in watches:
+        try:
+            res = mine_sold_archive(pipe.store, pipe.sources, WatchMatcher.from_row(w))
+        except Exception as exc:  # noqa: BLE001 - 重挖失敗不能拖垮 daily
+            print(f"[warn] 狙擊 #{w['id']} 成交檔案重挖失敗：{type(exc).__name__}: {exc}")
+            problems += 1
+            continue
+        if res.new_sales:
+            print(f"[snipe] #{w['id']} {w['name_ja']}：成交檔案新增 {res.new_sales} 筆")
+        if not res.ok:
+            problems += 1
+            for p in res.problems:
+                print(f"[warn] 狙擊 #{w['id']} {p}")
+    # 只有全部成功才記帳：有管道被擋就讓下一輪再試（否則今天就再也不挖了）
+    if not problems:
+        pipe.store.set_meta(_SNIPE_MINE_META_KEY, today)
 
 
 def _run_notifications(pipe, result: dict) -> int:
@@ -1435,6 +1476,287 @@ def watch_seller_list(
             (r["reason"] or "")[:60],
         )
     console.print(t)
+
+
+# ---------------------------------------------------------------------------
+# 指定卡狙擊（card_watch）
+# ---------------------------------------------------------------------------
+snipe_app = typer.Typer(
+    add_completion=False,
+    help="指定卡狙擊：登錄特定卡（鑑定機構＋分數＋卡名＋卡號），出現就推播",
+)
+app.add_typer(snipe_app, name="snipe")
+
+#: 可重複的 `--evidence`。**放模組層而不是簽章預設**：可變型別（`list`）的預設值
+#: 會被所有呼叫共用（ruff B008 擋的就是這個）。預設 None，呼叫端 `or []` 收斂。
+_EVIDENCE_OPTION = typer.Option(
+    None, help="過去出現的商品頁 URL（可重複）；登錄當下抓快照存證"
+)
+
+
+def _tier_tag(tier: object) -> str:
+    """`[exact]` 這種方括號在 rich 眼裡是**樣式標籤**，會被整段吃掉（實測輸出
+    只剩空白）——tier 是 🎯/👀/near 的唯一依據，弄丟它就是把判定結果安靜地
+    丟掉（CLAUDE.md 第五節）。逸出成字面方括號。"""
+    return f"\\[{tier}]"
+
+
+def _print_dossier(store: Store, watch_id: int) -> None:
+    from .card_snipe import build_dossier
+
+    w = store.get_card_watch(watch_id)
+    d = build_dossier(store, w)
+    console.print(
+        f"\n[bold]🎯 狙擊 #{watch_id}：{w['grader']}{w['grade_label']} "
+        f"{w['name_ja']} {w['code_raw']}[/bold]".rstrip()
+    )
+    if d.census:
+        parts = "、".join(f"{k}: {v} 張" for k, v in d.census.items() if v)
+        console.print(f"存世量（ARS census）：{parts}（鑑定總數 {d.census_total}）")
+    else:
+        console.print("存世量：未抓到（snipe report --refresh-census 重試）")
+    if d.evidence:
+        console.print("\n[bold]實證紀錄（你提供的結標頁快照）[/bold]")
+        for e in d.evidence:
+            if e["status"] == "ok":
+                price = (f"¥{e['price_native']:,.0f}"
+                         if e["price_native"] is not None else "價格不明")
+                console.print(
+                    f"  {str(e['sold_at'])[:10]} {price}（{e['bids']} 出價）"
+                    f"賣家 {e['seller_name'] or e['seller_id']}  {e['url']}"
+                )
+            else:
+                console.print(
+                    f"  ⚠️ {_tier_tag(e['status'])} {e['url']}（{e['note']}）"
+                )
+    # ── 主要資料桶：市場自己的成交檔案 ──
+    if d.sales:
+        exact = [s for s in d.sales if s["tier"] == "exact"]
+        console.print(
+            f"\n[bold]💰 市場成交檔案[/bold]（共 {len(d.sales)} 筆命中，"
+            f"其中 🎯 同款 {len(exact)} 筆）"
+        )
+        console.print("[dim]這是平台自己的落札紀錄，不是我們掃到的。"
+                      "Yahoo 落札相場約保留 150-180 天，更早的平台已刪除。[/dim]")
+        for s in d.sales:
+            if s["tier"] == "near":
+                continue     # near 量大（實測一次挖掘 202/206），只在 dashboard 全量顯示
+            mark = "🎯" if s["tier"] == "exact" else "👀"
+            price = s.get("price_native")
+            price_s = (f"{s.get('currency', '')} {price:,.0f}"
+                       if price is not None else "—")
+            kind = {"auction": "競標", "fixed": "定價"}.get(s.get("sale_kind"), "型態不明")
+            # 沒有成交時刻的來源（Mercari／露天）不要印一個空日期讓人以為是資料壞了，
+            # 明講「日期不明」——它只答得出價格。
+            when = str(s["sold_at"])[:10] if s.get("sold_at") else "日期不明　"
+            bids = (f"／{s['bid_count']} 出價"
+                    if s.get("bid_count") and s.get("sale_kind") == "auction" else "")
+            console.print(
+                f"  {mark} {when} {price_s:>12}（{kind}{bids}）"
+                f" 賣家 {str(s.get('seller_id') or '—')[:16]}"
+            )
+            console.print(f"      {str(s['title'])[:66]}")
+        near_n = sum(1 for s in d.sales if s["tier"] == "near")
+        if near_n:
+            console.print(f"  [dim]（另有 {near_n} 筆同名但機構／分數不符，"
+                          f"dashboard 狙擊分頁看得到全部）[/dim]")
+    else:
+        console.print("\n[yellow]💰 市場成交檔案：還沒挖過，或檔案期間內沒有成交"
+                      "——跑 `ygo-sniper snipe mine <id>` 確認是哪一種[/yellow]")
+
+    # ── 補充桶：我們自己掃到的（樣本小且偏，與上面不同池）──
+    if d.local_history:
+        console.print("\n[bold]我們自己掃到的[/bold]"
+                      "[dim]（補充桶：只有本地掃描期間、碰巧掃到的，"
+                      "與市場檔案分母不同，不可相加）[/dim]")
+        for h in d.local_history:
+            kind = h.get("sale_kind") or h.get("ledger") or ""
+            date = str(h.get("sold_at") or h.get("last_seen") or "")[:10]
+            price = h.get("price_native")
+            price_s = (f"{h.get('currency', '')} {price:,.0f}"
+                       if price is not None else "—")
+            console.print(f"  {_tier_tag(h['tier'])} {date} {price_s}（{kind}）"
+                          f"{str(h['title'])[:56]}")
+    notable = [h for h in d.hits if h["tier"] in ("exact", "partial")]
+    if notable:
+        console.print("\n[bold]狙擊命中帳[/bold]")
+        for h in notable:
+            sent = "已推播" if h.get("sent_at") else "未推播"
+            console.print(
+                f"  {_tier_tag(h['tier'])} {str(h['last_seen'])[:16]} "
+                f"{str(h['title'])[:60]}（{sent}）  {h['url']}"
+            )
+    console.print("\n[bold]等待建議[/bold]")
+    for line in d.recommendation:
+        console.print(f"  • {line}")
+
+
+@snipe_app.command("add")
+def snipe_add(
+    name_ja: str = typer.Argument(..., help="日文卡名，如 魔法の筒"),
+    grader: str = typer.Option(..., help="鑑定機構：ARS / PSA / BGS"),
+    grade: str = typer.Option(..., help="目標分數，如 10 或 10+（10+ 與 10 比對同分）"),
+    name_en: str = typer.Option("", help="英文卡名（主檔有就自動補）"),
+    code: str = typer.Option("", help="卡號，如 P4-06"),
+    census_url: str = typer.Option("", help="ARS census 頁 URL；ARS 不給會用卡名自動搜"),
+    evidence: list[str] | None = _EVIDENCE_OPTION,
+    pin_seller: str = typer.Option("", help="順手釘選賣家（貼賣家頁 URL 或 site:id）"),
+    no_mine: bool = typer.Option(False, "--no-mine", help="不挖市場成交檔案（離線登錄）"),
+    note: str = typer.Option("", help="備註"),
+):
+    """登錄狙擊卡 → 挖市場成交檔案、抓 census、抓證據頁快照、輸出完整檔案。"""
+    from .card_snipe import add_card_watch
+    from .sources import build_sources
+    from .sources.base import CachedFetcher
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    try:
+        with CachedFetcher(cfg) as fetcher:
+            result = add_card_watch(
+                store, fetcher,
+                grader=grader, grade_input=grade, name_ja=name_ja,
+                name_en=name_en, code=code, census_url=census_url,
+                evidence_urls=list(evidence or []), note=note,
+                sources=None if no_mine else build_sources(cfg, fetcher),
+            )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    for line in result.messages:
+        console.print(line)
+    if pin_seller:
+        from .seller_watch import SOURCE_PINNED, add_watch
+
+        key, store_slug = _resolve_seller_key(pin_seller, cfg)
+        _cfg2, store2, params = _watch_ctx()
+        reason = f"狙擊 #{result.watch_id} 的歷史賣家（snipe add --pin-seller）"
+        if store_slug:
+            reason += f"（從店鋪頁 {store_slug} 解析）"
+        res = add_watch(store2, key, source=SOURCE_PINNED, reason=reason,
+                        params=params)
+        if res.ok:
+            console.print(f"[green]📌 已釘選 {res.seller_key}[/green]：{res.reason}")
+            _warn_if_unlistable(res.seller_key)
+        else:
+            console.print(f"[red]釘選失敗 {res.seller_key}[/red]：{res.reason}")
+    _print_dossier(store, result.watch_id)
+
+
+@snipe_app.command("list")
+def snipe_list():
+    """狙擊清單＋每張的命中統計。"""
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    rows = store.list_card_watch(active_only=True)
+    if not rows:
+        console.print("狙擊清單是空的。用 ygo-sniper snipe add 登錄第一張。")
+        return
+    t = Table(title="🎯 狙擊清單")
+    for col in ("#", "目標", "卡號", "census", "成交檔案", "在架🎯", "在架👀", "登錄於"):
+        t.add_column(col)
+    for w in rows:
+        hits = store.list_card_watch_hits(watch_id=int(w["id"]))
+        n = {tier: sum(1 for h in hits if h["tier"] == tier)
+             for tier in ("exact", "partial", "near")}
+        sales = store.list_card_watch_sales(int(w["id"]), tiers=("exact",))
+        sale_col = f"{len(sales)} 筆" if sales else "—"
+        if sales:
+            stamps = sorted(s["sold_at"][:10] for s in sales if s["sold_at"])
+            if stamps:
+                sale_col += f"（最近 {stamps[-1]}）"
+        census = "—"
+        raw = w.get("census_json") or ""
+        if raw:
+            try:
+                at = json.loads(raw).get(str(w["grade_label"]))
+                census = f"{at} 張" if at is not None else "—"
+            except ValueError:
+                pass
+        t.add_row(str(w["id"]), f"{w['grader']}{w['grade_label']} {w['name_ja']}",
+                  w["code_raw"] or "—", census, sale_col,
+                  str(n["exact"]), str(n["partial"]),
+                  str(w["added_at"] or "")[:10])
+    console.print(t)
+
+
+@snipe_app.command("report")
+def snipe_report(
+    watch_id: int = typer.Argument(..., help="狙擊編號（snipe list 的 #）"),
+    refresh_census: bool = typer.Option(False, "--refresh-census",
+                                        help="重抓 ARS 鑑定量"),
+):
+    """單張狙擊卡的完整檔案：census、實證、本地歷史、命中帳、等待建議。"""
+    from .card_snipe import refresh_watch_census
+    from .sources.base import CachedFetcher
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    w = store.get_card_watch(watch_id)
+    if w is None:
+        console.print(f"[red]沒有狙擊 #{watch_id}[/red]")
+        raise typer.Exit(1)
+    if refresh_census:
+        with CachedFetcher(cfg) as fetcher:
+            for line in refresh_watch_census(store, fetcher, w):
+                console.print(line)
+    _print_dossier(store, watch_id)
+
+
+@snipe_app.command("mine")
+def snipe_mine(
+    watch_id: int = typer.Argument(
+        0, help="狙擊編號；0 ＝ 全部（定期重挖，把要滾掉的檔案存下來）"),
+    pages: int = typer.Option(0, help="每個關鍵字翻幾頁（0 ＝ 用預設 2）"),
+):
+    """去市場的成交檔案挖這張卡的過去。
+
+    **市場的檔案才是資料庫，我們的表只是它的記憶體**——Yahoo 落札相場約保留
+    150-180 天就滾掉，定期重挖才留得住。冪等：同一筆成交重挖只更新，不重複。
+    """
+    from .card_snipe import MINE_PAGES, WatchMatcher, mine_sold_archive
+    from .sources import build_sources
+    from .sources.base import CachedFetcher
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    rows = ([store.get_card_watch(watch_id)] if watch_id
+            else store.list_card_watch(active_only=True))
+    rows = [r for r in rows if r]
+    if not rows:
+        console.print(f"[red]沒有狙擊 #{watch_id}[/red]" if watch_id
+                      else "狙擊清單是空的")
+        raise typer.Exit(1)
+    bad = 0
+    with CachedFetcher(cfg) as fetcher:
+        sources = build_sources(cfg, fetcher)
+        for w in rows:
+            m = WatchMatcher.from_row(w)
+            res = mine_sold_archive(store, sources, m,
+                                    pages=pages or MINE_PAGES)
+            tone = "green" if res.ok else "yellow"
+            console.print(f"[{tone}]#{w['id']} {w['grader']}{w['grade_label']} "
+                          f"{w['name_ja']}[/{tone}]：{res.summary()}")
+            if not res.ok:
+                bad += 1
+                for p in res.problems:
+                    console.print(f"  [yellow]⚠️ {p}[/yellow]")
+    if bad:
+        # 挖不到就大聲——「0 筆」與「被擋」外顯一樣，這是本專案的頭號敵人
+        console.print(f"\n[bold yellow]{bad} 張卡有管道沒挖成功；"
+                      f"那幾條的「0 筆」不代表沒賣過[/bold yellow]")
+        raise typer.Exit(1)
+
+
+@snipe_app.command("remove")
+def snipe_remove(watch_id: int = typer.Argument(..., help="狙擊編號")):
+    """移出狙擊清單（軟刪除，命中帳與證據留著）。"""
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    if store.deactivate_card_watch(watch_id):
+        console.print(f"[green]已移出狙擊 #{watch_id}[/green]")
+    else:
+        console.print(f"[yellow]#{watch_id} 本來就不在清單上[/yellow]")
 
 
 @app.command()
@@ -3046,6 +3368,16 @@ def _print_scan(r: dict) -> None:
                if ref.get("skipped_cooldown") else "")
             + (f"｜來源失敗 {len(ref['errors'])} 次" if ref.get("errors") else "")
             + "[/dim]"
+        )
+    # 狙擊比對的觀測帳。**「比對過幾筆」要跟「命中幾筆」一起印**：只印命中數的話
+    # 0 有兩種讀法——今天市場上真的沒有那張卡，或掛鉤壞了根本沒在比
+    # （CLAUDE.md 第五節）。追蹤 0 張卡時整行不印，沒登錄就不該有這行雜訊。
+    sn = r.get("snipe") or {}
+    if sn.get("watches"):
+        console.print(
+            f"[dim]🎯 狙擊：追蹤 {sn['watches']} 張卡"
+            f"｜比對 {sn.get('compared', 0):,} 筆標題"
+            f"｜命中 {sn.get('hits', 0)} 筆[/dim]"
         )
     # 每個發現管道一行：來源隔離後，哪條管道壞了必須看得見，不能藏在總數裡
     for name, s in (r.get("sources") or {}).items():

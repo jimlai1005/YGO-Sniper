@@ -217,6 +217,12 @@ class Pipeline:
         self._snipe_cache = None
         #: dry_run 時不寫狙擊帳（`_scan` 設定；預設 True 讓單獨呼叫也能寫）。
         self._snipe_write = True
+        #: 這一輪狙擊比對的觀測帳（`_scan` 開頭歸零）。**「比對過幾筆」與「命中
+        #: 幾筆」必須分開報**：掛鉤壞掉（matchers 回空、observe_listings 沒被叫到）
+        #: 時命中恆為 0，而那與「今天市場上真的沒有那張卡」外顯一模一樣
+        #: （CLAUDE.md 第五節）。compared 很大 ＋ hits 0 ＝ 比對跑了但沒貨；
+        #: compared 0 ＝ 比對根本沒跑。
+        self._snipe_stats = {"compared": 0, "hits": 0}
 
     # ------------------------------------------------------------------
     def valuator(self):
@@ -477,7 +483,12 @@ class Pipeline:
         if matchers and self._snipe_write:
             from .card_snipe import observe_listings
 
-            observe_listings(self.store, matchers, listings, source_name=source_name)
+            # 兩個計數同源同處：compared 只在真的送進 observe_listings 的那一批
+            # 上加，hits 就是它的回傳值——分兩個地方各算一次遲早會分岔。
+            self._snipe_stats["compared"] += len(listings)
+            self._snipe_stats["hits"] += observe_listings(
+                self.store, matchers, listings, source_name=source_name
+            )
 
         wl = self.cfg.watchlist
         rows: list[dict] = []
@@ -747,6 +758,7 @@ class Pipeline:
         wl = self.cfg.watchlist
         # `scan --dry-run` 的語意是「只掃不寫庫」——狙擊帳也是庫。
         self._snipe_write = not dry_run
+        self._snipe_stats = {"compared": 0, "hits": 0}
         scanned = 0
         candidates = []
         search_results: list[SearchResult] = []
@@ -955,6 +967,14 @@ class Pipeline:
             # 「清除已離場」的誤殺自癒帳：這一輪放回去幾筆、哪幾筆。
             # 與 `expired` 是**相反方向**的兩件事，不可合併成一個數字。
             "restored": restored,
+            # 狙擊比對的觀測帳。**追蹤幾張卡／比對幾筆／命中幾筆三個數字分開**：
+            # 只報命中數的話，0 分不出「今天沒那張卡」與「比對根本沒跑」
+            # （規則 4 的命中表只證明得了「規則有在跑」）。
+            "snipe": {
+                "watches": len(self._snipe_matchers()),
+                "compared": self._snipe_stats["compared"],
+                "hits": self._snipe_stats["hits"],
+            },
             "listing_obs_pruned": obs_pruned,
             "fx_source": self.fx.source,
             # 每個發現管道的健康摘要（JSON-friendly；Phase 4 告警與 summary 用）

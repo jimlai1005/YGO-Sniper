@@ -753,3 +753,212 @@ class TestPipelineHook:
         pipeline._collect_candidates([lst], "test", [])
         outcome = pipeline.notification_outcome()
         assert [m.row["listing_key"] for m in outcome.card_snipe] == ["buyee_yahoo:k7"]
+
+    # -- 掃描結果的比對計數（「比對跑了但沒貨」vs「比對根本沒跑」要分得出來）--
+    @staticmethod
+    def _offline_scan(pipeline, monkeypatch, listings):
+        """跑一輪真的 `scan()`，但關鍵字查詢／canary／賣家頁全部離線替身。
+
+        比對計數的意義是「這一輪真的比了幾筆標題」，所以要走 `scan()` 的完整
+        結果組裝，不能只驗 `_collect_candidates` 的內部狀態——計數沒接進結果
+        dict 的話，使用者看到的還是那個分不出來的 0。
+        """
+        import ygo_sniper.pipeline as pipe_mod
+
+        monkeypatch.setattr(pipe_mod, "load_queries", lambda wl: [])
+        monkeypatch.setattr(pipeline, "_run_canaries", lambda summary: [])
+
+        def _fake_sellers(candidates, *, force=False):
+            pipeline._collect_candidates(listings, "test", candidates)
+            return [], {"enabled": True, "found": len(listings), "sellers": [],
+                        "skipped": [], "candidates": 0, "requests": 0}
+
+        monkeypatch.setattr(pipeline, "_scan_watched_sellers", _fake_sellers)
+        return pipeline.scan(skip_comps=True)
+
+    def test_scan_reports_snipe_comparison_counts(self, pipeline, monkeypatch):
+        """狙擊掛鉤壞掉時，規則 4 會顯示「命中 0 筆」——與「今天市場上真的沒有
+        那張卡」外顯一模一樣。所以結果要分開報「比對過幾筆」與「命中幾筆」。"""
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        pipeline.store.insert_card_watch(**WATCH_KW)
+        hit = Listing(site=Site.BUYEE_YAHOO, external_id="k1",
+                      title="【ARS10】魔法の筒 P4-06 ポケモンカード",
+                      url="https://example.test/k1",
+                      price=1000.0, currency=Currency.JPY)
+        noise = Listing(site=Site.BUYEE_YAHOO, external_id="k2",
+                        title="遊戯王 青眼の白龍 初期 ノーマル",
+                        url="https://example.test/k2",
+                        price=500.0, currency=Currency.JPY)
+        result = self._offline_scan(pipeline, monkeypatch, [hit, noise])
+        assert result["snipe"] == {"watches": 1, "compared": 2, "hits": 1}
+
+    def test_scan_snipe_line_is_silent_without_watches(self, pipeline, monkeypatch,
+                                                       capsys):
+        """沒登錄任何卡就不該有那行雜訊；有登錄就一定要印得出「比對過幾筆」。"""
+        import ygo_sniper.cli as cli_mod
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        lst = Listing(site=Site.BUYEE_YAHOO, external_id="k1",
+                      title="遊戯王 青眼の白龍 初期", url="https://example.test/k1",
+                      price=500.0, currency=Currency.JPY)
+        result = self._offline_scan(pipeline, monkeypatch, [lst])
+        assert result["snipe"] == {"watches": 0, "compared": 0, "hits": 0}
+
+        capsys.readouterr()
+        cli_mod._print_scan(result)
+        assert "狙擊" not in capsys.readouterr().out
+
+        result["snipe"] = {"watches": 1, "compared": 1234, "hits": 0}
+        cli_mod._print_scan(result)
+        out = capsys.readouterr().out
+        assert "狙擊" in out and "1,234" in out and "追蹤 1 張卡" in out
+
+    # -- daily 的每日重挖：平台檔案會滾掉，不重挖就永遠失去 --
+    def test_daily_mining_is_throttled_to_once_a_day(self, tmp_path, no_fx_network,
+                                                     monkeypatch):
+        from dataclasses import replace as dc_replace
+
+        import ygo_sniper.card_snipe as snipe_mod
+        import ygo_sniper.cli as cli_mod
+        import ygo_sniper.config as config_mod
+        from ygo_sniper.pipeline import Pipeline
+
+        config_mod.load_config.cache_clear()
+        base = config_mod.load_config()
+        cfg = dc_replace(base, storage={**base.storage,
+                                        "db_path": str(tmp_path / "p.db")})
+        pipe = Pipeline(cfg)
+        try:
+            pipe.store.insert_card_watch(**WATCH_KW)
+            calls = []
+            monkeypatch.setattr(
+                snipe_mod, "mine_sold_archive",
+                lambda *a, **kw: (calls.append(1), snipe_mod.MineResult(ok=True))[1],
+            )
+            cli_mod._mine_snipes_daily(pipe)
+            cli_mod._mine_snipes_daily(pipe)
+            assert len(calls) == 1            # 第二次被節流擋下
+        finally:
+            pipe.close()
+            config_mod.load_config.cache_clear()
+
+    def test_daily_mining_does_not_mark_done_when_a_channel_failed(
+        self, tmp_path, no_fx_network, monkeypatch
+    ):
+        """被擋就不記帳——記了的話今天就再也不挖，而檔案正在滾掉。"""
+        from dataclasses import replace as dc_replace
+
+        import ygo_sniper.card_snipe as snipe_mod
+        import ygo_sniper.cli as cli_mod
+        import ygo_sniper.config as config_mod
+        from ygo_sniper.pipeline import Pipeline
+
+        config_mod.load_config.cache_clear()
+        base = config_mod.load_config()
+        cfg = dc_replace(base, storage={**base.storage,
+                                        "db_path": str(tmp_path / "p.db")})
+        pipe = Pipeline(cfg)
+        try:
+            pipe.store.insert_card_watch(**WATCH_KW)
+            monkeypatch.setattr(
+                snipe_mod, "mine_sold_archive",
+                lambda *a, **kw: snipe_mod.MineResult(ok=False, problems=["BLOCKED"]),
+            )
+            cli_mod._mine_snipes_daily(pipe)
+            assert pipe.store.get_meta(cli_mod._SNIPE_MINE_META_KEY) is None
+        finally:
+            pipe.close()
+            config_mod.load_config.cache_clear()
+
+
+class TestCli:
+    """打**真正的指令字串**（`typer.testing.CliRunner`），不是直接呼叫函式。
+
+    這個專案出過事故：`serve` 從來沒被端到端跑過，驗證時手動補的那一行
+    `sys.path.insert` 正好掩蓋了真正的 bug（CLAUDE.md 第六節）。
+    """
+
+    @pytest.fixture
+    def cli_env(self, tmp_path, monkeypatch):
+        """臨時 db 的 CLI 環境。承重斷言：CLI 測試絕不能碰正式庫。"""
+        from dataclasses import replace as dc_replace
+
+        import ygo_sniper.cli as cli_mod
+        import ygo_sniper.config as config_mod
+
+        db = tmp_path / "cli.db"
+        config_mod.load_config.cache_clear()
+        base = config_mod.load_config()
+        test_cfg = dc_replace(base, storage={**base.storage, "db_path": str(db)})
+        monkeypatch.setattr(cli_mod, "load_config", lambda: test_cfg)
+        assert test_cfg.db_path == db, "CLI 測試的 cfg 沒有指到 tmp db"
+
+        from typer.testing import CliRunner
+
+        yield CliRunner(), Store(db), cli_mod
+        config_mod.load_config.cache_clear()
+
+    def test_add_list_report_remove_roundtrip(self, cli_env):
+        runner, store, cli_mod = cli_env
+        # --no-mine ＋ PSA ＋ 無 evidence → 完全不打網路
+        r = runner.invoke(cli_mod.app, [
+            "snipe", "add", "魔法の筒", "--grader", "PSA", "--grade", "10",
+            "--code", "P4-06", "--no-mine",
+        ])
+        assert r.exit_code == 0, r.output
+        assert "已登錄狙擊 #1" in r.output
+        assert "PSA 的鑑定量查詢未支援" in r.output
+        assert "跳過市場成交檔案挖掘" in r.output
+
+        r = runner.invoke(cli_mod.app, ["snipe", "list"])
+        assert r.exit_code == 0 and "魔法の筒" in r.output
+
+        # tier 標籤是 dossier 上分辨 🎯/👀/near 的唯一依據，**必須真的印出來**：
+        # rich 會把 `[exact]` 當成樣式標籤靜靜吃掉（實測輸出只剩空白），
+        # 那就是把判定結果安靜地弄丟（CLAUDE.md 第五節）。
+        store.upsert_card_watch_hit(
+            1, "buyee_yahoo:k1", tier="exact", title="【PSA10】魔法の筒 P4-06",
+            url="https://example.test/k1", site="buyee_yahoo", seller_id="s1",
+            price_native=6350.0, currency="JPY",
+        )
+        r = runner.invoke(cli_mod.app, ["snipe", "report", "1"])
+        assert r.exit_code == 0
+        assert "等待建議" in r.output
+        assert "[exact]" in r.output
+
+        r = runner.invoke(cli_mod.app, ["snipe", "remove", "1"])
+        assert r.exit_code == 0
+        assert store.list_card_watch(active_only=True) == []
+
+    def test_add_rejects_bad_grader_loudly(self, cli_env):
+        runner, _store, cli_mod = cli_env
+        r = runner.invoke(cli_mod.app, [
+            "snipe", "add", "x", "--grader", "CGC", "--grade", "10", "--no-mine",
+        ])
+        assert r.exit_code == 1
+        assert "不認得的鑑定機構" in r.output
+
+    def test_mine_reports_blocked_channels_loudly_and_exits_1(self, cli_env,
+                                                              monkeypatch):
+        """挖不到必須大聲＋非 0 離開碼——「0 筆」與「被擋」不能長一樣。"""
+        import ygo_sniper.card_snipe as snipe_mod
+        import ygo_sniper.sources as sources_mod
+
+        runner, store, cli_mod = cli_env
+        store.insert_card_watch(**WATCH_KW)
+        monkeypatch.setattr(sources_mod, "build_sources", lambda cfg, f=None: {})
+        monkeypatch.setattr(
+            snipe_mod, "mine_sold_archive",
+            lambda *a, **kw: snipe_mod.MineResult(
+                ok=False, problems=["yahoo_closed／魔法の筒：BLOCKED（WAF）"]),
+        )
+        r = runner.invoke(cli_mod.app, ["snipe", "mine"])
+        assert r.exit_code == 1
+        assert "BLOCKED" in r.output
+        assert "不代表沒賣過" in r.output
+
+    def test_report_unknown_id_exits_1(self, cli_env):
+        runner, _store, cli_mod = cli_env
+        r = runner.invoke(cli_mod.app, ["snipe", "report", "99"])
+        assert r.exit_code == 1
