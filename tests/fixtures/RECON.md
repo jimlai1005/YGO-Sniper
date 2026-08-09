@@ -454,3 +454,8 @@ items: [ {id, title, price(日圓整數), itemStatus, openTime, endTime,
 | `ruten_search_empty.json` | 亂數關鍵字，`TotalRows: 0`，**49 bytes** | 200 |
 
 三份都是 `RutenSource` 自己的 `CachedFetcher` 抓的原始 JSON（生產路徑，無瀏覽器）。
+
+## card sniper（2026-08-09）
+- `ars_census_p4_06.html` — https://ars-grading.com/grading/searchNameDetail?id=001202208090020007，curl + browser UA（無 JS，同生產路徑）。魔法の筒 P4-06 的鑑定量頁：Grade 9=5、10=5、10+=1、総数 11。
+- `ars_search_magic_cylinder.html` — searchName?name=魔法の筒&page=1，同上。6 件結果。
+- `yahoo_closed_n1235105710.html` — 已結束拍賣頁（2026-07-01 結標 ¥6,350）。資料在 __NEXT_DATA__ JSON。

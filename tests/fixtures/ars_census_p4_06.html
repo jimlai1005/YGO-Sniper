@@ -1,0 +1,369 @@
+<!DOCTYPE HTML>
+<html lang=ja class="user-html">
+	<head>
+		<link rel="preconnect" href="https://fonts.gstatic.com">
+		<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">
+
+		<meta charset="UTF-8">
+		<meta http-equiv="X-UA-Compatible" content="IE=Edge">
+		<meta name="description"  content="">
+		<meta name="keywords" content="">
+		<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
+		<meta name="format-detection" content="email=no,telephone=no,address=no">
+
+		<link rel="stylesheet" href="/css/base.css">
+		<link rel="stylesheet" href="/css/style.css">
+		<link rel="stylesheet" href="/css/page.css">
+		<link rel="stylesheet" href="/css/meanmenu.css">
+		<link rel="stylesheet" href="/css/slick.css">
+		<link rel="stylesheet" href="/css/slick-theme.css">
+	  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+
+		<link rel="icon" type="image/png" href="/img/favicon.png">
+
+		<title>鑑定品検索｜ARS（アルス）｜TCG真贋鑑定＆グレーディングサービス</title>
+
+		<!--[if lt IE 9]>
+		<script src="/js/html5shiv.js"></script>
+		<script src="/script/respond.min.js"></script>
+		<![endif]-->
+	</head>
+	<body class="user-body search-page">
+		<header class="common-header common-html">
+		<div class="container header-inner">
+			<a href="/" class="logo">
+				<img src="/img/ags.png" alt="">
+			</a>
+			<input type="checkbox" id="menu-toggle">
+			<div class="overlay"></div>
+			<nav class="nav-main">
+				<a href="/service" class="active">サービス一覧</a>
+				<a href="/price">料金案内</a>
+				<a href="/philosophy">会社概要</a>
+				<div class="sp-official-area">
+					<p class="sp-official-title">OFFICIAL LINKS</p>
+
+					<div class="official-link-buttons">
+						<a
+							href="https://x.com/ARS_Arsales"
+							target="_blank"
+							rel="noopener noreferrer"
+							class="official-link-button official-link-button--x"
+						>
+							<span class="official-link-button__icon">X</span>
+							<span>Official X</span>
+						</a>
+
+						<a
+							href="https://www.instagram.com/arsjapantcg"
+							target="_blank"
+							rel="noopener noreferrer"
+							class="official-link-button official-link-button--instagram"
+						>
+							<span class="official-link-button__icon">
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+									<rect x="3" y="3" width="18" height="18" rx="5" stroke="currentColor" stroke-width="1.8"/>
+									<circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8"/>
+									<circle cx="17.3" cy="6.8" r="1" fill="currentColor"/>
+								</svg>
+							</span>
+							<span>Instagram</span>
+						</a>
+
+						<a
+							href="https://www.ars-grading.store/"
+							target="_blank"
+							rel="noopener noreferrer"
+							class="official-link-button official-link-button--store"
+						>
+							<span class="official-link-button__icon">
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+									<path d="M5 8h14l-1 12H6L5 8Z" stroke="currentColor" stroke-width="1.8"/>
+									<path d="M8 8V6a4 4 0 0 1 8 0v2" stroke="currentColor" stroke-width="1.8"/>
+								</svg>
+							</span>
+							<span>Online Store</span>
+						</a>
+					</div>
+				</div>
+			</nav>
+			<div class="header-actions">
+				<a href="https://www.ars-grading.store" class="btn-store-head" title="STORE">
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+					<span>STORE</span>
+				</a>
+				<a href="/search" class="btn-search" title="鑑定検索">
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+					<span>鑑定検索</span>
+				</a>
+				<a href="/request" class="btn-apply">鑑定申込</a>
+				<label for="menu-toggle" class="menu-btn">
+					<div class="hamburger-icon"><span></span><span></span><span></span></div>
+				</label>
+			</div>
+		</div>
+	</header>
+
+		<main id="main" role="main" class="user-main">
+			<div id="search-name_detail" class="section">
+				<div class="container">
+					<div class="search-section">
+						<div class="search-mode">
+							<input type="radio" value="1" id="mode1" name="mode">
+							<label for="mode1">鑑定番号から検索</label>
+							<input type="radio" value="2" id="mode2" name="mode" checked>
+							<label for="mode2">カード名から検索</label>
+						</div>
+						<div class="search-box">
+							<input type="text" id="word" name="word" placeholder="鑑定番号またはカード名を入力">
+							<button onclick="search()"><i class="fas fa-search"></i>検索</button>
+						</div>
+					</div>
+
+					<h2>カード情報 / Card Info</h2>
+					<div class="card-info">
+						<table>
+							<tr>
+								<th>カード名称</th>
+								<td>
+									
+									魔法の筒
+								</td>
+							</tr>
+							<tr>
+								<th>ブランド</th>
+								<td>
+									
+									遊戯王 OCG デュエルモンスターズ
+								</td>
+							</tr>
+							<tr>
+								<th>収録</th>
+								<td>
+									
+									PREMIUM PACK 4
+								</td>
+							</tr>
+							<tr>
+								<th>発行年</th>
+								<td>
+									
+									2001
+								</td>
+							</tr>
+							<tr>
+								<th>型番</th>
+								<td>
+									
+									P4-06
+								</td>
+							</tr>
+							<tr>
+								<th>レアリティ</th>
+								<td>
+									
+									Ultra Rare
+								</td>
+							</tr>
+						</table>
+						<table>
+							<tr>
+								<th>Card Name</th>
+								<td>
+									
+									Magic Cylinder
+								</td>
+							</tr>
+							<tr>
+								<th>Brand</th>
+								<td>
+									
+									YU-GI-OH! Official Card Game
+								</td>
+							</tr>
+							<tr>
+								<th>Expansion</th>
+								<td>
+									
+									PREMIUM PACK 4
+								</td>
+							</tr>
+							<tr>
+								<th>Release</th>
+								<td>
+									
+									2001
+								</td>
+							</tr>
+							<tr>
+								<th>Card ID</th>
+								<td>
+									
+									P4-06
+								</td>
+							</tr>
+							<tr>
+								<th>Rarity</th>
+								<td>
+									
+									Ultra Rare
+								</td>
+							</tr>
+						</table>
+					</div>
+
+					<div class="grade-table">
+						<div class="totals">
+							<div class="main">鑑定総数 TOTAL GRADING&nbsp;11</div>
+							<div class="sub">（提出総数 TOTAL SUBMISSION&nbsp;11）</div>
+						</div>
+						<h2>グレード別統計</h2>
+						<div class="grade-entry" data-grade="AU">
+							<span>Grade AU</span>
+							<span>0（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="1">
+							<span>Grade 1</span>
+							<span>0（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="2">
+							<span>Grade 2</span>
+							<span>0（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="3">
+							<span>Grade 3</span>
+							<span>0（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="4">
+							<span>Grade 4</span>
+							<span>0（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="5">
+							<span>Grade 5</span>
+							<span>0（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="6">
+							<span>Grade 6</span>
+							<span>0（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="7">
+							<span>Grade 7</span>
+							<span>0（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="8">
+							<span>Grade 8</span>
+							<span>0（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="9">
+							<span>Grade 9</span>
+							<span>5（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="10">
+							<span>Grade 10</span>
+							<span>5（0）</span>
+						</div>
+						<div class="grade-entry" data-grade="10+">
+							<span>Grade 10+</span>
+							<span>1（0）</span>
+						</div>
+						<div class="remarks">
+							※（ ）内はミスプリント等の特記事項を含みます。<br>
+							※提出総数 = 鑑定総数 + MG未達成分（2025年以降反映）
+						</div>
+					</div>
+				</div>
+				
+				<form action="/grading/searchNumber" method="get" name="searchNumber2">
+					<input type="hidden" id="hid" name="id">
+				</form>
+
+				<form action="/grading/searchName" method="get" name="searchName2">
+					<input type="hidden" id="hname" name="name">
+					<input type="hidden" name="page" value="1">
+				</form>
+			</div>
+		</main>
+
+		<footer class="common-footer common-html">
+		<div class="container">
+			<div class="f-grid">
+				<div>
+					<span class="f-logo">ARS Grading Service</span>
+					<p class="f-tagline">日本初のTCG鑑定機関。<br>確かな真贋鑑定を通じ、大切なコレクションの美しさを次世代へと守り伝えます。</p>
+					<div class="footer-official-area">
+						<div class="official-link-buttons">
+							<a
+								href="https://x.com/ARS_Arsales"
+								target="_blank"
+								rel="noopener noreferrer"
+								class="official-link-button official-link-button--x"
+							>
+								<span class="official-link-button__icon">X</span>
+								<span>Official X</span>
+							</a>
+							<a
+								href="https://www.instagram.com/arsjapantcg"
+								target="_blank"
+								rel="noopener noreferrer"
+								class="official-link-button official-link-button--instagram"
+							>
+								<span class="official-link-button__icon">
+									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+										<rect x="3" y="3" width="18" height="18" rx="5" stroke="currentColor" stroke-width="1.8"/>
+										<circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8"/>
+										<circle cx="17.3" cy="6.8" r="1" fill="currentColor"/>
+									</svg>
+								</span>
+								<span>Instagram</span>
+							</a>
+							<a
+								href="https://www.ars-grading.store/"
+								target="_blank"
+								rel="noopener noreferrer"
+								class="official-link-button official-link-button--store"
+							>
+								<span class="official-link-button__icon">
+									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+										<path d="M5 8h14l-1 12H6L5 8Z" stroke="currentColor" stroke-width="1.8"/>
+										<path d="M8 8V6a4 4 0 0 1 8 0v2" stroke="currentColor" stroke-width="1.8"/>
+									</svg>
+								</span>
+								<span>Online Store</span>
+							</a>
+						</div>
+					</div>
+				</div>
+				<div class="f-nav">
+					<h4>SERVICE</h4>
+					<a href="/service">サービス一覧</a>
+					<a href="/service/reliability">鑑定基準</a>
+					<a href="/service/plans">鑑定プラン</a>
+				</div>
+				<div class="f-nav">
+					<h4>INFO</h4>
+					<a href="/price">料金案内</a>
+					<a href="/grading/title">取扱タイトル</a>
+					<a href="/search">鑑定済み検索</a>
+				</div>
+				<div class="f-nav">
+					<h4>SUPPORT</h4>
+					<a href="/philosophy">会社概要</a>
+					<a href="/contact">FAQ</a>
+				</div>
+			</div>
+			<div class="f-bottom">
+				<p>© 2020-2026 ARS Grading Service</p>
+				<p>GRADE WITH CONFIDENCE.</p>
+			</div>
+		</div>
+	</footer>
+
+		<script src="/js/jquery-3.3.1.min.js"></script>
+		<script src="/js/flexibility.js"></script>
+		<script src="/js/scroll.js"></script>
+		<script src="/js/jquery.meanmenu.min.js"></script>
+		<script src="/js/slick.min.js"></script>
+		<script src="/js/common.js"></script>
+		<script src="/js/search.js"></script>
+	</body>
+</html>
