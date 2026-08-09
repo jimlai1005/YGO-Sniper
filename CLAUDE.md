@@ -68,7 +68,7 @@ Vol.6，正中目標輪廓。它要擋的現代稀有度用 `プリズマティ�
 漢字與假名在 Python `re` 裡算 `\w`，所以 `PSA鑑定品` 的 `A` 與 `鑑` 之間、
 `1999年` 的 `9` 與 `年` 之間**都沒有 word boundary**。
 
-`src/ygo_sniper/parsers/` 因為這件事出過**四次**事故：
+`src/ygo_sniper/parsers/` 因為這件事出過**五次**事故：
 
 1. `\bPSA\b` 抓不到「PSA鑑定品」→ 整批只寫機構不寫分數的貨被丟掉
 2. `_hit_any` 用純子字串比對 → `"PS"` 命中 `PSA10`、`"AST"` 命中 `LAST`、
@@ -76,9 +76,33 @@ Vol.6，正中目標輪廓。它要擋的現代稀有度用 `プリズマティ�
 3. `\b(199[89])\b` 抓不到「1999年」→ 最硬的年代證據被判為「無證據」
 4. `\bPSA\b` 意外擋住了 `PSA10相当`（賣家宣稱「相當於 PSA10」，實際是 ARS 鑑定）
    —— **修好第 1 項之後才暴露出來**
+5. **宣稱詞表補不完**：`PSA9以上相当` 仍然被讀成 PSA9——`以上` 不在
+   `parsers/grade.py:63` 的 `_CLAIM_SUFFIX`（只有 `相当|相當|並み|並|級|クラス|レベル`），
+   它一插進來就把宣稱詞從分數後面推開，負向 lookahead 落空；而 PSA pattern 排在
+   ARS 前面，於是先命中的 PSA 就成了答案。**2026-08-09 實測全語料**
+   （signals＋comps＋listing_obs 去重共 3,246 個標題）：1,017 筆標題**自己寫了
+   ARS＋分數**，其中 **79 筆（7.8%）被 `parse_grade` 判成 PSA**。實例：
+   `ARS9 ハーピィズペット竜 初期 ウルトラレア UR 遊戯王 極美品　PSA9以上相当`、
+   `【ARS8】青眼の究極竜　旧レリーフアルティメット　SDX PSA8以上`
+
+第 5 項還有一個**補詞救不了的形狀**：79 筆裡 51 筆是 `以上` 打斷宣稱詞，
+另外 28 筆是賣家把 `PSA10` 當**搜尋關鍵字／對照**塞進標題
+（`遊戯王 ダンシングエルフ 初期 ウルトラ ARS10 PSA10`、`[ARS10][PSA10] …`）——
+那裡沒有任何宣稱詞可補，要判的是「標題裡哪個 token 才是這張卡真正的鑑定」。
+**後果落在第三節**：那 79 筆被貼成 PSA，就會拿去跟 PSA 的成交比價，
+而 ARS 與 PSA 的價格水準不同——這是一次混源比較；機構同時是 Seller Alpha
+同儕鍵的分組維度，所以也會污染賣家分數。
 
 第 4 項是最重要的教訓：**那個 `\b` 不完全是 bug，它同時在做一件對的事。**
 拿掉守衛之前，先查清楚它意外擋住了什麼。
+第 5 項的教訓是它的續集：**用「詞表」擋語言現象，永遠會被下一個沒列到的詞繞過**——
+詞表只擋得住你已經看過的寫法。
+
+⚠️ **第 5 項尚未修復，只有狙擊路徑繞過了它**：`card_snipe.classify`
+（`card_snipe.py:128-139`）不只信 `parse_grade` 的機構，還看**標題自己有沒有寫
+目標機構的 token**——機構不符但標題有目標機構時降成 👀 照樣推播，所以狙擊
+不會靜默漏掉。**主管線沒修**：修它要動 `parsers/grade.py` 的分數解析，
+屬於第一節的過濾／解析規則，必須跑全語料雙向驗證、誤殺數 0，應獨立成案。
 
 **規則**：`src/` 底下的 regex 一律用 lookaround（`(?<![A-Za-z0-9])` /
 `(?![A-Za-z0-9])` / `(?!\d)`），不用 `\b`。改動時跑全語料回歸，
@@ -249,7 +273,11 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 1561 passed，2026-08-08 實測）
+make test                      # pytest（目前 1723 passed，2026-08-09 實測）
+                               #   ⚠️ pyproject 的 addopts 有 `-q`，而 pytest 9.1.1
+                               #   在 `-q` 下**不印最後那行 `N passed`**——要拿數字
+                               #   請跑 `.venv/bin/pytest tests/ --override-ini="addopts="`
+                               #   （或 `--junitxml`）。看不到綠字不等於沒跑過，看 exit code
 ygo-sniper daily               # 掃描＋推播（launchd 排程跑這個）
 ygo-sniper scan --dry-run      # 只掃不寫庫
 ygo-sniper serve               # dashboard → http://127.0.0.1:8321
@@ -262,6 +290,18 @@ ygo-sniper watch-seller pin <URL或key>    # 釘選賣家：貼 profile URL 即�
                                #   不佔 30 名額、每批都掃（~60 分一次）、永不淘汰
                                #   eBay /str/ 店鋪頁會即時解析出真帳號（店名≠帳號）
 ygo-sniper watch-seller unpin <URL或key>  # 解除釘選
+ygo-sniper snipe add <日文卡名> --grader ARS --grade 10 --code P4-06 \
+    --evidence <結標頁URL> --pin-seller <賣家頁URL>
+                               # 登錄狙擊卡：當下就去挖**市場自己的成交檔案**
+                               #   （Yahoo 落札相場，1 請求≈150 天）＋ARS census
+                               #   ＋證據頁快照＋等待建議。--no-mine 可離線登錄
+                               #   比對走在所有過濾規則之前；🎯/👀 推 Telegram（終身一次）
+ygo-sniper snipe list          # 狙擊清單＋成交檔案筆數＋在架命中統計
+ygo-sniper snipe report <id>   # 單卡完整檔案（--refresh-census 重抓鑑定量）
+ygo-sniper snipe mine [<id>]   # 重挖市場成交檔案（省略 id ＝ 全部）。冪等
+                               #   **daily 已自動每天挖一次**——平台檔案 150-180 天
+                               #   會滾掉，我們的表是它的記憶體，不重挖就永遠失去
+ygo-sniper snipe remove <id>   # 移出（軟刪除，成交檔案與命中帳留著）
 ygo-sniper coverage-groups     # 分群覆蓋率（調門檻前必跑）
 ygo-sniper backfill-sale-kind  # 回填 comps 成交型態（競標結標／定價成交），冪等
 ygo-sniper corpus-diff         # 全語料雙向比對（改過濾／解析規則前後必跑，見第一節）
