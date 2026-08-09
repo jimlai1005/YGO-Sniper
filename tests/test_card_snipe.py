@@ -6,6 +6,16 @@ import json
 import pytest
 
 from ygo_sniper import store as store_mod
+from ygo_sniper.card_snipe import (
+    TIER_EXACT,
+    TIER_NEAR,
+    TIER_PARTIAL,
+    WatchMatcher,
+    load_matchers,
+    match_tier,
+    observe_listings,
+    scan_queries,
+)
 from ygo_sniper.store import CARD_SNIPE_RULE, Store
 
 
@@ -19,6 +29,17 @@ WATCH_KW = dict(
     name_ja="魔法の筒", name_en="Magic Cylinder",
     aliases=["マジック・シリンダー"], code_raw="P4-06", code_norm="P4-6",
 )
+
+WATCH_ROW = {
+    "id": 1, "grader": "ARS", "grade": 10.0, "grade_label": "10",
+    "name_ja": "魔法の筒", "name_en": "Magic Cylinder",
+    "aliases": '["マジック・シリンダー"]', "code_raw": "P4-06", "code_norm": "P4-6",
+}
+
+
+@pytest.fixture
+def matcher():
+    return WatchMatcher.from_row(WATCH_ROW)
 
 
 class TestCardWatchStore:
@@ -165,3 +186,105 @@ class TestCardWatchStore:
     def test_title_rows_accessors_exist(self, store):
         assert store.comps_title_rows() == []
         assert store.listing_obs_title_rows() == []
+
+
+class TestMatchTier:
+    def test_exact_on_the_real_sold_title(self, matcher):
+        # 2026-07-01 ¥6,350 真實結標標題
+        t = "【ARS10】魔法の筒 Magic Cylinder ウルトラ 鑑定書付 遊戯王 ARS鑑定10 PSA 芸術品"
+        assert match_tier(matcher, t) == TIER_EXACT
+
+    def test_exact_via_code_without_name(self, matcher):
+        assert match_tier(matcher, "遊戯王 ARS10 P4-06 ウルトラ") == TIER_EXACT
+
+    def test_exact_via_katakana_alias_without_nakaten(self, matcher):
+        # 中点なし也要中：fold 會把中点丟掉、片假名折平假名
+        assert match_tier(matcher, "ARS10 マジックシリンダー 初期") == TIER_EXACT
+
+    def test_ars10_plus_is_exact_by_design(self, matcher):
+        # parse_grade 把 10+ 折成 10.0（既定行為）；10+ 全球只有 1 張、比 10 更稀，通知是對的
+        assert match_tier(matcher, "ARS10+ 魔法の筒 P4-06") == TIER_EXACT
+
+    def test_the_other_real_sold_title_is_exact(self, matcher):
+        # 2026-05-27 ¥7,750 真實結標標題（與上一筆同賣家、同樣沒有卡號）
+        t = "【ARS10】魔法の筒 Magic Cylinder ウルトラ 鑑定書付 遊戯王 ARS鑑定10 PSA 芸術品"
+        assert match_tier(matcher, t) == TIER_EXACT
+
+    def test_rush_duel_same_name_is_demoted_to_partial_still_notified(self, matcher):
+        # 現代版只降到 👀（照樣推播）——降到不推播的話，詞表寫錯一個字就靜默漏標的
+        t = "【ARS10】世界に1枚 魔法の筒 Magic Cylinder ラッシュデュエル 鑑定書付 遊戯王 ARS鑑定10 PSA 芸術品"
+        assert match_tier(matcher, t) == TIER_PARTIAL
+
+    def test_real_prismatic_false_positive_is_partial(self, matcher):
+        # 2026-07-08 ¥4,600 落札檔案實例：ARS10＋魔法の筒，但是現代 プリズマティック
+        t = "【ARS10】世界に2枚 魔法の筒 Magic cylinder 限定品 プリズマティック 鑑定書付 遊戯王 ARS鑑定10 PSA 芸術品"
+        assert match_tier(matcher, t) == TIER_PARTIAL
+
+    def test_real_wcs_bundle_false_positive_is_partial(self, matcher):
+        # 2026-06-03 ¥168,150 落札檔案實例：魔法の筒 只是同捆物之一，且是 25th/WCS
+        t = "ARS10　遊戯王　ブラックマジシャンガール 25th　魔法の筒　WCS 2023　封筒　鑑定書付き プリズマ プリシク"
+        assert match_tier(matcher, t) == TIER_PARTIAL
+
+    def test_code_beats_modern_marker(self, matcher):
+        # 卡號是決定性證據：現代版不會印 P4-06，所以標記詞不能推翻它
+        assert match_tier(matcher, "ARS10 魔法の筒 P4-06 プリズマティック") == TIER_EXACT
+
+    def test_classify_explains_every_demotion(self, matcher):
+        from ygo_sniper.card_snipe import classify
+
+        tier, why = classify(matcher, "PSA8 遊戯王　魔法の筒　P4-06　第２期")
+        assert tier == TIER_NEAR and "PSA" in why and "ARS" in why
+        tier, why = classify(matcher, "【ARS10】魔法の筒 プリズマティック")
+        assert tier == TIER_PARTIAL and "現代版" in why
+
+    def test_grader_without_score_is_partial(self, matcher):
+        # parse_grade('…ARS鑑定品…') → (ARS, None)：機構對、分數不明 → 👀 通知
+        assert match_tier(matcher, "魔法の筒 ARS鑑定品 遊戯王") == TIER_PARTIAL
+
+    def test_same_grader_wrong_grade_is_partial(self, matcher):
+        assert match_tier(matcher, "ARS9 魔法の筒 P4-06") == TIER_PARTIAL
+
+    def test_other_code_only_is_partial(self, matcher):
+        # 機構分數全符、但標題只明示別張卡號（同捆／別版本）→ 降半級仍通知
+        assert match_tier(matcher, "ARS10 魔法の筒 LON-104") == TIER_PARTIAL
+
+    def test_psa_copy_is_near(self, matcher):
+        # comps 裡的真實 PSA8 標題（全形空白）
+        assert match_tier(matcher, "PSA8 遊戯王　魔法の筒　ウルトラレア！　P4-06　第２期") == TIER_NEAR
+
+    def test_ungraded_raw_card_is_near(self, matcher):
+        assert match_tier(matcher, "遊戯王 魔法の筒 P4-06 ウルトラレア") == TIER_NEAR
+
+    def test_unrelated_title_is_none(self, matcher):
+        assert match_tier(matcher, "PSA10 ブラック・マジシャン 初期") is None
+
+
+class TestObserveAndQueries:
+    def test_observe_writes_hits_and_is_idempotent(self, store):
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        wid = store.insert_card_watch(**WATCH_KW)
+        lst = Listing(site=Site.BUYEE_YAHOO, external_id="x1",
+                      title="【ARS10】魔法の筒 P4-06", url="https://example.test/x1",
+                      price=50000.0, currency=Currency.JPY, seller_id="s1")
+        matchers = load_matchers(store)
+        assert observe_listings(store, matchers, [lst]) == 1
+        assert observe_listings(store, matchers, [lst]) == 1       # 再跑：冪等
+        hits = store.list_card_watch_hits(watch_id=wid)
+        assert len(hits) == 1
+        h = hits[0]
+        assert h["tier"] == "exact" and h["listing_key"] == "buyee_yahoo:x1"
+        assert h["site"] == "buyee_yahoo" and h["seller_id"] == "s1"
+        assert h["price_native"] == 50000.0 and h["currency"] == "JPY"
+
+    def test_scan_queries_reuse_base_sources(self, store):
+        from ygo_sniper.queries import QuerySpec
+
+        store.insert_card_watch(**WATCH_KW)
+        base = [QuerySpec(name="q1", keyword="遊戯王 PSA", sources=("a", "b")),
+                QuerySpec(name="q2", keyword="遊戯王 ARS", sources=("b", "c"))]
+        qs = scan_queries(load_matchers(store), base)
+        assert [q.keyword for q in qs] == ["魔法の筒", "Magic Cylinder"]
+        assert all(q.sources == ("a", "b", "c") for q in qs)
+        assert all(q.category is None for q in qs)
+        assert scan_queries(load_matchers(store), []) == []        # base 空就不跑
