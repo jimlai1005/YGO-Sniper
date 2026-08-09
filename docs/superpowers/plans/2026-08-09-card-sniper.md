@@ -1876,6 +1876,32 @@ class TestDossier:
         assert "不是全部歷史" in joined
         assert "競標" in joined                                  # 成交型態的等待策略
 
+    def test_undated_sales_never_inflate_the_frequency_claim(self, store):
+        """來源給不出落札時間的成交（Mercari／露天）**不得**進入「幾次／期間」。
+
+        實測一次挖掘 206 筆裡有 77 筆沒有成交時刻。把它們算進次數，就是拿兩種
+        基準的東西合成一個數字（CLAUDE.md 第三節；comps 的 sold_at_is_ingest
+        是同一個立場）。它們照樣入帳、照樣顯示，只是不進日期類宣稱。
+        """
+        res = add_card_watch(
+            store, PageFetcher({}), grader="ars", grade_input="10",
+            name_ja="魔法の筒", code="P4-06",
+        )
+        common = dict(tier="exact", title="【ARS10】魔法の筒", url="u",
+                      site="buyee_yahoo", seller_id="S", price_native=7000.0,
+                      currency="JPY", bid_count=None, sale_kind="unknown")
+        store.upsert_card_watch_sale(res.watch_id, "y:dated",
+                                     sold_at="2026-05-27T13:27:38+00:00", **common)
+        for i in range(3):                       # 三筆無日期（Mercari 形態）
+            store.upsert_card_watch_sale(res.watch_id, f"m:{i}", sold_at="", **common)
+
+        d = build_dossier(store, store.get_card_watch(res.watch_id))
+        assert len(d.sales) == 4                 # 四筆都留著，一筆都沒丟
+        joined = "\n".join(d.recommendation)
+        assert "成交檔案裡 1 次" in joined        # 次數只算有日期的那一筆
+        assert "3 筆" in joined and "沒給成交時刻" in joined   # 缺口要說出來
+        assert "4 次" not in joined              # 絕不把無日期的算進次數
+
 
 class TestNotifyContext:
     def test_pending_only_contains_unsent_exact_and_partial(self, store):
@@ -2344,7 +2370,7 @@ def build_notify_context(store: Any) -> SnipeNotifyContext:
 .venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
-預期：`49 passed`（42 ＋ 政策層 7）。
+預期：`51 passed`（42 ＋ 政策層 8 ＋ Task 2 審查新增 1）。
 
 - [ ] **Step 5: Commit**
 
@@ -2944,7 +2970,7 @@ class TestPipelineHook:
 .venv/bin/pytest tests/ -k "pipeline or scan"
 ```
 
-預期：`51 passed`（49 ＋ pipeline 掛鉤 2）；既有 pipeline 測試全綠。
+預期：`53 passed`（51 ＋ pipeline 掛鉤 2）；既有 pipeline 測試全綠。
 
 - [ ] **Step 5: Commit**
 
@@ -3438,7 +3464,7 @@ def _mine_snipes_daily(pipe) -> None:
 .venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
-預期：`57 passed`（51 ＋ daily 重挖節流 2 ＋ CLI 4）。
+預期：`59 passed`（53 ＋ daily 重挖節流 2 ＋ CLI 4）。
 
 - [ ] **Step 5: Commit**
 
