@@ -237,6 +237,10 @@ class MineResult:
     queries: list[str] = field(default_factory=list)
     new_sales: int = 0
     total_sales: int = 0
+    #: 挖到、但來源給不出真實成交時刻的筆數（Mercari／露天的搜尋頁沒有落札時間）。
+    #: **這些筆數不得進入任何「什麼時候／多久出現一次」的宣稱**——它們只答得出
+    #: 價格。與 comps 的 `sold_at_is_ingest` 是同一個立場（CLAUDE.md 第三節）。
+    undated_sales: int = 0
     tier_counts: dict[str, int] = field(default_factory=dict)
     oldest: str = ""
     newest: str = ""
@@ -249,6 +253,13 @@ class MineResult:
             f"涵蓋 {span}",
             "／".join(f"{k} {v}" for k, v in sorted(self.tier_counts.items())) or "—",
         ]
+        if self.undated_sales:
+            # 「涵蓋 X → Y」只描述有日期的那一批。缺口不講出來，讀的人會以為
+            # 那個區間蓋住了全部筆數——那就是拿兩種基準合成一個數字。
+            parts.append(
+                f"⚠️ 其中 {self.undated_sales} 筆來源沒給成交時刻"
+                f"（只知道賣過、不知何時，不算進上面的涵蓋區間）"
+            )
         if not self.ok:
             parts.append("⚠️ " + "；".join(self.problems))
         return "｜".join(parts)
@@ -308,6 +319,13 @@ def mine_sold_archive(
                 seen.add(lst.key)
                 raw = getattr(lst, "raw", None) or {}
                 currency = getattr(lst, "currency", "")
+                sold_at = str(raw.get("sold_at") or "")
+                #: 沒有落札時刻的來源（Mercari／露天搜尋頁）**照樣入帳**——
+                #: 「賣過但不知何時」仍是有用的價格資訊，丟掉就是靜默誤殺。
+                #: 但要數出來，讓日期類的宣稱知道自己少蓋了幾筆。
+                #: **絕不塞假日期頂替**（comps 把入庫時間當 sold_at 存，讓 90 天
+                #: 視窗對那批資料形同虛設——CLAUDE.md 第五節）。
+                res.undated_sales += int(not sold_at)
                 is_new = store.upsert_card_watch_sale(
                     watch_id, lst.key,
                     tier=tier, title=lst.title, url=lst.url,
@@ -316,7 +334,7 @@ def mine_sold_archive(
                     seller_id=getattr(lst, "seller_id", None) or "",
                     price_native=float(lst.price) if lst.price is not None else None,
                     currency=str(getattr(currency, "value", currency) or ""),
-                    sold_at=str(raw.get("sold_at") or ""),
+                    sold_at=sold_at,
                     bid_count=raw.get("bid_count"),
                     sale_kind=_sale_kind_of(lst),
                     source=source_name,

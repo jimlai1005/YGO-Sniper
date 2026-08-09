@@ -71,6 +71,24 @@ REAL = [
 ]
 
 
+def _undated(ext_id, title, price):
+    """buyee_mercari／ruten 的搜尋頁**沒有落札時刻**——`raw` 是空 dict
+    （2026-08-09 實測：97＋2 筆全都如此）。這裡刻意不塞任何假日期。"""
+    return Listing(
+        site=Site.BUYEE_YAHOO, external_id=ext_id, title=title,
+        url=f"https://buyee.jp/item/mercari/m/{ext_id}",
+        price=float(price), currency=Currency.JPY, seller_id="", is_sold=True,
+        source="buyee_mercari", raw={},
+    )
+
+
+UNDATED = [
+    _undated("m1", "【ARS10】魔法の筒 Magic Cylinder ウルトラ 鑑定書付 遊戯王 ARS鑑定10", 6800),
+    _undated("m2", "ARS10 魔法の筒 初期 ウルトラレア 遊戯王", 7200),
+    _undated("m3", "PSA9 遊戯王 魔法の筒 P4-06 第2期", 2100),
+]
+
+
 class TestMineSoldArchive:
     def test_mines_and_classifies_the_real_archive(self, store):
         wid = store.insert_card_watch(**WATCH_KW)
@@ -80,6 +98,7 @@ class TestMineSoldArchive:
 
         assert res.ok is True
         assert res.new_sales == 5           # 6 筆裡「青眼の白龍」不相關，不入帳
+        assert res.undated_sales == 0       # REAL 這批全都有真實落札時刻，不得誤報
         # ⚠️ 這條同時釘住「跨關鍵字去重」：兩個關鍵字（日文名＋英文名）各跑一次查詢、
         #    各回同一份清單，沒有去重的話每個數字都會變兩倍。實測真實檔案：
         #    未去重 exact 4／partial 3，去重後 exact 2／partial 2。
@@ -130,6 +149,35 @@ class TestMineSoldArchive:
         assert res.ok is False
         assert res.new_sales == 0
         assert any("BLOCKED" in p or "被擋" in p for p in res.problems)
+
+    def test_undated_sales_are_counted_and_surfaced(self, store):
+        """Mercari／露天的搜尋頁給不出落札時刻。**留著它們**（賣過、但不知何時
+        仍是有用的價格資訊），但缺口必須看得見——否則無日期的列會混進
+        `ORDER BY sold_at` 的清單與「多久出現一次」的計數，變成拿兩種基準
+        合成一個數字（CLAUDE.md 第三節；comps 的 sold_at_is_ingest 同一個坑）。"""
+        wid = store.insert_card_watch(**WATCH_KW)
+        m = WatchMatcher.from_row(store.get_card_watch(wid))
+        res = mine_sold_archive(store, {"yahoo_closed": FakeSource(UNDATED)}, m)
+
+        assert res.undated_sales == 3          # 三筆都沒有真實成交時刻
+        assert res.total_sales == 3            # 但一筆都沒被丟掉
+        assert all(s["sold_at"] == "" for s in store.list_card_watch_sales(wid))
+        text = res.summary()
+        assert "3" in text
+        assert "成交時刻" in text or "不知何時" in text
+
+    def test_undated_sales_never_leak_into_the_date_span(self, store):
+        """混一批有日期、一批沒日期：`oldest`／`newest` 只能由**有日期的那批**決定。
+        少了這道守衛，空字串會排到最前面成為 `oldest`，「涵蓋」區間就變成
+        兩種基準合出來的數字——而且錯得很安靜（TEXT 字典序，'' < 任何日期）。"""
+        wid = store.insert_card_watch(**WATCH_KW)
+        m = WatchMatcher.from_row(store.get_card_watch(wid))
+        res = mine_sold_archive(store, {"yahoo_closed": FakeSource(REAL + UNDATED)}, m)
+
+        assert res.undated_sales == 3
+        assert res.total_sales == 8                 # 5 筆有日期 ＋ 3 筆無日期
+        assert res.oldest[:10] == "2026-04-01"      # REAL 裡最舊的那筆
+        assert res.newest[:10] == "2026-07-08"      # REAL 裡最新的那筆
 
     def test_source_without_sold_support_is_skipped(self, store):
         class NoSold(FakeSource):
