@@ -1739,6 +1739,14 @@ git commit -m "feat(snipe): 市場成交檔案挖掘——查卡名不加鑑定�
 
 ### Task 5: 政策層——登錄、census 併入、dossier、等待建議、通知脈絡
 
+> **執行期修訂（2026-08-09，實作／審查後）**——四處，後面的 task 以實際程式碼為準：
+> 1. **證據 `sold_at` 存 UTC**：計劃 Step 1 的測試原本斷言 `+09:00`、Step 3 的實作卻用 `to_utc_iso()`，兩者矛盾。以 UTC 為準（與 `card_watch_sale.sold_at` 同基準），測試改成 `2026-07-01T13:53:03+00:00`，並補一條 `test_evidence_sold_at_shares_the_utc_basis_of_sales` 釘住。
+> 2. **無成交時刻的成交不得進入賣家的「賣掉 N 次」**：`_note` 拆成 dated／undated 兩本；價格照樣列出（價格不是日期類宣稱，丟掉才是靜默誤殺）。
+> 3. **「在架中」不得算進「賣掉過 N 次」**：`hits`（還在架上）與 `sales`（已成交）是兩種基準，原本被加進同一個計數器——正是 CLAUDE.md 第三節列了六次的錯，且錯誤方向照例是「看起來很划算」（誤以為賣家頻繁出貨）。改成 `sold_n`／`undated_n`／`listed_n` 三組獨立數字，呈現時分開講。
+> 4. **測試假件的失敗形狀要等於生產**：`PageFetcher` 對未知 URL 原本拋 `KeyError`，而生產的 `CachedFetcher` 拋 `FetchError`；修的是假件不是生產程式碼的 except 範圍（CLAUDE.md 第六節）。
+>
+> ⚠️ **已知、暫不處理**：`build_recommendation` 對 evidence 用 `e.get("site") or "buyee_yahoo"` 回填站台預設值——那是「猜命名空間」的種子（第五節第 6 點）。今天 unsupported 分支不帶 `seller_id` 所以進不了那條路徑；**evidence 支援非 Yahoo 站台之前必須先解決**。
+
 **Files:**
 - Modify: `src/ygo_sniper/card_snipe.py`（改 import 區＋檔尾追加）
 - Test: `tests/test_card_snipe.py`（追加）
