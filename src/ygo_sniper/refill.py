@@ -283,22 +283,29 @@ class RefillReport:
         }
 
 
-def _sold_search(src: Any, source_name: str, keyword: str) -> SearchResult:
+def _sold_search(
+    src: Any, source_name: str, keyword: str, *, pages: int = REFILL_PAGES
+) -> SearchResult:
     """單一 (來源, 卡名) 的已售出搜尋。**任何情況都回 SearchResult，不往外拋**
     （與 `pipeline.run_source_search` 同一個隔離立場：一條管道壞掉只污染自己）。
 
     走 `search_detailed` 而不是 `search()`：回補要靠 health 分辨
     「確認沒有成交」（可記帳）與「被擋／解析壞」（不可記帳），
     `search()` 的空清單把兩者混在一起。
+
+    `pages` 預設 `REFILL_PAGES`（＝1），回補路徑行為完全不變（見 REFILL_PAGES
+    的理由）。**別的呼叫端要挖深就自己傳**——狙擊的成交檔案挖掘要翻完整個檔案
+    （`card_snipe.MINE_PAGES`），寫死 1 頁的話那個 `pages` 參數會是裝飾品，
+    而「只挖到一半」與「檔案就這麼多」外顯一模一樣（CLAUDE.md 第五節）。
     """
     site_value = getattr(getattr(src, "site", None), "value", "") or ""
     try:
         if hasattr(src, "search_detailed"):
-            return src.search_detailed(keyword, sold=True, pages=REFILL_PAGES)
-        listings = src.search(keyword, sold=True, pages=REFILL_PAGES)
+            return src.search_detailed(keyword, sold=True, pages=pages)
+        listings = src.search(keyword, sold=True, pages=pages)
         res = SearchResult(
             source=source_name, site=site_value, query=keyword,
-            listings=listings, parsed_count=len(listings), pages_fetched=REFILL_PAGES,
+            listings=listings, parsed_count=len(listings), pages_fetched=pages,
         )
         return res
     except Exception as exc:  # noqa: BLE001 - 隔離邊界，見 docstring

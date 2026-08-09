@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .cards import extract_title_codes, fold
@@ -218,3 +218,114 @@ def scan_queries(
                 name=f"snipe:{m.row['id']}", keyword=kw, sources=srcs, category=None,
             ))
     return out
+
+
+# ---------------------------------------------------------------------------
+# 市場成交檔案挖掘。**市場的檔案才是資料庫，這張表是它的記憶體。**
+# ---------------------------------------------------------------------------
+#: 每個關鍵字翻幾頁。實測 `魔法の筒` 第 1 頁 100 筆已涵蓋 150 天、第 2 頁翻完
+#: 整個檔案（126 筆／179 天）。冷門卡 2 頁綽綽有餘；熱門卡名多翻也只是多 1 秒。
+MINE_PAGES = 2
+
+
+@dataclass(slots=True)
+class MineResult:
+    """一次挖掘的完整結果。**命中數與健康是兩件事**：0 筆可能是真的沒賣過，
+    也可能是被擋——分不出來就是靜默失敗（CLAUDE.md 第五節）。"""
+
+    ok: bool = True
+    queries: list[str] = field(default_factory=list)
+    new_sales: int = 0
+    total_sales: int = 0
+    tier_counts: dict[str, int] = field(default_factory=dict)
+    oldest: str = ""
+    newest: str = ""
+    problems: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        span = f"{self.oldest[:10]} → {self.newest[:10]}" if self.oldest else "無成交"
+        parts = [
+            f"挖到 {self.total_sales} 筆成交（新增 {self.new_sales}）",
+            f"涵蓋 {span}",
+            "／".join(f"{k} {v}" for k, v in sorted(self.tier_counts.items())) or "—",
+        ]
+        if not self.ok:
+            parts.append("⚠️ " + "；".join(self.problems))
+        return "｜".join(parts)
+
+
+def _sale_kind_of(lst: Any) -> str:
+    """競標結標價（買家喊上去）vs 定價成交（賣家開的）——兩種價格形成機制。
+    **只看 is_fixed_price 旗標**：Yahoo!フリマ 的 bidCount 也是 1（佔位值），
+    拿它判型態會把定價成交讀成競標（CLAUDE.md 第三節第七項）。"""
+    raw = getattr(lst, "raw", None) or {}
+    if "is_fixed_price" not in raw:
+        return "unknown"
+    return "fixed" if raw.get("is_fixed_price") else "auction"
+
+
+def mine_sold_archive(
+    store: Any, sources: dict[str, Any], m: WatchMatcher, *, pages: int = MINE_PAGES,
+) -> MineResult:
+    """去各平台的成交檔案挖這張卡的過去，逐筆 tier 分類後永久存進 card_watch_sale。
+
+    **查詢只打卡名，絕不加鑑定詞**：伺服器端多一個詞就是 AND 過濾，只寫
+    「ARS鑑定10」的賣家會整批消失（實測 `魔法の筒 PSA` 只回 5 筆 vs 卡名 126 筆）。
+    收斂是我們自己在本地用 tier 做的——那才看得見、才改得動。
+    """
+    from .refill import _sold_search  # noqa: PLC0415 - 延後匯入避免循環相依
+
+    res = MineResult()
+    keywords = [k.strip() for k in
+                (m.row.get("name_ja") or "", m.row.get("name_en") or "") if k.strip()]
+    watch_id = int(m.row["id"])
+    #: 同一筆成交會被多個關鍵字撈到（日文名與英文名常同時出現在標題裡）。
+    #: **tier_counts 要數的是「這張卡的成交筆數」，不是「查詢×命中」的事件數**——
+    #: 少了這個去重，兩個關鍵字就讓每個數字都變兩倍（同源同基準）。
+    seen: set[str] = set()
+    for source_name, src in sources.items():
+        if not getattr(src, "supports_sold", False):
+            continue
+        for kw in keywords:
+            res.queries.append(kw)
+            out = _sold_search(src, source_name, kw, pages=pages)
+            health = getattr(out, "health", None)
+            health_name = getattr(health, "name", str(health))
+            if health_name not in ("OK", "EMPTY_CONFIRMED"):
+                res.ok = False
+                res.problems.append(
+                    f"{source_name}／{kw}：{health_name}"
+                    f"（{getattr(out, 'detail', '') or '沒有細節'}）——"
+                    "這一條的 0 筆不代表沒賣過"
+                )
+                continue
+            for lst in out.listings:
+                tier, _why = classify(m, getattr(lst, "title", "") or "")
+                if tier is None:
+                    continue
+                if lst.key in seen:
+                    continue          # 另一個關鍵字已經收過這一筆
+                seen.add(lst.key)
+                raw = getattr(lst, "raw", None) or {}
+                currency = getattr(lst, "currency", "")
+                is_new = store.upsert_card_watch_sale(
+                    watch_id, lst.key,
+                    tier=tier, title=lst.title, url=lst.url,
+                    origin_url=getattr(lst, "origin_url", None) or "",
+                    site=lst.site.value,
+                    seller_id=getattr(lst, "seller_id", None) or "",
+                    price_native=float(lst.price) if lst.price is not None else None,
+                    currency=str(getattr(currency, "value", currency) or ""),
+                    sold_at=str(raw.get("sold_at") or ""),
+                    bid_count=raw.get("bid_count"),
+                    sale_kind=_sale_kind_of(lst),
+                    source=source_name,
+                )
+                res.new_sales += int(is_new)
+                res.tier_counts[tier] = res.tier_counts.get(tier, 0) + 1
+    sales = store.list_card_watch_sales(watch_id)
+    res.total_sales = len(sales)
+    stamps = sorted(s["sold_at"] for s in sales if s["sold_at"])
+    if stamps:
+        res.oldest, res.newest = stamps[0], stamps[-1]
+    return res
