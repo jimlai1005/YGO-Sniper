@@ -1994,6 +1994,13 @@ def _ingest_census(
         return msgs
     try:
         counts, total, html = fetch_census(url, fetcher=fetcher)
+        # ⚠️ 各級張數解析成功、卻抓不到總數 → 多半是總數那行的版型改了。
+        # `census_total` 失敗是回 None（不像 parse_census 會拋），與「頁面真的
+        # 沒有總數」無法區分——所以這裡要出聲，不要讓它安靜地變成 dashboard 上的
+        # 「鑑定總數 None」（CLAUDE.md 第五節）。
+        if counts and total is None:
+            msgs.append("⚠️ 各級張數讀到了但鑑定總數沒讀到——ARS 總數那行的版型"
+                        "可能改了，請人工確認 census 頁")
     except (FetchError, CensusParseError) as exc:
         store.update_card_watch_census(watch_id, census_url=url, census_json="",
                                        census_total=None)
