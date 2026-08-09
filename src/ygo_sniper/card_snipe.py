@@ -347,3 +347,455 @@ def mine_sold_archive(
     if stamps:
         res.oldest, res.newest = stamps[0], stamps[-1]
     return res
+
+
+# ---------------------------------------------------------------------------
+# 登錄與檔案（dossier）。CLI 與 web 都呼叫這裡——判準只有一份。
+# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class AddResult:
+    watch_id: int
+    messages: list[str]
+
+
+def _master_card(*, code_norm: str, name_ja: str) -> dict[str, Any] | None:
+    """讀卡名主檔原始 JSON 找這張卡。
+
+    不能走 CardIndex：它把 aliases 折進內部索引後就丟掉原始卡片 dict，
+    而登錄需要的正是 aliases 清單。**路徑一定要 `project_root() / …`**（照抄
+    cards.py:394）：`DEFAULT_MASTER_PATH` 是相對路徑字串，直接 `Path(...)` 在
+    非 repo 目錄執行 console script 時會讀不到 → aliases 空 → 「マジック・
+    シリンダー」那類標題永遠 tier=None、永不推播。誤殺是靜默的。
+    缺檔回 None 不爆。
+    """
+    from .cards import DEFAULT_MASTER_PATH
+    from .config import project_root
+
+    try:
+        data = json.loads(
+            (project_root() / DEFAULT_MASTER_PATH).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    cards = data.get("cards") or []
+    if code_norm:
+        for c in cards:
+            if code_norm in (c.get("set_codes") or []):
+                return c
+    if name_ja:
+        for c in cards:
+            if c.get("name_ja") == name_ja:
+                return c
+    return None
+
+
+def _ingest_census(
+    store: Any, fetcher: Any, watch_id: int, *, url: str,
+    grader: str, name_ja: str, code_raw: str, code_norm: str,
+) -> list[str]:
+    """census 抓取＋落庫（add 與 refresh 共用）。url 為空時 ARS 用卡名自動搜。
+
+    任何失敗都不擋登錄：大聲講、URL 照存，之後 `snipe report --refresh-census` 重試。
+    """
+    from .ars_census import (
+        CensusParseError,
+        fetch_census,
+        find_census_url,
+        page_mentions,
+    )
+    from .sources.base import FetchError
+
+    msgs: list[str] = []
+    if not url and grader == "ARS":
+        try:
+            found, entries = find_census_url(name_ja, code_norm, fetcher=fetcher)
+        except FetchError as exc:
+            msgs.append(f"⚠️ ARS 卡名搜尋失敗（{exc}）——之後用 snipe report "
+                        f"{watch_id} --refresh-census 重試")
+            return msgs
+        if found:
+            url = found
+            msgs.append(f"census 頁自動定位：{url}")
+        else:
+            if entries:
+                msgs.append("⚠️ census 無法唯一定位（卡號對不上），候選如下——"
+                            "確認後用 --census-url 指定：")
+                for e in entries[:6]:
+                    msgs.append(f"   {e['name']} / {e['expansion']} / {e['code']}"
+                                f" → {e['url']}")
+            else:
+                msgs.append("⚠️ ARS 卡名搜尋 0 件——確認卡名寫法")
+            return msgs
+    if not url:
+        if grader != "ARS":
+            msgs.append(f"（{grader} 的鑑定量查詢未支援，census 留空）")
+        return msgs
+    try:
+        counts, total, html = fetch_census(url, fetcher=fetcher)
+        # ⚠️ 各級張數解析成功、卻抓不到總數 → 多半是總數那行的版型改了。
+        # `census_total` 失敗是回 None（不像 parse_census 會拋），與「頁面真的
+        # 沒有總數」無法區分——所以這裡要出聲，不要讓它安靜地變成 dashboard 上的
+        # 「鑑定總數 None」（CLAUDE.md 第五節）。
+        if counts and total is None:
+            msgs.append("⚠️ 各級張數讀到了但鑑定總數沒讀到——ARS 總數那行的版型"
+                        "可能改了，請人工確認 census 頁")
+    except (FetchError, CensusParseError) as exc:
+        store.update_card_watch_census(watch_id, census_url=url, census_json="",
+                                       census_total=None)
+        msgs.append(f"⚠️ census 抓取／解析失敗（{exc}）——URL 已存，"
+                    f"之後 --refresh-census 重試")
+        return msgs
+    store.update_card_watch_census(
+        watch_id, census_url=url,
+        census_json=json.dumps(counts, ensure_ascii=False), census_total=total,
+    )
+    shown = "、".join(f"{k}: {v} 張" for k, v in counts.items() if v)
+    msgs.append(f"census：{shown}（鑑定總數 {total}）")
+    for needle in (code_raw, name_ja):
+        if needle and not page_mentions(html, needle):
+            msgs.append(f"⚠️ census 頁上找不到 {needle!r}——確認這頁是不是同一張卡")
+    return msgs
+
+
+def add_card_watch(
+    store: Any, fetcher: Any, *, grader: str, grade_input: str, name_ja: str,
+    name_en: str = "", code: str = "", census_url: str = "",
+    evidence_urls: list[str] | None = None, note: str = "",
+    sources: dict[str, Any] | None = None,
+) -> AddResult:
+    """登錄＋立刻補齊檔案（含**當下就去挖市場成交檔案**；`sources=None` 才跳過）。
+
+    外部抓取（census／證據頁）失敗**不擋登錄**——大聲講、標狀態、照樣入庫
+    （讀不到 ≠ 不存在）。輸入格式錯誤（機構不認得、分數看不懂、卡號正規化
+    失敗）是 semantic 失敗：拋 ValueError，不入庫。
+    """
+    from .sources.base import FetchError
+    from .sources.yahoo_closed import to_utc_iso
+    from .yahoo_auction_page import AuctionPageError, fetch_auction_snapshot
+
+    msgs: list[str] = []
+    g = grader.strip().upper()
+    if g not in ("PSA", "ARS", "BGS"):
+        raise ValueError(f"不認得的鑑定機構：{grader!r}（支援 PSA / ARS / BGS）")
+    label = grade_input.strip()
+    try:
+        grade_val = float(label.rstrip("+"))
+    except ValueError as exc:
+        raise ValueError(f"分數看不懂：{grade_input!r}（例：10、10+、9.5）") from exc
+    if label.endswith("+"):
+        msgs.append("⚠️ 標題解析把 10+ 折成 10.0（parse_grade 既定行為）："
+                    "10 與 10+ 的標的都會以 🎯 通知，看標題原文分辨。")
+
+    code_raw = code.strip()
+    code_norm = ""
+    if code_raw:
+        codes = extract_title_codes(f" {code_raw} ")
+        if not codes:
+            raise ValueError(
+                f"卡號正規化失敗：{code_raw!r}（預期形如 P4-06 / LOB-018）")
+        code_norm = codes[0]
+
+    name_ja = name_ja.strip()
+    name_en = name_en.strip()
+    aliases: list[str] = []
+    master = _master_card(code_norm=code_norm, name_ja=name_ja)
+    if master is not None:
+        aliases = [str(a) for a in (master.get("aliases") or []) if a]
+        if not name_en and master.get("name_en"):
+            name_en = str(master["name_en"])
+            msgs.append(f"主檔補上英文名：{name_en}")
+        if master.get("name_ja") and master["name_ja"] != name_ja:
+            aliases.append(str(master["name_ja"]))
+        msgs.append(f"卡名主檔命中：{master.get('name_ja')}"
+                    f"（別名 {len(aliases)} 個一併比對）")
+    else:
+        msgs.append("⚠️ 卡名主檔沒有這張卡——比對只用你提供的名字與卡號")
+
+    watch_id = store.insert_card_watch(
+        grader=g, grade=grade_val, grade_label=label, name_ja=name_ja,
+        name_en=name_en, aliases=aliases,
+        code_raw=code_raw, code_norm=code_norm, note=note,
+    )
+    msgs.append(f"已登錄狙擊 #{watch_id}：{g}{label} {name_ja} {code_raw}".rstrip())
+
+    msgs += _ingest_census(store, fetcher, watch_id, url=census_url.strip(),
+                           grader=g, name_ja=name_ja, code_raw=code_raw,
+                           code_norm=code_norm)
+
+    # 證據頁快照：入庫當下就抓（已結束頁 ~120 天會刪，實證下界 74 天）
+    for raw_url in evidence_urls or []:
+        ev_url = raw_url.strip()
+        if not ev_url:
+            continue
+        if "auctions.yahoo.co.jp" not in ev_url:
+            store.upsert_card_watch_evidence(
+                watch_id, ev_url, status="unsupported",
+                note="目前只支援 Yahoo 拍賣商品頁快照", site="")
+            msgs.append(f"⚠️ 證據 URL 不是 Yahoo 拍賣頁，只存連結不解析：{ev_url}")
+            continue
+        try:
+            snap = fetch_auction_snapshot(ev_url, fetcher=fetcher)
+        except (FetchError, AuctionPageError) as exc:
+            store.upsert_card_watch_evidence(watch_id, ev_url,
+                                             status="unverifiable", note=str(exc))
+            msgs.append(f"⚠️ 證據頁抓不到（{exc}）——已存 URL 標 unverifiable；"
+                        f"讀不到 ≠ 不存在")
+            continue
+        store.upsert_card_watch_evidence(
+            watch_id, ev_url, status="ok", title=snap.title,
+            price_native=snap.price, currency=snap.currency,
+            # ⚠️ 一律轉 UTC 再存：`card_watch_sale.sold_at` 是 UTC，兩張表存的是
+            # 同一類事實（什麼時候賣掉的），混時區會讓 ORDER BY 的字典序排錯
+            # （CLAUDE.md 第三節：同源同基準）。頁面原文是 `+09:00`。
+            sold_at=to_utc_iso(snap.end_time) or snap.end_time, bids=snap.bids,
+            seller_id=snap.seller_id, seller_name=snap.seller_name,
+        )
+        price_s = f"¥{snap.price:,.0f}" if snap.price is not None else "價格不明"
+        msgs.append(f"證據快照：{snap.end_time[:10]} {price_s}"
+                    f"（{snap.bids} 出價）賣家 {snap.seller_name or snap.seller_id}")
+
+    # 市場成交檔案：登錄當下就挖。這是檔案的主要內容——我們自己的庫只有 181 天
+    # 且是碰巧掃到的，市場的檔案一個請求就 150 天（實測目標卡：本地 0 筆 vs
+    # 市場檔案 2 筆 exact）。挖不到不擋登錄，但要大聲講。
+    if sources is not None:
+        matcher = WatchMatcher.from_row(store.get_card_watch(watch_id))
+        mined = mine_sold_archive(store, sources, matcher)
+        msgs.append(f"市場成交檔案：{mined.summary()}")
+        if not mined.ok:
+            msgs.append("⚠️ 上面有管道沒挖成功——**那幾條的「0 筆」不代表沒賣過**，"
+                        "之後用 `ygo-sniper snipe mine <id>` 重試")
+    else:
+        msgs.append("（未提供 sources，跳過市場成交檔案挖掘）")
+    return AddResult(watch_id=watch_id, messages=msgs)
+
+
+def refresh_watch_census(store: Any, fetcher: Any, watch: dict[str, Any]) -> list[str]:
+    """重抓 census（URL 沒存到就重新用卡名搜）。"""
+    return _ingest_census(
+        store, fetcher, int(watch["id"]),
+        url=str(watch.get("census_url") or ""),
+        grader=str(watch.get("grader") or ""),
+        name_ja=str(watch.get("name_ja") or ""),
+        code_raw=str(watch.get("code_raw") or ""),
+        code_norm=str(watch.get("code_norm") or ""),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 檔案（dossier）：census＋實證＋本地歷史＋命中帳＋等待建議
+# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class Dossier:
+    """一張卡的完整檔案。**三個資料桶的出處不同，永遠分開呈現、不合成一個數字。**
+
+    - `sales`：市場自己的成交檔案（主要）——別人實際賣掉了多少錢
+    - `local_history`：我們自己掃到的 comps／listing_obs（補充，樣本小且偏）
+    - `evidence`：使用者提供的商品頁快照（人工指定，最高可信度）
+    三者的分母完全不同：市場檔案是「這個平台這段期間的全部成交」，本地是
+    「我們碰巧掃到的」，證據是「使用者手動指定的」。混在一起算平均就是混池。
+    """
+
+    watch: dict[str, Any]
+    census: dict[str, Any] | None
+    census_total: int | None
+    sales: list[dict[str, Any]]
+    local_history: list[dict[str, Any]]
+    evidence: list[dict[str, Any]]
+    hits: list[dict[str, Any]]
+    recommendation: list[str]
+
+
+def _census_of(watch: dict[str, Any]) -> dict[str, Any] | None:
+    raw = watch.get("census_json") or ""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def build_dossier(store: Any, watch: dict[str, Any]) -> Dossier:
+    """檔案 ＝ 市場成交檔案（主）＋ 本地掃描歷史（補充）＋ 使用者證據。
+
+    本地那一桶一律**現場重跑標題比對**——`comps.card_name`／`set_code` 欄位不可信
+    （實測相關列全空）。三桶都逐筆列出、不做任何跨筆聚合：競標與定價不同池，
+    市場檔案與我們的樣本也不同池。
+    """
+    m = WatchMatcher.from_row(watch)
+    watch_id = int(watch["id"])
+    local: list[dict[str, Any]] = []
+    for ledger, rows in (
+        ("comps", store.comps_title_rows()),
+        ("listing_obs", store.listing_obs_title_rows()),
+    ):
+        for r in rows:
+            tier = match_tier(m, str(r.get("title") or ""))
+            if tier is None:
+                continue
+            h = dict(r)
+            h["ledger"] = ledger
+            h["tier"] = tier
+            local.append(h)
+    local.sort(key=lambda h: str(h.get("sold_at") or h.get("last_seen") or ""),
+               reverse=True)
+    sales = store.list_card_watch_sales(watch_id)
+    hits = store.list_card_watch_hits(watch_id=watch_id)
+    evidence = store.list_card_watch_evidence(watch_id)
+    return Dossier(
+        watch=watch,
+        census=_census_of(watch),
+        census_total=watch.get("census_total"),
+        sales=sales,
+        local_history=local,
+        evidence=evidence,
+        hits=hits,
+        recommendation=build_recommendation(watch, sales, evidence, hits),
+    )
+
+
+def _prices(values: list[Any]) -> str:
+    return "、".join(f"{p:,.0f}" for p in sorted(values)) or "價格不明"
+
+
+def build_recommendation(
+    watch: dict[str, Any], sales: list[dict[str, Any]],
+    evidence: list[dict[str, Any]], hits: list[dict[str, Any]],
+) -> list[str]:
+    """「去哪等」的建議。純事實組裝，不是模型——每一行都可回溯到一筆紀錄。
+
+    賣家歸因**以市場成交檔案為主**：那是「誰真的賣掉過這張卡」，比我們自己
+    掃到什麼可靠得多（我們的庫實測 0 筆，市場檔案一個請求就 150 天）。
+    """
+    lines: list[str] = []
+    sellers: dict[str, dict[str, Any]] = {}
+
+    def _note(key: str, when: str, price: Any, src: str) -> None:
+        s = sellers.setdefault(
+            key, {"n": 0, "undated": 0, "last": "", "prices": [],
+                  "undated_prices": [], "src": src},
+        )
+        # ⚠️ **「幾次」是日期類宣稱，沒有成交時刻的那批不能算進去。**
+        # 實測一次挖掘 206 筆有 77 筆（Mercari／露天）給不出落札時刻；把它們
+        # 併進同一個計數，就是拿兩種基準的東西合成一個數字（CLAUDE.md 第三節）。
+        # 它們照樣列出來（價格是有效資訊），只是自己一個桶、自己講清楚。
+        if when:
+            s["n"] += 1
+            if when > s["last"]:
+                s["last"] = when
+            if price is not None:
+                s["prices"].append(price)
+        else:
+            s["undated"] += 1
+            if price is not None:
+                s["undated_prices"].append(price)
+
+    for s in sales:
+        if s.get("tier") == TIER_EXACT and s.get("seller_id"):
+            _note(f"{s.get('site') or ''}:{s['seller_id']}",
+                  str(s.get("sold_at") or ""), s.get("price_native"), "成交檔案")
+    for e in evidence:
+        if e.get("status") == "ok" and e.get("seller_id"):
+            _note(f"{e.get('site') or 'buyee_yahoo'}:{e['seller_id']}",
+                  str(e.get("sold_at") or ""), e.get("price_native"), "使用者證據")
+    for h in hits:
+        if h.get("tier") == TIER_EXACT and h.get("seller_id"):
+            _note(f"{h.get('site') or ''}:{h['seller_id']}",
+                  str(h.get("last_seen") or ""), h.get("price_native"), "在架命中")
+
+    for key, s in sorted(sellers.items(),
+                         key=lambda kv: (-(kv[1]["n"] + kv[1]["undated"]), kv[0])):
+        if s["n"]:
+            what = (f"賣掉過這張卡 {s['n']} 次（最近 {s['last'][:10]}；"
+                    f"成交 {_prices(s['prices'])}）")
+            if s["undated"]:
+                what += (f"，另有 {s['undated']} 筆同款成交沒給成交時刻"
+                         f"（成交 {_prices(s['undated_prices'])}，不算進上面的次數）")
+        else:
+            what = (f"賣掉過這張卡 {s['undated']} 筆、但來源都沒給成交時刻"
+                    f"（成交 {_prices(s['undated_prices'])}——只答得出價格，"
+                    f"答不出何時）")
+        lines.append(
+            f"賣家 {key} {what}——建議釘選（每批都掃、不佔名額）："
+            f"ygo-sniper watch-seller pin {key}"
+        )
+    if not sellers:
+        lines.append(
+            "成交檔案裡還沒有可歸因的賣家——靠全市場關鍵字掃描等它出現"
+            "（狙擊查詢已自動加入每一輪掃描）。"
+        )
+
+    exact_sales = [s for s in sales if s.get("tier") == TIER_EXACT]
+    if exact_sales:
+        # ⚠️ **只有帶真實成交時刻的才進「什麼時候／幾次」的宣稱。**
+        # Mercari／露天的搜尋頁給不出落札時間（實測 99/206 筆 sold_at 是空的），
+        # 把它們算進次數或期間，就是拿兩種基準的東西合成一個數字
+        # （CLAUDE.md 第三節；comps 的 sold_at_is_ingest 是同一個立場）。
+        dated = [s for s in exact_sales if s.get("sold_at")]
+        undated_n = len(exact_sales) - len(dated)
+        stamps = sorted(str(s.get("sold_at"))[:10] for s in dated)
+        kinds = {s.get("sale_kind") for s in dated}
+        span = f"（{stamps[0]} → {stamps[-1]}）" if stamps else ""
+        if dated:
+            # 這句**只要有帶日期的成交就一定要講**（不是只在 >= 2 筆時）：一筆的時候
+            # 更需要知道那不是全部歷史，否則會把「檔案裡只有 1 次」讀成「一年只出現 1 次」。
+            lines.append(
+                f"出現頻率：成交檔案裡 {len(dated)} 次{span}"
+                f"——**這是檔案涵蓋期間內的次數，不是全部歷史**（Yahoo 落札相場約"
+                f"保留 150-180 天，更早的已經被平台刪掉，我們挖不到）。"
+            )
+        if undated_n:
+            lines.append(
+                f"另有 {undated_n} 筆同款成交**來源沒給成交時刻**（Mercari／露天的"
+                f"搜尋頁沒有落札時間）——它們只答得出價格，不列入上面的次數與期間。"
+            )
+        if kinds == {"auction"}:
+            lines.append(
+                "全部走競標成交——結標時段（台灣 18:00-22:30）是關鍵，"
+                "排程在該時段每 30 分掃一次。"
+            )
+    census = _census_of(watch)
+    if census:
+        at = census.get(str(watch.get("grade_label") or ""))
+        if at is not None:
+            lines.append(
+                f"稀缺度：{watch['grader']}{watch['grade_label']} 全世界只有 "
+                f"{at} 張——每次出現可能相隔數月，👀 疑似命中也值得點開看。"
+            )
+    lines.append(
+        "節奏：結標高峰（台灣 18:00-22:30）每 30 分掃一次、白天每 2 小時；"
+        "狙擊命中即推播且 🎯 不受每輪則數上限裁切——最壞情況約晚 30 分鐘知道。"
+    )
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# 通知脈絡（規則 4）。evaluate() 只吃這個形狀，不自己查 db。
+# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class SnipeNotifyContext:
+    """規則 4（指定卡狙擊）判定所需的全部事實。
+
+    pending 只含「還沒送過的 exact／partial」——near 在源頭就不進通知路徑
+    （它的去處是 dashboard），去重帳只有 notify_log 一本。
+    """
+
+    watches: dict[int, dict[str, Any]] = field(default_factory=dict)
+    pending: list[dict[str, Any]] = field(default_factory=list)
+
+
+def build_notify_context(store: Any) -> SnipeNotifyContext:
+    ctx = SnipeNotifyContext()
+    ctx.watches = {int(w["id"]): w for w in store.list_card_watch(active_only=True)}
+    if not ctx.watches:
+        return ctx
+    for hit in store.list_card_watch_hits(tiers=(TIER_EXACT, TIER_PARTIAL)):
+        if hit.get("sent_at"):
+            continue
+        w = ctx.watches.get(int(hit["watch_id"]))
+        if w is None:            # watch 已停用：命中留帳，但不再通知
+            continue
+        row = dict(hit)
+        row["watch"] = w
+        ctx.pending.append(row)
+    return ctx

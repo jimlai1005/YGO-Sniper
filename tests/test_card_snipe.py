@@ -2,15 +2,21 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
 from ygo_sniper import store as store_mod
+from ygo_sniper.ars_census import SEARCH_URL
 from ygo_sniper.card_snipe import (
     TIER_EXACT,
     TIER_NEAR,
     TIER_PARTIAL,
     WatchMatcher,
+    add_card_watch,
+    build_dossier,
+    build_notify_context,
     classify,
     load_matchers,
     match_tier,
@@ -18,6 +24,8 @@ from ygo_sniper.card_snipe import (
     scan_queries,
 )
 from ygo_sniper.store import CARD_SNIPE_RULE, Store
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture
@@ -382,3 +390,192 @@ class TestObserveAndQueries:
         assert all(q.sources == ("a", "b", "c") for q in qs)
         assert all(q.category is None for q in qs)
         assert scan_queries(load_matchers(store), []) == []        # base 空就不跑
+
+
+class PageFetcher:
+    """離線 fetcher。**沒有的頁面拋 `FetchError`，不是 KeyError**——生產用的
+    `CachedFetcher` 抓不到就是 FetchError，假件也必須長成那樣，否則測試路徑
+    與生產路徑分岔（CLAUDE.md 第六節），而分岔處正好是「抓不到要怎麼辦」。"""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def get(self, url, **kw):
+        from ygo_sniper.sources.base import FetchError
+
+        self.calls.append(url)
+        if url not in self.pages:
+            raise FetchError("404", url=url, status=404)
+        return self.pages[url]
+
+
+def _fixture_pages():
+    return {
+        SEARCH_URL.format(name=quote("魔法の筒")):
+            (FIXTURES / "ars_search_magic_cylinder.html").read_text(encoding="utf-8"),
+        "https://ars-grading.com/grading/searchNameDetail?id=001202208090020007":
+            (FIXTURES / "ars_census_p4_06.html").read_text(encoding="utf-8"),
+        "https://auctions.yahoo.co.jp/jp/auction/n1235105710":
+            (FIXTURES / "yahoo_closed_n1235105710.html").read_text(encoding="utf-8"),
+    }
+
+
+class TestAddCardWatch:
+    def test_full_flow_offline(self, store):
+        res = add_card_watch(
+            store, PageFetcher(_fixture_pages()),
+            grader="ars", grade_input="10", name_ja="魔法の筒", code="P4-06",
+            evidence_urls=["https://auctions.yahoo.co.jp/jp/auction/n1235105710"],
+        )
+        w = store.get_card_watch(res.watch_id)
+        assert w["grader"] == "ARS" and w["grade"] == 10.0 and w["grade_label"] == "10"
+        assert w["code_norm"] == "P4-6"
+        assert "マジック・シリンダー" in w["aliases"]          # 主檔 enrich
+        assert w["name_en"] == "Magic Cylinder"                 # 主檔補英文名
+        assert json.loads(w["census_json"])["10"] == 5          # census 自動搜到＋抓到
+        assert w["census_total"] == 11
+        ev = store.list_card_watch_evidence(res.watch_id)
+        assert len(ev) == 1 and ev[0]["status"] == "ok"
+        assert ev[0]["price_native"] == 6350.0
+        assert ev[0]["seller_id"] == "AiUkMq1pEUfNxvPeCv5PnfGpsFLrx"
+        # sources 沒給就不挖市場檔案，而且要講出來（靜默跳過＝之後查不出為什麼是空的）
+        assert any("跳過市場成交檔案挖掘" in m for m in res.messages)
+
+    def test_evidence_sold_at_shares_the_utc_basis_of_sales(self, store):
+        """證據頁原文是 `+09:00`，`card_watch_sale.sold_at` 是 UTC。
+
+        兩張表存的是同一類事實（什麼時候賣掉的），而排序是 TEXT 字典序——
+        存進去的偏移不統一就會排錯，而且錯得很安靜（CLAUDE.md 第三節）。
+        欄位註解已經宣告 UTC，這裡釘住**寫入端真的照做**。
+        """
+        res = add_card_watch(
+            store, PageFetcher(_fixture_pages()),
+            grader="ars", grade_input="10", name_ja="魔法の筒", code="P4-06",
+            evidence_urls=["https://auctions.yahoo.co.jp/jp/auction/n1235105710"],
+        )
+        ev = store.list_card_watch_evidence(res.watch_id)[0]
+        assert ev["sold_at"].endswith("+00:00"), "證據頁的 +09:00 沒被換算成 UTC"
+        assert ev["sold_at"] == "2026-07-01T13:53:03+00:00"   # 頁面原文 22:53:03+09:00
+
+    def test_bad_grader_raises(self, store):
+        with pytest.raises(ValueError):
+            add_card_watch(store, PageFetcher({}), grader="CGC",
+                           grade_input="10", name_ja="x")
+
+    def test_unfetchable_evidence_is_kept_loudly(self, store):
+        class BoomFetcher:
+            def get(self, url, **kw):
+                from ygo_sniper.sources.base import FetchError
+                raise FetchError("404", url=url, status=404)
+
+        res = add_card_watch(
+            store, BoomFetcher(), grader="PSA", grade_input="10", name_ja="魔法の筒",
+            evidence_urls=["https://auctions.yahoo.co.jp/jp/auction/dead1"],
+        )
+        ev = store.list_card_watch_evidence(res.watch_id)
+        assert ev[0]["status"] == "unverifiable"                # 讀不到 ≠ 不存在
+        assert any("unverifiable" in m or "抓不到" in m for m in res.messages)
+
+    def test_non_yahoo_evidence_is_stored_as_unsupported(self, store):
+        res = add_card_watch(
+            store, PageFetcher({}), grader="PSA", grade_input="10", name_ja="魔法の筒",
+            evidence_urls=["https://www.ebay.com/itm/12345"],
+        )
+        ev = store.list_card_watch_evidence(res.watch_id)
+        assert ev[0]["status"] == "unsupported"
+
+
+class TestDossier:
+    def test_three_buckets_stay_separate_and_recommendation_names_the_seller(self, store):
+        res = add_card_watch(
+            store, PageFetcher(_fixture_pages()),
+            grader="ars", grade_input="10", name_ja="魔法の筒", code="P4-06",
+            evidence_urls=["https://auctions.yahoo.co.jp/jp/auction/n1235105710"],
+        )
+        # 市場成交檔案桶：直接寫一筆（挖掘本身在 test_card_snipe_mine.py 測）
+        store.upsert_card_watch_sale(
+            res.watch_id, "buyee_yahoo:l1230920412", tier="exact",
+            title="【ARS10】魔法の筒 Magic Cylinder ウルトラ 鑑定書付 遊戯王 ARS鑑定10 PSA 芸術品",
+            url="https://buyee.jp/item/yahoo/auction/l1230920412", site="buyee_yahoo",
+            seller_id="AiUkMq1pEUfNxvPeCv5PnfGpsFLrx", price_native=7750.0,
+            currency="JPY", sold_at="2026-05-27T13:27:38+00:00", bid_count=10,
+            sale_kind="auction", source="yahoo_closed",
+        )
+        # 本地補充桶：一筆 comps（PSA8 真實標題）
+        with store._conn() as c:
+            c.execute(
+                "INSERT INTO comps (signature, title, price_native, currency, url,"
+                " site, sold_at, sale_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("sig", "PSA8 遊戯王　魔法の筒　ウルトラレア！　P4-06　第２期",
+                 1900.0, "JPY", "https://example.test/c1", "buyee_mercari",
+                 "2026-08-03T10:01:36Z", "fixed"),
+            )
+        w = store.get_card_watch(res.watch_id)
+        d = build_dossier(store, w)
+
+        assert d.census["10"] == 5 and d.census_total == 11
+        # 三個桶各自獨立，沒有被合併成一個數字
+        assert len(d.sales) == 1 and d.sales[0]["tier"] == "exact"
+        assert d.sales[0]["sale_kind"] == "auction"
+        assert len(d.evidence) == 1 and d.evidence[0]["status"] == "ok"
+        assert len(d.local_history) == 1
+        assert d.local_history[0]["tier"] == "near"             # PSA8 是同卡他家鑑定
+        assert d.local_history[0]["ledger"] == "comps"
+
+        joined = "\n".join(d.recommendation)
+        # 賣家歸因要指名道姓、給可執行指令，並講出成交價
+        assert "watch-seller pin buyee_yahoo:AiUkMq1pEUfNxvPeCv5PnfGpsFLrx" in joined
+        assert "6,350" in joined and "7,750" in joined
+        assert "全世界" in joined                                # census 稀缺度有講
+        # 檔案期間的極限要誠實標註（不能讓使用者以為那是全部歷史）
+        assert "不是全部歷史" in joined
+        assert "競標" in joined                                  # 成交型態的等待策略
+
+    def test_undated_sales_never_inflate_the_frequency_claim(self, store):
+        """來源給不出落札時間的成交（Mercari／露天）**不得**進入「幾次／期間」。
+
+        實測一次挖掘 206 筆裡有 77 筆沒有成交時刻。把它們算進次數，就是拿兩種
+        基準的東西合成一個數字（CLAUDE.md 第三節；comps 的 sold_at_is_ingest
+        是同一個立場）。它們照樣入帳、照樣顯示，只是不進日期類宣稱。
+        """
+        res = add_card_watch(
+            store, PageFetcher({}), grader="ars", grade_input="10",
+            name_ja="魔法の筒", code="P4-06",
+        )
+        common = dict(tier="exact", title="【ARS10】魔法の筒", url="u",
+                      site="buyee_yahoo", seller_id="S", price_native=7000.0,
+                      currency="JPY", bid_count=None, sale_kind="unknown")
+        store.upsert_card_watch_sale(res.watch_id, "y:dated",
+                                     sold_at="2026-05-27T13:27:38+00:00", **common)
+        for i in range(3):                       # 三筆無日期（Mercari 形態）
+            store.upsert_card_watch_sale(res.watch_id, f"m:{i}", sold_at="", **common)
+
+        d = build_dossier(store, store.get_card_watch(res.watch_id))
+        assert len(d.sales) == 4                 # 四筆都留著，一筆都沒丟
+        joined = "\n".join(d.recommendation)
+        assert "成交檔案裡 1 次" in joined        # 次數只算有日期的那一筆
+        assert "3 筆" in joined and "沒給成交時刻" in joined   # 缺口要說出來
+        assert "4 次" not in joined              # 絕不把無日期的算進次數
+
+
+class TestNotifyContext:
+    def test_pending_only_contains_unsent_exact_and_partial(self, store):
+        wid = store.insert_card_watch(**WATCH_KW)
+        for key, tier in (("a:1", "exact"), ("a:2", "partial"), ("a:3", "near")):
+            store.upsert_card_watch_hit(wid, key, tier=tier, title="t", url="u",
+                                        site="a", seller_id="", price_native=None,
+                                        currency="")
+        store.mark_rule_notified([(f"{wid}:a:1", "card_snipe")])   # a:1 已送過
+        ctx = build_notify_context(store)
+        keys = [h["listing_key"] for h in ctx.pending]
+        assert keys == ["a:2"]                                   # near 不進、已送不進
+        assert ctx.pending[0]["watch"]["id"] == wid              # watch 附在 hit 上
+
+    def test_inactive_watch_hits_are_excluded(self, store):
+        wid = store.insert_card_watch(**WATCH_KW)
+        store.upsert_card_watch_hit(wid, "a:1", tier="exact", title="t", url="u",
+                                    site="a", seller_id="", price_native=None,
+                                    currency="")
+        store.deactivate_card_watch(wid)
+        assert build_notify_context(store).pending == []
