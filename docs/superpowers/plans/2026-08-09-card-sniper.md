@@ -3005,6 +3005,21 @@ git commit -m "feat(snipe): pipeline 掛鉤——過濾前比對、狙擊查詢�
 
 ### Task 8: CLI 群組 `snipe`
 
+> **執行期追加（2026-08-09）Step 0：掃描結果要報「比對了幾筆、命中幾筆」**
+>
+> Task 7 完成後發現的觀測缺口：狙擊掛鉤若壞掉（例如 `_snipe_matchers()` 因故回空、或 `observe_listings` 沒被呼叫到），規則 4 的計數會顯示「命中 0 筆」——**與「今天市場上真的沒有那張卡」外顯一模一樣**。這正是 CLAUDE.md 第五節整節在防的事，而規則 4 的計數表（Task 6 Step 4b）只證明了「規則有在跑」，證明不了「比對有在跑」。
+>
+> 要做的：
+> 1. `pipeline._collect_candidates` 把 `observe_listings` 的回傳值累加到一個 `self._snipe_stats`（例如 `{"compared": int, "hits": int}`，每輪 `_scan` 開頭歸零）
+> 2. `_scan` 的結果 dict 加一欄 `snipe`（`{"watches": 幾張卡在追, "compared": 比對過幾筆標題, "hits": 命中幾筆}`）
+> 3. `cli._print_scan` 在有狙擊卡時印一行，例如：
+>    `🎯 狙擊：追蹤 1 張卡｜比對 1,234 筆標題｜命中 0 筆`
+>    **追蹤 0 張卡時不要印**（沒登錄任何卡就不該有這行雜訊）。
+>
+> 判準：使用者看 `daily` 的輸出，要能分辨「比對跑了但今天沒貨」（compared 很大、hits 0）與「比對根本沒跑」（compared 0）。
+>
+> 測試：`test_scan_reports_snipe_comparison_counts`——有登錄卡時 `compared > 0`；沒登錄卡時該欄是 0 且 `_print_scan` 不印那一行。
+
 **Files:**
 - Modify: `src/ygo_sniper/cli.py`（watch-seller 群組之後，約 :1434 `watch_scan` 之前）
 - Test: `tests/test_card_snipe.py`（追加）
@@ -3486,7 +3501,7 @@ def _mine_snipes_daily(pipe) -> None:
 .venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
-預期：`64 passed`（58 ＋ daily 重挖節流 2 ＋ CLI 4）。
+預期：`66 passed`（58 ＋ Step 0 掃描計數 2 ＋ daily 重挖節流 2 ＋ CLI 4）。
 
 - [ ] **Step 5: Commit**
 
