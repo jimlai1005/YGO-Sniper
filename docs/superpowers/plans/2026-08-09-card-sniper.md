@@ -2804,6 +2804,20 @@ git commit -m "feat(snipe): 通知規則 4——終身去重、🎯 不受總量
 
 ### Task 7: pipeline 掛鉤（過濾前比對＋查詢注入＋回收＋通知脈絡）
 
+> **執行期追加（2026-08-09）Step 0：`card_watch_hit` 補 `image_url` 欄位**
+>
+> Task 6 完成後發現：`notify.send_rule_matches` 用 `photo_url_of(m.row)` 取 `row["image_url"]` 附圖，但 `card_watch_hit` 沒有這個欄位 → 狙擊通知永遠是純文字。使用者等的是一張全世界只有 5 張的卡，通知裡看得到圖才判斷得快。
+>
+> **這張表在正式庫已經建起來了**（`notify-preview` 跑過一次就會 `executescript(_SCHEMA)`），所以 `CREATE TABLE IF NOT EXISTS` 不會補上新欄位——**必須走 additive migration**，範本是 `store.py` 的 `_SIGNALS_MIGRATE_COLUMNS` ＋ `_migrate_signals`（PRAGMA 看過再 ALTER，O(1)、重跑安全）。
+>
+> 要做的四件事：
+> 1. `_SCHEMA` 的 `card_watch_hit` 加 `image_url TEXT DEFAULT ''`（新 db 走這條）
+> 2. 新增 `_CARD_WATCH_HIT_MIGRATE_COLUMNS = {"image_url": "TEXT DEFAULT ''"}` 與 `_migrate_card_watch_hit`，並在 `Store.__init__` 的 migrate 串裡呼叫（舊 db 走這條）
+> 3. `upsert_card_watch_hit` 加 `image_url: str = ""` 參數，寫進 INSERT 與 `DO UPDATE SET`（照舊只補不抹：`CASE WHEN excluded.image_url != '' THEN … ELSE … END`——搜尋頁抓不到圖時別把已有的圖抹掉）
+> 4. `card_snipe.observe_listings` 傳 `image_url=getattr(lst, "image_url", None) or ""`
+>
+> 測試：(a) 舊 db 相容——先用不含該欄位的 schema 建表、再開 `Store`，確認欄位長出來且既有列不受影響；(b) `observe_listings` 寫進 `image_url`；(c) 之後重掃抓不到圖時不抹掉已有的圖。
+
 **Files:**
 - Modify: `src/ygo_sniper/pipeline.py`（`__init__` :202、`_collect_candidates` :448、`_scan` :699/:732/入庫段 :860 附近、`notification_outcome` :958）
 - Test: `tests/test_card_snipe.py`（追加）
@@ -2978,7 +2992,7 @@ class TestPipelineHook:
 .venv/bin/pytest tests/ -k "pipeline or scan"
 ```
 
-預期：`53 passed`（51 ＋ pipeline 掛鉤 2）；既有 pipeline 測試全綠。
+預期：`58 passed`（52 ＋ Step 0 的 image_url 3 條 ＋ pipeline 掛鉤 2 ＋ Task 5 審查新增 1）；既有 pipeline 測試全綠。
 
 - [ ] **Step 5: Commit**
 
@@ -3472,7 +3486,7 @@ def _mine_snipes_daily(pipe) -> None:
 .venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
-預期：`59 passed`（53 ＋ daily 重挖節流 2 ＋ CLI 4）。
+預期：`64 passed`（58 ＋ daily 重挖節流 2 ＋ CLI 4）。
 
 - [ ] **Step 5: Commit**
 
