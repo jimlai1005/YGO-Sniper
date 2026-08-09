@@ -295,7 +295,7 @@ class TestCardWatchStore:
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py -x -q
+.venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
 預期：`AttributeError: 'Store' object has no attribute 'insert_card_watch'`。
@@ -641,7 +641,7 @@ CREATE TABLE IF NOT EXISTS card_watch_evidence (
 - [ ] **Step 5: 跑測試看它綠**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py -x -q
+.venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
 預期：`10 passed`。
@@ -649,7 +649,7 @@ CREATE TABLE IF NOT EXISTS card_watch_evidence (
 - [ ] **Step 6: 既有測試沒被 schema 弄壞**
 
 ```bash
-.venv/bin/pytest tests/test_store.py tests/test_seller_watch.py -q 2>/dev/null || .venv/bin/pytest tests/ -q -k "store or seller_watch"
+.venv/bin/pytest tests/ -k "store or seller_watch"
 ```
 
 預期：全綠。
@@ -800,7 +800,7 @@ class TestObserveAndQueries:
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py -x -q
+.venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
 預期：`ModuleNotFoundError: No module named 'ygo_sniper.card_snipe'`。
@@ -999,7 +999,7 @@ def scan_queries(
 - [ ] **Step 4: 跑測試看它綠**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py -x -q
+.venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
 預期：`28 passed`（10 store ＋ 16 tier ＋ 2 observe/queries）。
@@ -1102,7 +1102,7 @@ def test_find_census_url_returns_candidates_when_ambiguous():
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_ars_census.py -x -q
+.venv/bin/pytest tests/test_ars_census.py -x
 ```
 
 預期：`ModuleNotFoundError: No module named 'ygo_sniper.ars_census'`。
@@ -1211,7 +1211,7 @@ def fetch_census(url: str, *, fetcher) -> tuple[dict[str, int], int | None, str]
 - [ ] **Step 4: 跑測試看它綠**
 
 ```bash
-.venv/bin/pytest tests/test_ars_census.py -x -q
+.venv/bin/pytest tests/test_ars_census.py -x
 ```
 
 預期：`6 passed`。
@@ -1283,7 +1283,7 @@ def test_fetch_uses_the_injected_fetcher():
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_yahoo_auction_page.py -x -q
+.venv/bin/pytest tests/test_yahoo_auction_page.py -x
 ```
 
 預期：`ModuleNotFoundError`。
@@ -1357,7 +1357,7 @@ def fetch_auction_snapshot(url: str, *, fetcher) -> AuctionSnapshot:
 - [ ] **Step 4: 跑測試看它綠**
 
 ```bash
-.venv/bin/pytest tests/test_yahoo_auction_page.py -x -q
+.venv/bin/pytest tests/test_yahoo_auction_page.py -x
 ```
 
 預期：`3 passed`。
@@ -1529,7 +1529,7 @@ class TestMineSoldArchive:
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe_mine.py -x -q
+.venv/bin/pytest tests/test_card_snipe_mine.py -x
 ```
 
 預期：`ImportError: cannot import name 'mine_sold_archive'`。
@@ -1549,7 +1549,7 @@ def _sold_search(
 驗證既有回填行為沒被改變：
 
 ```bash
-.venv/bin/pytest tests/ -q -k "refill"
+.venv/bin/pytest tests/ -k "refill"
 ```
 
 預期：全綠。
@@ -1673,7 +1673,7 @@ def mine_sold_archive(
 - [ ] **Step 4: 跑測試看它綠**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe_mine.py -x -q
+.venv/bin/pytest tests/test_card_snipe_mine.py -x
 ```
 
 預期：`6 passed`。
@@ -1880,7 +1880,7 @@ class TestNotifyContext:
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py -x -q
+.venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
 預期：`ImportError: cannot import name 'add_card_watch'`。
@@ -2296,7 +2296,7 @@ def build_notify_context(store: Any) -> SnipeNotifyContext:
 - [ ] **Step 4: 跑測試看它綠**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py -x -q
+.venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
 預期：`35 passed`（28 ＋ 政策層 7）。
@@ -2437,7 +2437,7 @@ class TestFormatter:
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe_notify.py -x -q
+.venv/bin/pytest tests/test_card_snipe_notify.py -x
 ```
 
 預期：`ImportError: cannot import name 'RULE_CARD_SNIPE'`。
@@ -2694,8 +2694,8 @@ def test_preview_table_renders_a_snipe_hit_without_crashing(store, cfg, capsys):
 - [ ] **Step 5: 跑測試看它綠＋既有通知測試回歸**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe_notify.py -x -q
-.venv/bin/pytest tests/ -q -k "notify"
+.venv/bin/pytest tests/test_card_snipe_notify.py -x
+.venv/bin/pytest tests/ -k "notify"
 .venv/bin/ygo-sniper notify-preview 2>&1 | grep -c "指定卡狙擊"   # 預期 >= 1
 ```
 
@@ -2788,7 +2788,7 @@ class TestPipelineHook:
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py::TestPipelineHook -x -q
+.venv/bin/pytest tests/test_card_snipe.py::TestPipelineHook -x
 ```
 
 預期：第一個測試 fail（hits 是空的——掛鉤還不存在）。
@@ -2881,8 +2881,8 @@ class TestPipelineHook:
 - [ ] **Step 4: 跑測試看它綠＋pipeline 回歸**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py -x -q
-.venv/bin/pytest tests/ -q -k "pipeline or scan"
+.venv/bin/pytest tests/test_card_snipe.py -x
+.venv/bin/pytest tests/ -k "pipeline or scan"
 ```
 
 預期：`37 passed`（35 ＋ pipeline 掛鉤 2）；既有 pipeline 測試全綠。
@@ -2984,7 +2984,7 @@ class TestCli:
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py::TestCli -x -q
+.venv/bin/pytest tests/test_card_snipe.py::TestCli -x
 ```
 
 預期：fail（`snipe` 指令不存在，exit code 2）。
@@ -3373,7 +3373,7 @@ def _mine_snipes_daily(pipe) -> None:
 - [ ] **Step 4: 跑測試看它綠**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe.py -x -q
+.venv/bin/pytest tests/test_card_snipe.py -x
 ```
 
 預期：`43 passed`（37 ＋ daily 重挖節流 2 ＋ CLI 4）。
@@ -3499,7 +3499,7 @@ def test_snipe_tab_is_wired_in_the_spa(client):
 - [ ] **Step 2: 跑測試看它紅**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe_web.py -x -q
+.venv/bin/pytest tests/test_card_snipe_web.py -x
 ```
 
 預期：`404`／assert 失敗。
@@ -3815,8 +3815,8 @@ async function openSnipe(id){
 - [ ] **Step 5: 跑測試看它綠＋web 回歸**
 
 ```bash
-.venv/bin/pytest tests/test_card_snipe_web.py -x -q
-.venv/bin/pytest tests/ -q -k "seller_watch or card_bucket or expiry"
+.venv/bin/pytest tests/test_card_snipe_web.py -x
+.venv/bin/pytest tests/ -k "seller_watch or card_bucket or expiry"
 ```
 
 預期：新測試 `4 passed`；既有 web 測試全綠。
