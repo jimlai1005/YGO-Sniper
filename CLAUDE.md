@@ -80,8 +80,9 @@ Vol.6，正中目標輪廓。它要擋的現代稀有度用 `プリズマティ�
    `parsers/grade.py:63` 的 `_CLAIM_SUFFIX`（只有 `相当|相當|並み|並|級|クラス|レベル`），
    它一插進來就把宣稱詞從分數後面推開，負向 lookahead 落空；而 PSA pattern 排在
    ARS 前面，於是先命中的 PSA 就成了答案。**2026-08-09 實測全語料**
-   （signals＋comps＋listing_obs 去重共 3,246 個標題）：1,017 筆標題**自己寫了
-   ARS＋分數**，其中 **79 筆（7.8%）被 `parse_grade` 判成 PSA**。實例：
+   （signals＋comps＋listing_obs 去重共 3,246 個標題）：998 筆標題**自己寫了
+   ARS＋分數**（判準與 `card_snipe._GRADER_TOKEN_TMPL` 同形），
+   其中 **79 筆（7.9%）被 `parse_grade` 判成 PSA**。實例：
    `ARS9 ハーピィズペット竜 初期 ウルトラレア UR 遊戯王 極美品　PSA9以上相当`、
    `【ARS8】青眼の究極竜　旧レリーフアルティメット　SDX PSA8以上`
 
@@ -274,10 +275,10 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 
 ```bash
 make test                      # pytest（目前 1723 passed，2026-08-09 實測）
-                               #   ⚠️ pyproject 的 addopts 有 `-q`，而 pytest 9.1.1
-                               #   在 `-q` 下**不印最後那行 `N passed`**——要拿數字
-                               #   請跑 `.venv/bin/pytest tests/ --override-ini="addopts="`
-                               #   （或 `--junitxml`）。看不到綠字不等於沒跑過，看 exit code
+                               #   ⚠️ 別自己再加 `-q`：pyproject 的 addopts 已有一個，
+                               #   疊成 `-qq` 會**吃掉最後那行 `N passed`**，而 exit code
+                               #   仍是 0——「測試沒跑」與「跑了但看不到綠字」外顯一樣。
+                               #   `make test`（-v）與裸 `.venv/bin/pytest tests/` 都會印。
 ygo-sniper daily               # 掃描＋推播（launchd 排程跑這個）
 ygo-sniper scan --dry-run      # 只掃不寫庫
 ygo-sniper serve               # dashboard → http://127.0.0.1:8321
