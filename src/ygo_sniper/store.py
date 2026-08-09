@@ -211,6 +211,95 @@ CREATE TABLE IF NOT EXISTS seller_watch (
 );
 CREATE INDEX IF NOT EXISTS idx_seller_watch_batch ON seller_watch(active, batch);
 
+-- 指定卡狙擊（政策層只有 card_snipe.py 一份；這裡只有 CRUD）。
+-- grade 存 float（與 parse_grade 同基準：ARS 10+ 折成 10.0）；grade_label 存
+-- 使用者輸入原樣（'10'／'10+'），顯示與 census 查表用——兩欄職責不同，不互相推導。
+CREATE TABLE IF NOT EXISTS card_watch (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    grader        TEXT NOT NULL,
+    grade         REAL NOT NULL,
+    grade_label   TEXT NOT NULL,
+    name_ja       TEXT NOT NULL,
+    name_en       TEXT DEFAULT '',
+    aliases       TEXT DEFAULT '[]',
+    code_raw      TEXT DEFAULT '',
+    code_norm     TEXT DEFAULT '',
+    census_url    TEXT DEFAULT '',
+    census_json   TEXT DEFAULT '',
+    census_total  INTEGER,
+    census_fetched_at TEXT,
+    note          TEXT DEFAULT '',
+    active        INTEGER DEFAULT 1,
+    added_at      TEXT,
+    removed_at    TEXT
+);
+
+-- 狙擊命中帳：每 (watch, listing) 一列，重掃只更新 last_seen（冪等）。
+-- tier 存最新判定（標題被賣家改掉時允許升降級）。
+CREATE TABLE IF NOT EXISTS card_watch_hit (
+    watch_id      INTEGER NOT NULL,
+    listing_key   TEXT NOT NULL,
+    tier          TEXT NOT NULL,
+    title         TEXT DEFAULT '',
+    url           TEXT DEFAULT '',
+    site          TEXT DEFAULT '',
+    seller_id     TEXT DEFAULT '',
+    price_native  REAL,
+    currency      TEXT DEFAULT '',
+    end_time      TEXT DEFAULT '',
+    first_seen    TEXT,
+    last_seen     TEXT,
+    PRIMARY KEY (watch_id, listing_key)
+);
+CREATE INDEX IF NOT EXISTS idx_card_watch_hit_tier ON card_watch_hit(watch_id, tier);
+
+-- 市場成交檔案（從 Yahoo 落札相場挖回來的「別人賣掉了」）。
+-- ⚠️ 與 card_watch_hit 是**兩本帳，永遠不合併**：這裡是「已成交」（買不到了，
+--    是行情），hit 是「在架中」（買得到，是機會）。分母與用途都不同。
+-- ⚠️ sale_kind 必須逐筆存：フリマ 定價成交的 bidCount 也是 1（佔位值），
+--    競標結標價（買家喊上去）與定價成交（賣家開的）不是同一把尺（CLAUDE.md 第三節第七項）。
+-- ⚠️ 這張表是市場檔案的**永久記憶體**：Yahoo 只保留約 150-180 天，挖到就留著。
+CREATE TABLE IF NOT EXISTS card_watch_sale (
+    watch_id      INTEGER NOT NULL,
+    sale_key      TEXT NOT NULL,        -- '{site}:{external_id}'
+    tier          TEXT NOT NULL,
+    title         TEXT DEFAULT '',
+    url           TEXT DEFAULT '',
+    origin_url    TEXT DEFAULT '',
+    site          TEXT DEFAULT '',
+    seller_id     TEXT DEFAULT '',
+    price_native  REAL,
+    currency      TEXT DEFAULT 'JPY',
+    sold_at       TEXT DEFAULT '',      -- 真實落札時刻（UTC ISO），不是入庫時間
+    bid_count     INTEGER,
+    sale_kind     TEXT DEFAULT 'unknown',  -- auction / fixed / unknown
+    source        TEXT DEFAULT '',      -- 哪條管道挖到的
+    first_mined_at TEXT,
+    last_mined_at  TEXT,
+    PRIMARY KEY (watch_id, sale_key)
+);
+CREATE INDEX IF NOT EXISTS idx_card_watch_sale_sold ON card_watch_sale(watch_id, sold_at);
+
+-- 使用者提供的歷史證據（結標頁快照）。抓不到也入列（status='unverifiable'）
+-- 並大聲標記——讀不到 ≠ 不存在（CLAUDE.md 第五節）。
+CREATE TABLE IF NOT EXISTS card_watch_evidence (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    watch_id      INTEGER NOT NULL,
+    url           TEXT NOT NULL,
+    status        TEXT DEFAULT '',
+    title         TEXT DEFAULT '',
+    price_native  REAL,
+    currency      TEXT DEFAULT 'JPY',
+    sold_at       TEXT DEFAULT '',
+    bids          INTEGER,
+    seller_id     TEXT DEFAULT '',
+    seller_name   TEXT DEFAULT '',
+    site          TEXT DEFAULT 'buyee_yahoo',
+    note          TEXT DEFAULT '',
+    fetched_at    TEXT,
+    UNIQUE (watch_id, url)
+);
+
 -- 來源健康告警的去重帳本（PLAN Q5）。fingerprint = "{source}:{kind}"。
 -- 觀測帳（occurrences / first_seen / last_seen）由 scan 落；
 -- 通知帳（notify_count / last_notified_at，冷卻的依據）只在真的送出成功後才落。
@@ -1403,6 +1492,242 @@ class Store:
                 "WHERE seller_key = ?",
                 (now or _now_iso(), result or "", seller_key),
             )
+
+    # ------------------------------------------------------------------
+    # 指定卡狙擊（card_watch）。**這一層只做 CRUD**：tier 判準、通知政策、
+    # dossier 組裝全部在 `card_snipe.py`——與 seller_watch 同一個立場。
+    def insert_card_watch(
+        self, *, grader: str, grade: float, grade_label: str, name_ja: str,
+        name_en: str = "", aliases: list[str] | None = None,
+        code_raw: str = "", code_norm: str = "", note: str = "",
+        now: str | None = None,
+    ) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                """INSERT INTO card_watch
+                   (grader, grade, grade_label, name_ja, name_en, aliases,
+                    code_raw, code_norm, note, active, added_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                (grader, float(grade), grade_label, name_ja, name_en,
+                 json.dumps(aliases or [], ensure_ascii=False),
+                 code_raw, code_norm, note, now or _now_iso()),
+            )
+            return int(cur.lastrowid)
+
+    def list_card_watch(self, *, active_only: bool = True) -> list[dict[str, Any]]:
+        q = "SELECT * FROM card_watch"
+        if active_only:
+            q += " WHERE active = 1"
+        q += " ORDER BY id"
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(q).fetchall()]
+
+    def get_card_watch(self, watch_id: int) -> dict[str, Any] | None:
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT * FROM card_watch WHERE id = ?", (int(watch_id),)
+            ).fetchone()
+        return dict(r) if r else None
+
+    def deactivate_card_watch(self, watch_id: int, *, now: str | None = None) -> bool:
+        """軟刪除（命中帳與證據留著——「當時為什麼登錄它」是之後的判斷依據）。"""
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE card_watch SET active = 0, removed_at = ? "
+                "WHERE id = ? AND active = 1",
+                (now or _now_iso(), int(watch_id)),
+            )
+            return cur.rowcount > 0
+
+    def update_card_watch_census(
+        self, watch_id: int, *, census_url: str, census_json: str,
+        census_total: int | None = None, now: str | None = None,
+    ) -> None:
+        with self._conn() as c:
+            c.execute(
+                """UPDATE card_watch SET census_url = ?, census_json = ?,
+                   census_total = ?, census_fetched_at = ? WHERE id = ?""",
+                (census_url, census_json, census_total,
+                 now or _now_iso(), int(watch_id)),
+            )
+
+    def upsert_card_watch_hit(
+        self, watch_id: int, listing_key: str, *, tier: str, title: str, url: str,
+        site: str, seller_id: str, price_native: float | None, currency: str,
+        end_time: str = "", now: str | None = None,
+    ) -> None:
+        stamp = now or _now_iso()
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO card_watch_hit
+                   (watch_id, listing_key, tier, title, url, site, seller_id,
+                    price_native, currency, end_time, first_seen, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(watch_id, listing_key) DO UPDATE SET
+                     tier = excluded.tier,
+                     title = excluded.title,
+                     url = excluded.url,
+                     price_native = excluded.price_native,
+                     currency = excluded.currency,
+                     end_time = excluded.end_time,
+                     last_seen = excluded.last_seen,
+                     -- seller_id 只補不抹：搜尋頁解析器抓不到賣家（sources/buyee.py
+                     -- :315），只有賣家頁列舉補得上。無條件覆寫會讓例行掃描把挖回來
+                     -- 的賣家抹成空字串——listing_obs 踩過這個坑（CLAUDE.md 第五節）。
+                     seller_id = CASE WHEN excluded.seller_id != ''
+                                      THEN excluded.seller_id
+                                      ELSE card_watch_hit.seller_id END""",
+                (int(watch_id), listing_key, tier, title, url, site, seller_id,
+                 price_native, currency, end_time, stamp, stamp),
+            )
+
+    def list_card_watch_hits(
+        self, *, watch_id: int | None = None,
+        tiers: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        """附 `sent_at`（notify_log 的 card_snipe 帳；沒送過為 NULL）。
+        去重帳只有 notify_log 一本——hit 表不自己記 notified，兩本帳必歧。"""
+        q = (
+            "SELECT h.*, n.sent_at FROM card_watch_hit h "
+            "LEFT JOIN notify_log n ON n.rule = 'card_snipe' "
+            "AND n.key = CAST(h.watch_id AS TEXT) || ':' || h.listing_key "
+            "WHERE 1=1"
+        )
+        params: list[Any] = []
+        if watch_id is not None:
+            q += " AND h.watch_id = ?"
+            params.append(int(watch_id))
+        if tiers:
+            q += f" AND h.tier IN ({','.join('?' * len(tiers))})"
+            params.extend(tiers)
+        q += " ORDER BY h.last_seen DESC"
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(q, params).fetchall()]
+
+    def prune_card_watch_near_hits(self, days: int) -> int:
+        """near tier 會被現代重印與未鑑定貨洗出大量列，回收舊列；
+        exact／partial 永久保留（那是這張卡的出現史）。"""
+        if days <= 0:
+            return 0
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._conn() as c:
+            cur = c.execute(
+                "DELETE FROM card_watch_hit WHERE tier = 'near' AND last_seen < ?",
+                (cutoff,),
+            )
+            return cur.rowcount
+
+    def upsert_card_watch_sale(
+        self, watch_id: int, sale_key: str, *, tier: str, title: str, url: str,
+        site: str, seller_id: str, price_native: float | None, currency: str,
+        sold_at: str, bid_count: int | None, sale_kind: str,
+        origin_url: str = "", source: str = "", now: str | None = None,
+    ) -> bool:
+        """市場成交一筆（冪等）。回傳 True ＝ 這次是**新**紀錄（之前沒挖到過）。
+
+        `sold_at`／`price_native` 用 excluded 覆寫（重挖到同一筆時以最新解析為準），
+        但 `first_mined_at` 保留——「我們什麼時候第一次知道這筆」是檔案完整度的證據。
+        `seller_id` 只補不抹（同 hit 表的立場）。
+        """
+        stamp = now or _now_iso()
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO card_watch_sale
+                   (watch_id, sale_key, tier, title, url, origin_url, site,
+                    seller_id, price_native, currency, sold_at, bid_count,
+                    sale_kind, source, first_mined_at, last_mined_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(watch_id, sale_key) DO UPDATE SET
+                     tier = excluded.tier,
+                     title = excluded.title,
+                     url = excluded.url,
+                     origin_url = excluded.origin_url,
+                     price_native = excluded.price_native,
+                     currency = excluded.currency,
+                     sold_at = excluded.sold_at,
+                     bid_count = excluded.bid_count,
+                     sale_kind = excluded.sale_kind,
+                     source = excluded.source,
+                     last_mined_at = excluded.last_mined_at,
+                     seller_id = CASE WHEN excluded.seller_id != ''
+                                      THEN excluded.seller_id
+                                      ELSE card_watch_sale.seller_id END""",
+                (int(watch_id), sale_key, tier, title, url, origin_url, site,
+                 seller_id, price_native, currency, sold_at, bid_count,
+                 sale_kind, source, stamp, stamp),
+            )
+            # rowcount 在 upsert 的 UPDATE 分支也是 1，所以用 first_mined_at 判新舊
+            row = c.execute(
+                "SELECT first_mined_at FROM card_watch_sale "
+                "WHERE watch_id = ? AND sale_key = ?",
+                (int(watch_id), sale_key),
+            ).fetchone()
+        return bool(row) and row["first_mined_at"] == stamp
+
+    def list_card_watch_sales(
+        self, watch_id: int, *, tiers: tuple[str, ...] | None = None
+    ) -> list[dict[str, Any]]:
+        q = "SELECT * FROM card_watch_sale WHERE watch_id = ?"
+        params: list[Any] = [int(watch_id)]
+        if tiers:
+            q += f" AND tier IN ({','.join('?' * len(tiers))})"
+            params.extend(tiers)
+        q += " ORDER BY sold_at DESC"
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(q, params).fetchall()]
+
+    def upsert_card_watch_evidence(
+        self, watch_id: int, url: str, *, status: str, title: str = "",
+        price_native: float | None = None, currency: str = "JPY",
+        sold_at: str = "", bids: int | None = None, seller_id: str = "",
+        seller_name: str = "", site: str = "buyee_yahoo", note: str = "",
+        now: str | None = None,
+    ) -> None:
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO card_watch_evidence
+                   (watch_id, url, status, title, price_native, currency, sold_at,
+                    bids, seller_id, seller_name, site, note, fetched_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(watch_id, url) DO UPDATE SET
+                     status = excluded.status, title = excluded.title,
+                     price_native = excluded.price_native,
+                     currency = excluded.currency,
+                     sold_at = excluded.sold_at, bids = excluded.bids,
+                     seller_id = excluded.seller_id,
+                     seller_name = excluded.seller_name,
+                     site = excluded.site, note = excluded.note,
+                     fetched_at = excluded.fetched_at""",
+                (int(watch_id), url, status, title, price_native, currency,
+                 sold_at, bids, seller_id, seller_name, site, note,
+                 now or _now_iso()),
+            )
+
+    def list_card_watch_evidence(self, watch_id: int) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT * FROM card_watch_evidence WHERE watch_id = ? "
+                "ORDER BY sold_at",
+                (int(watch_id),),
+            ).fetchall()]
+
+    # 狙擊檔案（dossier）重建歷史用的標題掃描。欄位挑過、不整列撈；
+    # card_name／set_code 欄位不可信（實測相關列全空），一律現場重比對標題。
+    def comps_title_rows(self) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                """SELECT title, price_native, currency, price_twd, sold_at,
+                          sold_at_is_ingest, site, seller_id, sale_kind, url
+                   FROM comps WHERE dup_of_id IS NULL"""
+            ).fetchall()]
+
+    def listing_obs_title_rows(self) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                """SELECT key, title, price_native, currency, site, seller_id,
+                          url, first_seen, last_seen, disappeared_at
+                   FROM listing_obs"""
+            ).fetchall()]
 
     def set_listing_obs_seller(self, key: str, seller_id: str) -> bool:
         """把單一觀測列的 `seller_id` 補上（商品頁挖回來的賣家走這條）。
