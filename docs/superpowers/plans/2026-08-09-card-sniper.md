@@ -160,6 +160,13 @@ git commit -m "test(snipe): 狙擊功能的三個 fixture（ARS census／搜尋�
 
 ### Task 1: store 四張新表＋CRUD
 
+> **執行期修訂（2026-08-09，審查後）**：Task 1 完成後由獨立 reviewer 找出五個正確性問題，已修正。**實際落地的 API 與下面的程式碼區塊有五處差異**，後面的 task 一律以實際程式碼為準：
+> 1. `prune_card_watch_near_hits(days)` → **`prune_card_watch_hits(days, *, tier)`**（tier 必填，保留政策不進 SQL）
+> 2. `update_card_watch_census(...)` 現在**回傳 `bool`**（False ＝ 那個 watch 不存在，不再靜默無作用）
+> 3. `upsert_card_watch_sale` 的「是不是新紀錄」改成**先查存在性**，不再比較 `first_mined_at == stamp`（呼叫端傳固定 `now=` 時會高報新成交）
+> 4. 新增模組級常數 **`store.CARD_SNIPE_RULE`**，`list_card_watch_hits` 用參數綁定帶入，SQL 裡不留 rule 字面量；一致性由 Task 6 的 `test_store_and_notify_rules_agree_on_the_rule_name` 強制
+> 5. `card_watch_evidence.sold_at` 補上時間基準宣告（**一律存 UTC**，與 `card_watch_sale.sold_at` 同基準）——Task 5 寫入時要 `to_utc_iso()`
+
 **Files:**
 - Modify: `src/ygo_sniper/store.py`（`_SCHEMA` 內 `seller_watch` 區塊之後；CRUD 加在 seller_watch CRUD 之後，約 :1408 附近）
 - Test: `tests/test_card_snipe.py`（新檔，先放 store 測試）
@@ -2003,6 +2010,7 @@ def add_card_watch(
     失敗）是 semantic 失敗：拋 ValueError，不入庫。
     """
     from .sources.base import FetchError
+    from .sources.yahoo_closed import to_utc_iso
     from .yahoo_auction_page import AuctionPageError, fetch_auction_snapshot
 
     msgs: list[str] = []
@@ -2076,7 +2084,10 @@ def add_card_watch(
         store.upsert_card_watch_evidence(
             watch_id, ev_url, status="ok", title=snap.title,
             price_native=snap.price, currency=snap.currency,
-            sold_at=snap.end_time, bids=snap.bids,
+            # ⚠️ 一律轉 UTC 再存：`card_watch_sale.sold_at` 是 UTC，兩張表存的是
+            # 同一類事實（什麼時候賣掉的），混時區會讓 ORDER BY 的字典序排錯
+            # （CLAUDE.md 第三節：同源同基準）。頁面原文是 `+09:00`。
+            sold_at=to_utc_iso(snap.end_time) or snap.end_time, bids=snap.bids,
             seller_id=snap.seller_id, seller_name=snap.seller_name,
         )
         price_s = f"¥{snap.price:,.0f}" if snap.price is not None else "價格不明"
@@ -2668,6 +2679,19 @@ def test_rule4_appears_in_the_cli_counts(store, cfg, capsys):
     assert "🎯 1" in printed
 
 
+def test_store_and_notify_rules_agree_on_the_rule_name():
+    """`store.CARD_SNIPE_RULE` 與 `notify_rules.RULE_CARD_SNIPE` 必須是同一個值。
+
+    兩份定義漂移的話，`list_card_watch_hits` 的 `sent_at` 會恆為 NULL
+    → 每輪都判定「這筆沒送過」而重複推播，而且**壞掉的樣子與「真的還沒送過」
+    完全一樣**（CLAUDE.md 第五節）。這條測試就是那個結構性守門員——
+    不能改成註解或提醒（CLAUDE.md 的 meta-rule：別用更多流程補流程漏洞）。
+    """
+    from ygo_sniper.store import CARD_SNIPE_RULE
+
+    assert CARD_SNIPE_RULE == RULE_CARD_SNIPE
+
+
 def test_preview_table_renders_a_snipe_hit_without_crashing(store, cfg, capsys):
     """規則 4 的 Match 沒有 p_worth——preview 的 else 分支會 TypeError。
     命中 0 筆時這個迴圈根本不執行，所以只有這條測試擋得住它。"""
@@ -2699,7 +2723,7 @@ def test_preview_table_renders_a_snipe_hit_without_crashing(store, cfg, capsys):
 .venv/bin/ygo-sniper notify-preview 2>&1 | grep -c "指定卡狙擊"   # 預期 >= 1
 ```
 
-預期：新測試 `8 passed`（含 Step 4b 的計數表與 preview 不炸兩條）；既有 notify 相關測試全綠（`evaluate` 新參數有預設值、`Outcome` 新欄位預設空、cap 語意對既有規則不變）。
+預期：新測試 `9 passed`（含 Step 4b 的計數表、rule 名一致性、preview 不炸三條）；既有 notify 相關測試全綠（`evaluate` 新參數有預設值、`Outcome` 新欄位預設空、cap 語意對既有規則不變）。
 
 - [ ] **Step 6: Commit**
 
@@ -2850,9 +2874,10 @@ class TestPipelineHook:
 入庫段（:860 附近）`obs_pruned = self.store.prune_listing_obs(…)` 之後加：
 
 ```python
-            from .card_snipe import NEAR_HIT_RETAIN_DAYS
+            from .card_snipe import NEAR_HIT_RETAIN_DAYS, TIER_NEAR
 
-            self.store.prune_card_watch_near_hits(NEAR_HIT_RETAIN_DAYS)
+            # tier 是必填關鍵字參數：保留政策屬於 card_snipe，store 只做 CRUD
+            self.store.prune_card_watch_hits(NEAR_HIT_RETAIN_DAYS, tier=TIER_NEAR)
 ```
 
 (e) `notification_outcome`（:958）：`evaluate(...)` 呼叫加一個參數（`seller_ctx=…` 之後）：
