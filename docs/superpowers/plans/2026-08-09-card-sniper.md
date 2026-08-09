@@ -672,6 +672,21 @@ git commit -m "feat(snipe): card_watch 四張表與 CRUD（成交檔案與在架
 
 ### Task 2: 比對核心 `card_snipe.py`（tier 判定＋掃描掛鉤函式＋狙擊查詢）
 
+> **執行期修訂（2026-08-09，審查後）——新增一條機構競合分支，理由是實測到的誤殺**：
+>
+> `classify` 原本在 `parse_grade` 回的機構與目標不符時直接回 `near`（不推播）。用 repo 真實語料實測發現這會**靜默漏掉 7.9% 的目標卡**：3,239 個真實標題裡，998 筆含 `ARS＋分數` token，其中 **79 筆被 `parse_grade` 判成 PSA**——因為日本賣家慣用「ARS 鑑定品，相當於 PSA10 **以上**」的宣稱寫法，而 PSA 的 pattern 在 `_GRADE_PATTERNS` 裡排在 ARS 前面，`以上` 又不在 `parsers/grade.py` 的 `_CLAIM_SUFFIX`（只有 `相当|相當|並み|並|級|クラス|レベル`）。實例：
+> ```
+> ARS9 マジシャン・オブ・ブラックカオス 初期 ウルトラレア UR 遊戯王 極美品　PSA9以上相当
+> 【ARS7】ブラックマジシャン　初期ウルトラレア　vol.1 PSA7以上
+> ```
+> **修法**：機構不符時，先看標題自己有沒有寫目標機構的 token（`(?<![A-Za-z0-9])ARS\s*(?:鑑定)?\s*(?:10\+*|[0-9](?:\.5)?)(?!\d)`，用 lookaround 不用 `\b`），有就回 `partial`（👀 照樣推播＋理由說明競合），沒有才回 `near`。
+> **不升到 `exact`**：分數的權威只有 `parse_grade` 一份，這裡不另立第二把尺（CLAUDE.md 第三節）。
+> **刻意不改 `parsers/grade.py`**：那是全域過濾規則，改動需要跑全語料雙向驗證，且會改變主管線對那 79 筆的既有判定——超出本功能範圍。這裡只讓**狙擊**更寬容。
+>
+> 同批修正還有：docstring 的判定順序改成與實作一致（註解描述意圖、code 才是行為）；`aliases` 接受 str 與 list 兩種形態且解析失敗要出聲（原本靜默吞掉＝別名整組消失）；`_MODERN_FOLDED` 過濾空字串（空字串 `in` 任何字串恆真＝所有 exact 靜默降級）；`from_row` 對 grader 做 `.strip().upper()`；刪掉一條零覆蓋的重複測試（兩個「真實成交標題」逐位元組相同，同賣家重複刊登）。
+>
+> ⚠️ **順帶發現一個既有問題（不在本計劃範圍，未修）**：同樣那 79 筆在**主管線**也會被貼上 PSA 標籤，於是拿去跟 PSA 的 comps 比價——ARS 與 PSA 的價格水準不同，這是一次混源比較（CLAUDE.md 第三節）。修它要走第一節的全語料雙向驗證協定，應該獨立成案。
+
 **Files:**
 - Create: `src/ygo_sniper/card_snipe.py`
 - Test: `tests/test_card_snipe.py`（追加）
