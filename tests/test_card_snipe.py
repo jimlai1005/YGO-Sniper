@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from ygo_sniper.store import Store
+from ygo_sniper import store as store_mod
+from ygo_sniper.store import CARD_SNIPE_RULE, Store
 
 
 @pytest.fixture
@@ -49,6 +50,14 @@ class TestCardWatchStore:
         assert json.loads(w["census_json"])["10+"] == 1
         assert w["census_total"] == 11 and w["census_fetched_at"]
 
+    def test_census_update_reports_missing_watch(self, store):
+        """存到不存在的列必須說出來——靜默無作用與「存好了」外顯相同。"""
+        wid = store.insert_card_watch(**WATCH_KW)
+        assert store.update_card_watch_census(
+            wid, census_url="u", census_json="{}", census_total=1) is True
+        assert store.update_card_watch_census(
+            wid + 999, census_url="u", census_json="{}", census_total=1) is False
+
     def test_hit_upsert_is_idempotent_and_updates_last_seen(self, store):
         wid = store.insert_card_watch(**WATCH_KW)
         kw = dict(tier="exact", title="t", url="u", site="buyee_yahoo",
@@ -70,6 +79,34 @@ class TestCardWatchStore:
         hits = store.list_card_watch_hits(watch_id=wid)
         assert hits[0]["sent_at"] is not None
 
+    def test_sent_at_join_uses_the_named_rule_constant(self, store):
+        """join 的 rule 名不是 SQL 裡的字面量——漂移時 `sent_at` 會恆為 NULL，
+        而「每輪重複推播」與「這筆真的還沒送過」外顯一模一樣（CLAUDE.md 第五節）。"""
+        assert CARD_SNIPE_RULE == "card_snipe"
+        assert "'card_snipe'" not in store_mod._SCHEMA  # 政策名不埋進 schema
+        wid = store.insert_card_watch(**WATCH_KW)
+        store.upsert_card_watch_hit(wid, "k1", tier="exact", title="t", url="u",
+                                    site="s", seller_id="", price_native=None,
+                                    currency="")
+        store.mark_rule_notified([(f"{wid}:k1", CARD_SNIPE_RULE)])
+        assert store.list_card_watch_hits(watch_id=wid)[0]["sent_at"] is not None
+        # 別的 rule 落帳不得被誤認成狙擊已送
+        store.upsert_card_watch_hit(wid, "k2", tier="exact", title="t", url="u",
+                                    site="s", seller_id="", price_native=None,
+                                    currency="")
+        store.mark_rule_notified([(f"{wid}:k2", "seller_new")])
+        by_key = {h["listing_key"]: h for h in store.list_card_watch_hits(watch_id=wid)}
+        assert by_key["k2"]["sent_at"] is None
+
+    def test_both_sold_at_columns_declare_the_utc_basis(self):
+        """兩張表存的是同一類事實（什麼時候賣掉的），而 `ORDER BY` 是 TEXT
+        字典序——混入不同時區偏移就排錯（CLAUDE.md 第三節）。基準必須寫在欄位上。"""
+        for table in ("card_watch_sale", "card_watch_evidence"):
+            block = store_mod._SCHEMA.split(f"CREATE TABLE IF NOT EXISTS {table}")[1]
+            block = block.split(");")[0]
+            sold_at_line = next(ln for ln in block.splitlines() if "sold_at" in ln)
+            assert "UTC" in sold_at_line, f"{table}.sold_at 沒有宣告時間基準"
+
     def test_prune_only_touches_old_near(self, store):
         wid = store.insert_card_watch(**WATCH_KW)
         old = "2020-01-01T00:00:00+00:00"
@@ -77,7 +114,7 @@ class TestCardWatchStore:
             store.upsert_card_watch_hit(wid, key, tier=tier, title="t", url="u",
                                         site="a", seller_id="", price_native=None,
                                         currency="", now=now)
-        assert store.prune_card_watch_near_hits(90) == 1           # 只清舊的 near
+        assert store.prune_card_watch_hits(90, tier="near") == 1   # 只清舊的 near
         left = {h["listing_key"] for h in store.list_card_watch_hits(watch_id=wid)}
         assert left == {"a:2", "a:3"}
 
@@ -104,6 +141,17 @@ class TestCardWatchStore:
         sales = store.list_card_watch_sales(wid)
         assert len(sales) == 1 and sales[0]["bid_count"] == 15
         assert sales[0]["sale_kind"] == "auction"
+
+    def test_sale_new_flag_does_not_depend_on_the_timestamp(self, store):
+        """呼叫端常帶 run 級的固定 `now=`——用時間戳比較判新舊會兩次都說「新」，
+        直接高報新成交數。存在性才是判準（工程原則 1：判準要問到機制那一層）。"""
+        wid = store.insert_card_watch(**WATCH_KW)
+        kw = dict(tier="exact", title="t", url="u", site="buyee_yahoo",
+                  seller_id="S", price_native=1.0, currency="JPY",
+                  sold_at="2026-07-01T00:00:00+00:00", bid_count=1,
+                  sale_kind="auction", now="2026-08-09T00:00:00+00:00")
+        assert store.upsert_card_watch_sale(wid, "s:1", **kw) is True
+        assert store.upsert_card_watch_sale(wid, "s:1", **kw) is False
 
     def test_sale_seller_id_is_filled_never_wiped(self, store):
         wid = store.insert_card_watch(**WATCH_KW)

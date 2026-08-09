@@ -290,7 +290,10 @@ CREATE TABLE IF NOT EXISTS card_watch_evidence (
     title         TEXT DEFAULT '',
     price_native  REAL,
     currency      TEXT DEFAULT 'JPY',
-    sold_at       TEXT DEFAULT '',
+    -- ⚠️ 與 card_watch_sale.sold_at **同基準**：寫入端一律存 UTC ISO。兩張表存的是
+    --    同一類事實（什麼時候賣掉的），而排序是 TEXT 字典序——混入 +09:00 之類的
+    --    偏移就會排錯，而且錯得很安靜（CLAUDE.md 第三節：同源、同單位、同處計算）。
+    sold_at       TEXT DEFAULT '',      -- 真實落札時刻（UTC ISO），不是入庫時間
     bids          INTEGER,
     seller_id     TEXT DEFAULT '',
     seller_name   TEXT DEFAULT '',
@@ -493,6 +496,13 @@ _SQL_KEY_CHUNK = 500
 def _key_chunks(keys: list[str]) -> Iterator[list[str]]:
     for i in range(0, len(keys), _SQL_KEY_CHUNK):
         yield keys[i : i + _SQL_KEY_CHUNK]
+
+
+#: `notify_log.rule` 裡狙擊通知的名稱。**與 `notify_rules.RULE_CARD_SNIPE` 是同一個值**，
+#: 兩邊漂移會讓 `list_card_watch_hits` 的 `sent_at` 恆為 NULL（＝每輪重複推播，
+#: 且與「真的還沒送過」外顯相同）。一致性由 `tests/test_card_snipe_notify.py`
+#: 的 test_store_and_notify_rules_agree_on_the_rule_name 強制。
+CARD_SNIPE_RULE = "card_snipe"
 
 
 def _now_iso() -> str:
@@ -1542,14 +1552,17 @@ class Store:
     def update_card_watch_census(
         self, watch_id: int, *, census_url: str, census_json: str,
         census_total: int | None = None, now: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """回傳「有沒有真的寫到」（同 `deactivate_card_watch` 的形狀）。
+        False ＝ 那個 watch 不存在——「存好了」與「存到空氣」不可以長得一樣。"""
         with self._conn() as c:
-            c.execute(
+            cur = c.execute(
                 """UPDATE card_watch SET census_url = ?, census_json = ?,
                    census_total = ?, census_fetched_at = ? WHERE id = ?""",
                 (census_url, census_json, census_total,
                  now or _now_iso(), int(watch_id)),
             )
+            return cur.rowcount > 0
 
     def upsert_card_watch_hit(
         self, watch_id: int, listing_key: str, *, tier: str, title: str, url: str,
@@ -1586,14 +1599,18 @@ class Store:
         tiers: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         """附 `sent_at`（notify_log 的 card_snipe 帳；沒送過為 NULL）。
-        去重帳只有 notify_log 一本——hit 表不自己記 notified，兩本帳必歧。"""
+        去重帳只有 notify_log 一本——hit 表不自己記 notified，兩本帳必歧。
+
+        rule 名走 `CARD_SNIPE_RULE` 常數綁參數，不寫字面量：名稱漂移時這個 join
+        會安靜地永遠不匹配，`sent_at` 恆為 NULL ＝ 每輪重複推播。
+        """
         q = (
             "SELECT h.*, n.sent_at FROM card_watch_hit h "
-            "LEFT JOIN notify_log n ON n.rule = 'card_snipe' "
+            "LEFT JOIN notify_log n ON n.rule = ? "
             "AND n.key = CAST(h.watch_id AS TEXT) || ':' || h.listing_key "
             "WHERE 1=1"
         )
-        params: list[Any] = []
+        params: list[Any] = [CARD_SNIPE_RULE]
         if watch_id is not None:
             q += " AND h.watch_id = ?"
             params.append(int(watch_id))
@@ -1604,16 +1621,18 @@ class Store:
         with self._conn() as c:
             return [dict(r) for r in c.execute(q, params).fetchall()]
 
-    def prune_card_watch_near_hits(self, days: int) -> int:
-        """near tier 會被現代重印與未鑑定貨洗出大量列，回收舊列；
-        exact／partial 永久保留（那是這張卡的出現史）。"""
+    def prune_card_watch_hits(self, days: int, *, tier: str) -> int:
+        """回收某個 tier 的舊命中列。**要清哪個 tier 是政策，由呼叫端指定**
+        （`card_snipe.py`）——寫死在這裡的話 tier 改名時它會安靜地回 0，
+        與「沒有舊列可清」外顯相同。實務上只清 near（現代重印與未鑑定貨會把它
+        洗出大量列）；exact／partial 永久保留，那是這張卡的出現史。"""
         if days <= 0:
             return 0
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         with self._conn() as c:
             cur = c.execute(
-                "DELETE FROM card_watch_hit WHERE tier = 'near' AND last_seen < ?",
-                (cutoff,),
+                "DELETE FROM card_watch_hit WHERE tier = ? AND last_seen < ?",
+                (tier, cutoff),
             )
             return cur.rowcount
 
@@ -1628,9 +1647,17 @@ class Store:
         `sold_at`／`price_native` 用 excluded 覆寫（重挖到同一筆時以最新解析為準），
         但 `first_mined_at` 保留——「我們什麼時候第一次知道這筆」是檔案完整度的證據。
         `seller_id` 只補不抹（同 hit 表的立場）。
+
+        新舊判準是**寫入前的存在性**，不是 `first_mined_at == stamp`：呼叫端普遍
+        帶 run 級的固定 `now=`，時間戳比較會讓同一筆重挖兩次都回 True，直接高報
+        新成交數（工程原則 1：判準要問到機制那一層，不是問到欄位值為止）。
         """
         stamp = now or _now_iso()
         with self._conn() as c:
+            is_new = c.execute(
+                "SELECT 1 FROM card_watch_sale WHERE watch_id = ? AND sale_key = ?",
+                (int(watch_id), sale_key),
+            ).fetchone() is None
             c.execute(
                 """INSERT INTO card_watch_sale
                    (watch_id, sale_key, tier, title, url, origin_url, site,
@@ -1656,13 +1683,7 @@ class Store:
                  seller_id, price_native, currency, sold_at, bid_count,
                  sale_kind, source, stamp, stamp),
             )
-            # rowcount 在 upsert 的 UPDATE 分支也是 1，所以用 first_mined_at 判新舊
-            row = c.execute(
-                "SELECT first_mined_at FROM card_watch_sale "
-                "WHERE watch_id = ? AND sale_key = ?",
-                (int(watch_id), sale_key),
-            ).fetchone()
-        return bool(row) and row["first_mined_at"] == stamp
+        return is_new
 
     def list_card_watch_sales(
         self, watch_id: int, *, tiers: tuple[str, ...] | None = None
