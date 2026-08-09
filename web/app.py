@@ -912,12 +912,11 @@ def sellers(limit: int = 50):
     """
     rep = _shared_alpha_report()
     params = _watch_params()
-    from ygo_sniper.seller_watch import rotation_state
-
     from ygo_sniper.seller_watch import (
         SELLER_PAGE_SOURCE,
         SOURCE_PINNED,
         UNSUPPORTED_SITE_NOTE,
+        rotation_state,
     )
 
     watch_rows = store.list_seller_watch(active_only=False)
@@ -1113,6 +1112,114 @@ def pin_seller(body: PinRequest):
         "message": message, "batch": res.batch,
         "unsupported_note": note,
     }
+
+
+# ---------------------------------------------------------------------------
+# 指定卡狙擊（card snipe）。**這一層只搬資料**：tier 判準、登錄、挖掘、檔案
+# 組裝全部在 `ygo_sniper.card_snipe` —— CLI 的 `snipe` 群組與這幾條 route 共用
+# 同一支政策，兩邊才不會對同一張卡講兩種話。
+#
+# 路徑不與 `/api/sellers/{seller_key:path}`（catch-all）相撞：那條吃的是
+# `/api/sellers/…`，這裡整段前綴是 `/api/snipe`，第一段就分岔了。
+class SnipeAddRequest(BaseModel):
+    name_ja: str
+    grader: str
+    grade: str
+    name_en: str = ""
+    code: str = ""
+    census_url: str = ""
+    evidence_urls: list[str] = []
+    note: str = ""
+    #: 預設登錄當下就挖市場成交檔案（那是檔案的主要內容——我們自己的庫只有
+    #: 181 天且是碰巧掃到的）。測試傳 False 免網路。
+    mine: bool = True
+
+
+@app.get("/api/snipe")
+def snipe_list_api():
+    """狙擊清單＋命中統計（輕量；完整檔案在 `/api/snipe/{id}`）。
+
+    三個 tier 分開回，**不合成一個總數**：near（未鑑定／別家機構／現代重印）
+    是「記帳但不推播」的那一批，與 🎯／👀 的意義不同，加起來只會讓人以為
+    命中很多。
+    """
+    out = []
+    for w in store.list_card_watch(active_only=True):
+        hits = store.list_card_watch_hits(watch_id=int(w["id"]))
+        counts = {t: sum(1 for h in hits if h["tier"] == t)
+                  for t in ("exact", "partial", "near")}
+        out.append({**w, "hit_counts": counts,
+                    "recent_hits": [h for h in hits if h["tier"] != "near"][:10]})
+    return {"watches": out}
+
+
+@app.get("/api/snipe/{watch_id}")
+def snipe_detail(watch_id: int):
+    """完整檔案：census＋實證＋市場成交檔案＋本地歷史（現場重比對）＋命中帳。"""
+    from ygo_sniper.card_snipe import build_dossier
+
+    w = store.get_card_watch(watch_id)
+    if w is None:
+        raise HTTPException(404, f"沒有狙擊 #{watch_id}")
+    d = build_dossier(store, w)
+    return {
+        "watch": d.watch, "census": d.census, "census_total": d.census_total,
+        # 三個桶分開回，前端也分開畫——出處與分母都不同，不可相加
+        "sales": d.sales, "local_history": d.local_history,
+        "evidence": d.evidence, "hits": d.hits,
+        "recommendation": d.recommendation,
+    }
+
+
+@app.post("/api/snipe/{watch_id}/mine")
+def snipe_mine_api(watch_id: int):
+    """重挖市場成交檔案（會連網，數秒）。
+
+    挖不到要把問題**原文**回給前端顯示：「0 筆成交」與「被擋／連不上」外顯
+    一模一樣，只有這條 `problems` 分得出來（CLAUDE.md 第五節）。
+    """
+    from ygo_sniper.card_snipe import WatchMatcher, mine_sold_archive
+
+    w = store.get_card_watch(watch_id)
+    if w is None:
+        raise HTTPException(404, f"沒有狙擊 #{watch_id}")
+    with CachedFetcher(cfg) as fetcher:
+        res = mine_sold_archive(store, build_sources(cfg, fetcher),
+                                WatchMatcher.from_row(w))
+    return {"ok": res.ok, "summary": res.summary(), "new_sales": res.new_sales,
+            "total_sales": res.total_sales, "problems": res.problems}
+
+
+@app.post("/api/snipe")
+def snipe_add_api(body: SnipeAddRequest):
+    """與 CLI 的 `snipe add` 同一支政策（`card_snipe.add_card_watch`）——判準只有一份。
+
+    會連網抓 census 與證據頁（幾秒），與釘選解析店鋪頁同一種等待。輸入格式錯
+    （機構不認得、分數看不懂、卡號正規化失敗）是 semantic 失敗：400＋訊息原文，
+    不入庫、不重試。
+    """
+    from ygo_sniper.card_snipe import add_card_watch
+
+    try:
+        with CachedFetcher(cfg) as fetcher:
+            res = add_card_watch(
+                store, fetcher,
+                grader=body.grader, grade_input=body.grade, name_ja=body.name_ja,
+                name_en=body.name_en, code=body.code, census_url=body.census_url,
+                evidence_urls=body.evidence_urls, note=body.note,
+                sources=build_sources(cfg, fetcher) if body.mine else None,
+            )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "watch_id": res.watch_id, "messages": res.messages}
+
+
+@app.post("/api/snipe/{watch_id}/remove")
+def snipe_remove_api(watch_id: int):
+    """軟刪除（命中帳、成交檔案與證據都留著——那是之後判斷的依據）。"""
+    if not store.deactivate_card_watch(watch_id):
+        raise HTTPException(404, f"#{watch_id} 不在清單上")
+    return {"ok": True}
 
 
 @app.get("/api/scan/status")

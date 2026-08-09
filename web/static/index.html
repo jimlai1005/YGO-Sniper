@@ -389,6 +389,7 @@
     <!-- 賣家是**另一個視圖**（不是訊號的第九種狀態），所以用 data-view：
          同一個 .tab 樣式，但點下去換的是整個版面而不是清單的 state。 -->
     <button class="tab" data-view="sellers" title="Seller Alpha：誰持續比同儕便宜（同儕相對折價，不是模型公允價）">👤 賣家</button>
+    <button class="tab" data-view="snipe" title="指定卡狙擊：登錄特定卡（鑑定機構＋分數＋卡名＋卡號），出現就推播；比對走在所有過濾規則之前">🎯 狙擊</button>
   </div>
   <div class="row filterbar" id="filterbar" style="margin-top:8px">
     <span class="lbl">篩選</span>
@@ -588,6 +589,47 @@
   <div class="panel" id="sv-detail-panel" style="display:none">
     <h2 id="sv-detail-title">賣家細節</h2>
     <div id="sv-detail">載入中…</div>
+  </div>
+</div>
+
+<!-- ===================== 狙擊視圖（指定卡）=====================
+     ⚠️ 檔案裡的三個資料桶（市場成交檔案／實證紀錄／我們自己掃到的）**分開三張
+     表畫，永遠不合成一個數字**：市場檔案是「這個平台這段期間的全部成交」，
+     本地是「我們碰巧掃到的」，證據是「使用者手動指定的」——分母完全不同
+     （CLAUDE.md 第三節）。 -->
+<div id="snipe-view" style="display:none">
+  <div class="panel">
+    <h2>🎯 指定卡狙擊 — 等一根特定的針</h2>
+    <div class="hint" style="margin-bottom:8px">
+      登錄「鑑定機構＋分數＋卡名＋卡號」，比對走在所有過濾規則<b>之前</b>：
+      🎯 精確命中與 👀 同機構疑似會推 Telegram（每筆終身一次）；
+      near（未鑑定／別家機構／現代重印）只記帳在這裡，不推播——不推播不是丟棄，這頁看得到全部。
+    </div>
+    <form class="apr-form" onsubmit="snipeAdd(event)">
+      <input id="sn-name-ja" type="text" autocomplete="off" spellcheck="false"
+             placeholder="日文卡名（必填），如 魔法の筒">
+      <button type="submit" id="sn-add-btn">➕ 登錄狙擊</button>
+    </form>
+    <div class="row" style="gap:6px;margin-top:6px">
+      <input id="sn-grader" type="text" style="width:70px" placeholder="ARS">
+      <input id="sn-grade" type="text" style="width:60px" placeholder="10">
+      <input id="sn-code" type="text" style="width:100px" placeholder="P4-06">
+      <input id="sn-name-en" type="text" style="width:180px" placeholder="英文卡名（主檔有會自動補）">
+    </div>
+    <textarea id="sn-evidence" rows="2" style="width:100%;margin-top:6px;box-sizing:border-box"
+              placeholder="過去出現的商品頁 URL（一行一個）。登錄當下就抓快照存證——Yahoo 結標頁約 120 天會刪"></textarea>
+    <div class="hint">
+      ARS 的鑑定量（census）會用卡名自動搜；唯一定位不了會列候選讓你確認。
+      登錄會連網抓 census 與證據頁，<b>約需數秒</b>。
+    </div>
+  </div>
+  <div class="panel">
+    <h2>狙擊清單</h2>
+    <div class="scroll-x"><table id="sn-list"><tbody><tr><td>載入中…</td></tr></tbody></table></div>
+  </div>
+  <div class="panel" id="sn-detail-panel" style="display:none">
+    <h2 id="sn-detail-title">狙擊檔案</h2>
+    <div id="sn-detail">載入中…</div>
   </div>
 </div>
 </main>
@@ -2347,13 +2389,18 @@ async function loadVenueStudy(){
    2. caveat 用滿版黃條（.caveat），不是 tooltip。 */
 let svData = null;
 let svCurrent = null;
+let snipeData = null;   // 狙擊清單快取（setView 會讀，所以宣告在它之前）
 
+/* 三個視圖的切換。**未知的 view 一律退回 signals**（而不是把三個都藏起來）——
+   打錯一個字就整頁空白，那與「今天沒標的」外顯一模一樣。 */
 function setView(view){
-  const sellers = view === "sellers";
-  document.getElementById("signals-view").style.display = sellers ? "none" : "";
-  document.getElementById("seller-view").style.display  = sellers ? "" : "none";
-  document.getElementById("filterbar").style.display    = sellers ? "none" : "";
-  if(sellers && !svData) loadSellers();
+  const v = view === "sellers" ? "sellers" : (view === "snipe" ? "snipe" : "signals");
+  document.getElementById("signals-view").style.display = v === "signals" ? "" : "none";
+  document.getElementById("seller-view").style.display  = v === "sellers" ? "" : "none";
+  document.getElementById("snipe-view").style.display   = v === "snipe"   ? "" : "none";
+  document.getElementById("filterbar").style.display    = v === "signals" ? "" : "none";
+  if(v === "sellers" && !svData) loadSellers();
+  if(v === "snipe" && !snipeData) loadSnipe();
 }
 
 const svScore = r => r.ok
@@ -2382,6 +2429,186 @@ function sellerExtLink(url){
 
 function svCaveats(list){
   return (list || []).map(c => `<span class="caveat">${escapeHtml(c)}</span>`).join("");
+}
+
+/* ============================================================ 狙擊視圖
+
+   這一段**只顯示 card_snipe 已經下好的判定**：tier（exact／partial／near）、
+   等待建議、挖掘結果的問題原文，全部照抄後端字串。比對判準若在前端再寫一次，
+   CLI 的 `ygo-sniper snipe report` 與這一頁遲早會對同一張卡講兩種話。
+
+   ⚠️ 顯示規則三條紅線：
+   1. 三個資料桶（市場成交檔案／實證紀錄／我們自己掃到的）分開三張表，
+      **絕不合成一個數字**——分母不同（CLAUDE.md 第三節）。
+   2. 成交型態逐筆標明（競標結標價 vs 定價成交是兩種價格形成機制），
+      而且**不做任何跨筆平均**。
+   3. 外部字串一律走 escapeHtml——賣家標題是別人寫的，不可直接進渲染層。 */
+
+/* 沒有成交時刻時**要說出來**，不是留白。留白會被讀成「資料壞了」或被無視，
+   但那筆成交的價格其實是有效資訊——它只是答不出「何時」（Mercari／露天的
+   搜尋頁沒有落札時間）。這與後端 MineResult.undated_sales 是同一個立場。 */
+function snDate(v, len){
+  const s = String(v || "").slice(0, len || 10).replace("T", " ").trim();
+  return s ? escapeHtml(s)
+    : `<span class="noscore" title="來源沒給成交時刻——只知道賣過，不知何時">日期不明</span>`;
+}
+
+/* 價格：`0` 是合法價格、`null` 是「不知道」，兩者不可混。 */
+function snPrice(v, cur){
+  return v == null ? "—"
+    : escapeHtml(cur || "") + " " + Number(v).toLocaleString();
+}
+
+/* 連結：URL 為空就維持純文字。猜一個連結出來、點下去是 404，比沒有連結更糟。 */
+function snLink(url, text){
+  const t = escapeHtml(text || url || "—");
+  return url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${t}</a>` : t;
+}
+
+const SN_MARK = {exact: "🎯", partial: "👀"};
+const SN_KIND = {auction: "競標", fixed: "定價"};
+
+async function loadSnipe(){
+  let d;
+  try{ d = await api("/api/snipe"); }
+  catch(e){
+    document.getElementById("sn-list").innerHTML =
+      `<tr><td style="color:var(--danger)">載入失敗：${escapeHtml(e.message)}</td></tr>`;
+    return;
+  }
+  snipeData = d;
+  const rows = (d.watches || []).map(w => {
+    const c = w.hit_counts || {};
+    let census = "—";
+    try{
+      const j = JSON.parse(w.census_json || "");
+      const at = j[w.grade_label];
+      if(at != null) census = `全球 ${escapeHtml(String(at))} 張`;
+    }catch(e){}
+    return `<tr>
+      <td><a href="#" onclick="openSnipe(${w.id});return false">#${w.id} ${escapeHtml(w.grader)}${escapeHtml(w.grade_label)} ${escapeHtml(w.name_ja)}</a></td>
+      <td>${escapeHtml(w.code_raw || "—")}</td>
+      <td>${census}</td>
+      <td>🎯 ${c.exact||0}｜👀 ${c.partial||0}｜near ${c.near||0}</td>
+      <td>${snDate(w.added_at)}</td>
+      <td><button onclick="snipeRemove(${w.id})">移出</button></td>
+    </tr>`;
+  }).join("");
+  document.getElementById("sn-list").innerHTML =
+    rows || `<tr><td class="empty">清單是空的——用上面的表單登錄第一張。</td></tr>`;
+}
+
+async function snipeAdd(ev){
+  ev.preventDefault();
+  const btn = document.getElementById("sn-add-btn");
+  const body = {
+    name_ja: document.getElementById("sn-name-ja").value.trim(),
+    grader: (document.getElementById("sn-grader").value.trim() || "ARS").toUpperCase(),
+    grade: document.getElementById("sn-grade").value.trim() || "10",
+    code: document.getElementById("sn-code").value.trim(),
+    name_en: document.getElementById("sn-name-en").value.trim(),
+    evidence_urls: document.getElementById("sn-evidence").value
+      .split("\n").map(s => s.trim()).filter(Boolean),
+  };
+  if(!body.name_ja){ toast("日文卡名必填"); return; }
+  btn.disabled = true; btn.textContent = "登錄中…（抓 census 與證據頁）";
+  try{
+    const r = await api("/api/snipe", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    toast(`已登錄狙擊 #${r.watch_id}`, 3000);
+    snipeData = null; loadSnipe(); openSnipe(r.watch_id);
+  }catch(e){ toast(`登錄失敗：${e.message}`, 4200); }
+  finally{ btn.disabled = false; btn.textContent = "➕ 登錄狙擊"; }
+}
+
+async function snipeRemove(id){
+  try{ await api(`/api/snipe/${id}/remove`, {method: "POST"}); }
+  catch(e){ toast(`移出失敗：${e.message}`); return; }
+  toast(`已移出狙擊 #${id}（命中帳與證據留著）`);
+  snipeData = null; loadSnipe();
+  document.getElementById("sn-detail-panel").style.display = "none";
+}
+
+async function snipeMine(id){
+  const btn = document.getElementById("sn-mine-btn");
+  if(btn){ btn.disabled = true; btn.textContent = "挖掘中…"; }
+  try{
+    const r = await api(`/api/snipe/${id}/mine`, {method: "POST"});
+    // 挖不到要說出來——「0 筆」與「被擋」不能長一樣（CLAUDE.md 第五節）
+    toast(r.ok ? r.summary : `⚠️ ${r.summary}｜${(r.problems || []).join("；")}`,
+          r.ok ? 3200 : 6000);
+    openSnipe(id);
+    snipeData = null; loadSnipe();
+  }catch(e){ toast(`挖掘失敗：${e.message}`, 4200); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = "重新挖掘"; } }
+}
+
+async function openSnipe(id){
+  const panel = document.getElementById("sn-detail-panel");
+  panel.style.display = "";
+  document.getElementById("sn-detail").textContent = "載入中…";
+  let d;
+  try{ d = await api(`/api/snipe/${id}`); }
+  catch(e){
+    document.getElementById("sn-detail").textContent = `載入失敗：${e.message}`;
+    return;
+  }
+  const w = d.watch;
+  document.getElementById("sn-detail-title").textContent =
+    `狙擊檔案 #${w.id}：${w.grader}${w.grade_label} ${w.name_ja} ${w.code_raw || ""}`;
+  const census = d.census
+    ? Object.entries(d.census).filter(([k, v]) => v > 0)
+        .map(([k, v]) => `<span class="pill">${escapeHtml(k)}: <b>${escapeHtml(String(v))}</b> 張</span>`)
+        .join(" ") + `　（鑑定總數 ${escapeHtml(String(d.census_total ?? "?"))}）`
+    : `<span class="caveat">未抓到 census（CLI：ygo-sniper snipe report ${w.id} --refresh-census）</span>`;
+  const ev = (d.evidence || []).map(e => e.status === "ok"
+    ? `<tr><td>${snDate(e.sold_at)}</td>
+       <td>${snPrice(e.price_native, e.currency || "JPY")}</td>
+       <td>${e.bids != null ? escapeHtml(String(e.bids)) + " 出價" : "—"}</td>
+       <td>${escapeHtml(e.seller_name || e.seller_id || "—")}</td>
+       <td>${snLink(e.url, "頁面")}</td></tr>`
+    : `<tr><td colspan="5">⚠️ [${escapeHtml(e.status)}] ${escapeHtml(e.url)}（${escapeHtml(e.note || "")}）</td></tr>`
+  ).join("");
+  const sales = (d.sales || []).map(s => {
+    const mark = SN_MARK[s.tier] || "·";
+    const kind = SN_KIND[s.sale_kind] || "型態不明";
+    return `<tr><td>${mark}</td>
+     <td>${snDate(s.sold_at)}</td>
+     <td>${snPrice(s.price_native, s.currency)}</td>
+     <td>${kind}${s.sale_kind === "auction" && s.bid_count ? "／" + escapeHtml(String(s.bid_count)) + " 出價" : ""}</td>
+     <td>${escapeHtml(String(s.seller_id || "—").slice(0, 16))}</td>
+     <td style="white-space:normal">${snLink(s.url, s.title)}</td></tr>`;
+  }).join("");
+  const hist = (d.local_history || []).map(h =>
+    `<tr><td>[${escapeHtml(h.tier)}]</td>
+     <td>${snDate(h.sold_at || h.last_seen)}</td>
+     <td>${snPrice(h.price_native, h.currency)}</td>
+     <td>${escapeHtml(h.sale_kind || h.ledger || "")}</td>
+     <td style="white-space:normal">${escapeHtml(h.title || "")}</td></tr>`).join("");
+  const hits = (d.hits || []).map(h =>
+    `<tr><td>${SN_MARK[h.tier] || "·"}</td>
+     <td>${snDate(h.last_seen, 16)}</td>
+     <td>${snPrice(h.price_native, h.currency)}</td>
+     <td>${h.sent_at ? "已推播" : "未推播"}</td>
+     <td style="white-space:normal">${snLink(h.url, h.title)}</td></tr>`).join("");
+  const rec = (d.recommendation || []).map(l => `<li>${escapeHtml(l)}</li>`).join("");
+  document.getElementById("sn-detail").innerHTML = `
+    <div class="cmp">${census}</div>
+    <h2>💰 市場成交檔案 <button onclick="snipeMine(${w.id})" id="sn-mine-btn">重新挖掘</button></h2>
+    <div class="hint" style="margin-bottom:6px">
+      這是<b>平台自己的落札紀錄</b>，不是我們掃到的——一個請求就涵蓋約 150 天。
+      Yahoo 落札相場只保留 150-180 天，更早的平台已刪除，所以這裡看到的
+      <b>不是這張卡的全部歷史</b>。競標結標價與定價成交是兩種價格形成機制，欄位有標，不要平均。
+    </div>
+    <div class="scroll-x"><table><tbody>${sales || '<tr><td class="empty">還沒挖過，或檔案期間內沒有成交——按「重新挖掘」確認是哪一種</td></tr>'}</tbody></table></div>
+    <h2>實證紀錄（你指定的商品頁快照）</h2>
+    <div class="scroll-x"><table><tbody>${ev || '<tr><td class="empty">沒有</td></tr>'}</tbody></table></div>
+    <h2>我們自己掃到的</h2>
+    <div class="hint" style="margin-bottom:6px">補充桶：只有本地掃描期間、碰巧掃到的，與上面市場檔案<b>分母不同，不可相加</b>。</div>
+    <div class="scroll-x"><table><tbody>${hist || '<tr><td class="empty">comps 與 listing_obs 都沒有紀錄</td></tr>'}</tbody></table></div>
+    <h2>命中帳（near 只記帳不推播）</h2>
+    <div class="scroll-x"><table><tbody>${hits || '<tr><td class="empty">還沒有命中</td></tr>'}</tbody></table></div>
+    <h2>等待建議</h2><ul class="hint">${rec}</ul>`;
 }
 
 async function loadSellers(){
