@@ -5,6 +5,9 @@ description = "遊戲王 1998-2004 PSA/ARS 鑑定卡每日撿漏掃描器"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
+    # 直接 import（sources/base.py 拿它當根憑證庫的基底），所以直接宣告——
+    # 它目前也是 httpx 的間接依賴，但依賴別人的依賴會在對方換掉時安靜地壞掉
+    "certifi",
     "beautifulsoup4>=4.12",
     "pyyaml>=6.0",
     "typer>=0.12",

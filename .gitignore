@@ -1,5 +1,11 @@
 .env
-data/
+# data/ 整包不進版控（快取、DB、日誌），但 data/certs 是例外：
+# 那裡放的是「對方伺服器漏送、我們必須自備」的公開中間憑證，
+# 它是程式碼的一部分（缺了 census 就抓不到），不是本機產物。
+# 寫成 data/* + 反向規則是必要的——git 不會走進已被排除的目錄，
+# 所以 `data/` 加 `!data/certs/` 無效，必須讓 data/ 本身不被排除。
+data/*
+!data/certs/
 __pycache__/
 *.py[cod]
 .venv/

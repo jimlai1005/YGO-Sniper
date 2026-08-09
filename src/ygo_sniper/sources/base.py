@@ -7,14 +7,67 @@ Buyee 哪天改版壞掉，換掉 buyee.py 一個檔案就好。
 from __future__ import annotations
 
 import hashlib
+import ssl
 import time
 from pathlib import Path
 from typing import Protocol
 
+import certifi
 import httpx
 
 from ..config import Config
 from ..domain import Listing, Site
+
+#: 補充信任錨的落點（相對 `Config.root`）。內容見 `data/certs/README.md`。
+EXTRA_CA_DIR = "data/certs"
+
+
+def extra_ca_files(root: Path) -> list[Path]:
+    """`data/certs` 下所有 `.pem`（排序後，讓載入順序可重現）。
+
+    目錄不存在、或存在但沒有 PEM ⇒ 空 list ⇒ 呼叫端拿到的就是純 certifi。
+    這條降級路徑是刻意的：憑證檔是**補丁**不是**前提**，少了它應該只有
+    ars-grading 一個站台抓不到，不該讓整個掃描器起不來。
+    """
+    d = Path(root) / EXTRA_CA_DIR
+    if not d.is_dir():
+        return []
+    return sorted(p for p in d.glob("*.pem") if p.is_file())
+
+
+def build_ssl_context(root: Path) -> ssl.SSLContext:
+    """certifi 的根憑證 ＋ `data/certs` 下的補充中間憑證。
+
+    **為什麼需要這段（不要當成多餘的複雜度刪掉）**：`ars-grading.com`
+    ——鑑定量 census 的唯一來源——送出**不完整的憑證鏈**，它把自己的 leaf
+    送了兩次，中間憑證 `DigiCert Global G2 TLS RSA SHA256 2020 CA1` 一張都沒送
+    （2026-08-09 實測，`openssl s_client` 的 chain 0 與 1 都是 leaf）。
+    後果是同一個網址 `curl` 過得了（macOS 系統憑證庫有那張中間憑證）、
+    httpx 過不了（certifi 只含根憑證），錯誤是
+    `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`。
+
+    我們補的是「對方漏送的那一段」，**不是新增信任**：那張中間憑證由
+    `DigiCert Global Root G2` 簽發，而那個根 certifi 本來就信任
+    （驗證方式見 `data/certs/README.md`）。驗證流程完全沒有被放寬——
+    這裡沒有、也永遠不准出現 `verify=False`。
+
+    也刻意不用 `SSL_CERT_FILE` 環境變數：那是**機器**設定，換一台機器
+    （或 launchd 排程的環境）就靜默失效，而失效的樣子跟「census 今天沒資料」
+    一模一樣——正是本專案第五節在防的那類靜默失敗。
+    """
+    ctx = ssl.create_default_context(cafile=certifi.where())
+    for pem in extra_ca_files(root):
+        try:
+            ctx.load_verify_locations(cafile=str(pem))
+        except (ssl.SSLError, OSError) as exc:
+            # 讀不進去就大聲死在這裡，不要「跳過這一張繼續跑」——跳過的下場是
+            # census 又變空的，而錯誤訊息會出現在幾層之外的 SSL 握手裡，
+            # 沒有人會聯想到是這個檔案壞了。檔案是版控裡的常數，壞了就是壞了。
+            raise RuntimeError(
+                f"無法載入額外憑證 {pem}：{type(exc).__name__}: {exc}"
+                "（檔案是不是被截斷或不是 PEM？見 data/certs/README.md）"
+            ) from exc
+    return ctx
 
 
 class Source(Protocol):
@@ -82,6 +135,9 @@ class CachedFetcher:
         self.backoff_seconds = float(cfg.fetch.get("backoff_seconds", 2.0))
         self._last_call = 0.0
         self._client = httpx.Client(
+            # certifi ＋ data/certs 的補充中間憑證（見 build_ssl_context 的說明）。
+            # 沒有 data/certs 時這等價於 httpx 的預設行為。
+            verify=build_ssl_context(cfg.root),
             timeout=float(cfg.fetch["timeout_seconds"]),
             follow_redirects=True,
             headers={
