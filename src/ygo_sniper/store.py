@@ -247,6 +247,10 @@ CREATE TABLE IF NOT EXISTS card_watch_hit (
     price_native  REAL,
     currency      TEXT DEFAULT '',
     end_time      TEXT DEFAULT '',
+    -- 通知附圖（notify.photo_url_of 讀 row["image_url"]）。舊 db 由
+    -- _migrate_card_watch_hit 補上——這張表在正式庫已經建起來了，
+    -- CREATE TABLE IF NOT EXISTS 補不了新欄位。
+    image_url     TEXT DEFAULT '',
     first_seen    TEXT,
     last_seen     TEXT,
     PRIMARY KEY (watch_id, listing_key)
@@ -458,6 +462,16 @@ _SIGNALS_MIGRATE_COLUMNS: dict[str, str] = {
 }
 
 
+#: 狙擊命中帳的附圖欄位（2026-08-09）。這張表在正式庫**已經存在**（notify-preview
+#: 跑過一次就會 executescript(_SCHEMA)），所以 `CREATE TABLE IF NOT EXISTS` 補不上
+#: 新欄位——沒有這條 migration 的話狙擊通知永遠是純文字，而「這筆沒圖」與
+#: 「整個欄位不存在」外顯一模一樣。同 `_SIGNALS_MIGRATE_COLUMNS`：PRAGMA 看過再
+#: ADD COLUMN，O(1)、不重寫既有列、重跑安全（排程每 30 分鐘開一次庫）。
+_CARD_WATCH_HIT_MIGRATE_COLUMNS: dict[str, str] = {
+    "image_url": "TEXT DEFAULT ''",
+}
+
+
 #: 既有資料的 `sold_at_is_ingest` 回填規則。**確定性的，不是猜的。**
 #:
 #: 入庫時間是 `datetime.now(UTC).isoformat()` 寫進去的 → 一律帶微秒
@@ -535,6 +549,7 @@ class Store:
             self._migrate_comps(c)
             self._migrate_listing_obs(c)
             self._migrate_signals(c)
+            self._migrate_card_watch_hit(c)
 
     @staticmethod
     def _migrate_comps(c: sqlite3.Connection) -> None:
@@ -573,6 +588,19 @@ class Store:
         c.execute("UPDATE signals SET restored_count = 0 WHERE restored_count IS NULL")
         # 同 idx_comps_attrs：索引要等欄位存在，不能進 _SCHEMA
         c.execute("CREATE INDEX IF NOT EXISTS idx_signals_bucket ON signals(bucket)")
+
+    @staticmethod
+    def _migrate_card_watch_hit(c: sqlite3.Connection) -> None:
+        """把舊 db 的 card_watch_hit 補上 image_url。既有列原封不動；重跑安全。
+
+        `DEFAULT ''` 寫在型別字串裡，SQLite 的 ADD COLUMN 會用它回填既有列——
+        舊列直接是空字串而不是 NULL，`photo_url_of` 的 `or ''` 兩種都吃得下，
+        但空字串才與新寫入端同基準（「沒有圖」只有一種表示法）。
+        """
+        have = {r["name"] for r in c.execute("PRAGMA table_info(card_watch_hit)")}
+        for col, col_type in _CARD_WATCH_HIT_MIGRATE_COLUMNS.items():
+            if col not in have:
+                c.execute(f"ALTER TABLE card_watch_hit ADD COLUMN {col} {col_type}")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -1567,15 +1595,16 @@ class Store:
     def upsert_card_watch_hit(
         self, watch_id: int, listing_key: str, *, tier: str, title: str, url: str,
         site: str, seller_id: str, price_native: float | None, currency: str,
-        end_time: str = "", now: str | None = None,
+        end_time: str = "", image_url: str = "", now: str | None = None,
     ) -> None:
         stamp = now or _now_iso()
         with self._conn() as c:
             c.execute(
                 """INSERT INTO card_watch_hit
                    (watch_id, listing_key, tier, title, url, site, seller_id,
-                    price_native, currency, end_time, first_seen, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    price_native, currency, end_time, image_url,
+                    first_seen, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(watch_id, listing_key) DO UPDATE SET
                      tier = excluded.tier,
                      title = excluded.title,
@@ -1589,9 +1618,14 @@ class Store:
                      -- 的賣家抹成空字串——listing_obs 踩過這個坑（CLAUDE.md 第五節）。
                      seller_id = CASE WHEN excluded.seller_id != ''
                                       THEN excluded.seller_id
-                                      ELSE card_watch_hit.seller_id END""",
+                                      ELSE card_watch_hit.seller_id END,
+                     -- image_url 同一個立場：有些管道（賣家頁列舉、部分搜尋頁）
+                     -- 解不出圖，無條件覆寫會把通知的附圖安靜地抹掉。
+                     image_url = CASE WHEN excluded.image_url != ''
+                                      THEN excluded.image_url
+                                      ELSE card_watch_hit.image_url END""",
                 (int(watch_id), listing_key, tier, title, url, site, seller_id,
-                 price_native, currency, end_time, stamp, stamp),
+                 price_native, currency, end_time, image_url, stamp, stamp),
             )
 
     def list_card_watch_hits(

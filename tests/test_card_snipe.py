@@ -196,6 +196,54 @@ class TestCardWatchStore:
         assert store.comps_title_rows() == []
         assert store.listing_obs_title_rows() == []
 
+    def test_old_db_grows_image_url_and_keeps_existing_rows(self, tmp_path):
+        """正式庫的 `card_watch_hit` 已經建起來了，`CREATE TABLE IF NOT EXISTS`
+        補不了新欄位——沒有 additive migration 的話狙擊通知永遠是純文字，
+        而「沒有圖」與「這筆本來就沒圖」外顯一模一樣（CLAUDE.md 第五節）。"""
+        import sqlite3
+
+        p = tmp_path / "old.db"
+        con = sqlite3.connect(p)
+        con.executescript(
+            """CREATE TABLE card_watch_hit (
+                   watch_id      INTEGER NOT NULL,
+                   listing_key   TEXT NOT NULL,
+                   tier          TEXT NOT NULL,
+                   title         TEXT DEFAULT '',
+                   url           TEXT DEFAULT '',
+                   site          TEXT DEFAULT '',
+                   seller_id     TEXT DEFAULT '',
+                   price_native  REAL,
+                   currency      TEXT DEFAULT '',
+                   end_time      TEXT DEFAULT '',
+                   first_seen    TEXT,
+                   last_seen     TEXT,
+                   PRIMARY KEY (watch_id, listing_key)
+               );"""
+        )
+        con.execute(
+            "INSERT INTO card_watch_hit (watch_id, listing_key, tier, title, "
+            "seller_id, first_seen, last_seen) VALUES (7, 'a:1', 'exact', '舊列', "
+            "'SELLER', '2026-01-01T00:00:00+00:00', '2026-01-02T00:00:00+00:00')"
+        )
+        con.commit()
+        cols = {r[1] for r in con.execute("PRAGMA table_info(card_watch_hit)")}
+        con.close()
+        assert "image_url" not in cols                       # 前提：舊 db 真的沒有
+
+        Store(p)
+        Store(p)                                             # 重跑安全（排程每 30 分開一次）
+        con = sqlite3.connect(p)
+        con.row_factory = sqlite3.Row
+        after = {r[1] for r in con.execute("PRAGMA table_info(card_watch_hit)")}
+        row = dict(con.execute("SELECT * FROM card_watch_hit").fetchone())
+        con.close()
+        assert "image_url" in after
+        # 既有列原封不動（新欄位由 DEFAULT 回填成空字串，不是 NULL）
+        assert row["title"] == "舊列" and row["seller_id"] == "SELLER"
+        assert row["first_seen"] == "2026-01-01T00:00:00+00:00"
+        assert row["image_url"] == ""
+
 
 class TestMatchTier:
     def test_exact_on_the_real_sold_title(self, matcher):
@@ -378,6 +426,33 @@ class TestObserveAndQueries:
         assert observe_listings(store, load_matchers(store), [lst]) == 2
         assert [h["tier"] for h in store.list_card_watch_hits(watch_id=a)] == ["exact"]
         assert [h["tier"] for h in store.list_card_watch_hits(watch_id=b)] == ["near"]
+
+    def test_observe_writes_the_image_url(self, store):
+        """通知要附圖：使用者等的是一張全世界只有幾張的卡，看得到圖才判斷得快。"""
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        wid = store.insert_card_watch(**WATCH_KW)
+        lst = Listing(site=Site.BUYEE_YAHOO, external_id="i1",
+                      title="【ARS10】魔法の筒 P4-06", url="https://example.test/i1",
+                      price=1.0, currency=Currency.JPY,
+                      image_url="https://img.example.test/i1.jpg")
+        assert observe_listings(store, load_matchers(store), [lst]) == 1
+        hits = store.list_card_watch_hits(watch_id=wid)
+        assert hits[0]["image_url"] == "https://img.example.test/i1.jpg"
+
+    def test_image_url_is_filled_never_wiped(self, store):
+        """之後某條管道解不出圖時不得把已有的圖抹掉——`seller_id` 同一個立場，
+        這個專案為「無條件覆寫」出過事故（CLAUDE.md 第五節）。"""
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        wid = store.insert_card_watch(**WATCH_KW)
+        kw = dict(site=Site.BUYEE_YAHOO, external_id="i2",
+                  title="【ARS10】魔法の筒 P4-06", url="https://example.test/i2",
+                  price=1.0, currency=Currency.JPY)
+        matchers = load_matchers(store)
+        observe_listings(store, matchers, [Listing(image_url="https://img/x.jpg", **kw)])
+        observe_listings(store, matchers, [Listing(image_url=None, **kw)])
+        assert store.list_card_watch_hits(watch_id=wid)[0]["image_url"] == "https://img/x.jpg"
 
     def test_scan_queries_reuse_base_sources(self, store):
         from ygo_sniper.queries import QuerySpec
@@ -606,3 +681,75 @@ class TestNotifyContext:
                                     currency="")
         store.deactivate_card_watch(wid)
         assert build_notify_context(store).pending == []
+
+
+@pytest.fixture
+def no_fx_network(monkeypatch):
+    """`Pipeline()` 會建 FxRates，而 FxRates.__init__ → _load() 在 fx.json 過期時
+    會發**真實 httpx 請求**（fx.py:34→47，且失敗會靜靜吞掉）。測試絕不碰真實世界。"""
+    from ygo_sniper.fx import FxRates
+
+    monkeypatch.setattr(FxRates, "refresh", lambda self: None)
+
+
+@pytest.fixture
+def pipeline(tmp_path, no_fx_network):
+    """真的 `Pipeline`（掛鉤點在它身上），但 db 在 tmp_path、不碰網路。"""
+    from dataclasses import replace as dc_replace
+
+    import ygo_sniper.config as config_mod
+    from ygo_sniper.pipeline import Pipeline
+
+    config_mod.load_config.cache_clear()
+    base = config_mod.load_config()
+    cfg = dc_replace(base, storage={**base.storage, "db_path": str(tmp_path / "p.db")})
+    pipe = Pipeline(cfg)
+    try:
+        yield pipe
+    finally:
+        pipe.close()
+        config_mod.load_config.cache_clear()
+
+
+class TestPipelineHook:
+    def test_hits_are_recorded_before_business_filter(self, pipeline):
+        """被排除字丟掉的標的，狙擊照樣入帳——比對在過濾之前。"""
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        wid = pipeline.store.insert_card_watch(**WATCH_KW)
+        # 排除字 ポケモン：is_candidate 一定丟掉它（實測 '排除字 ポケモン'）
+        lst = Listing(site=Site.BUYEE_YAHOO, external_id="k1",
+                      title="【ARS10】魔法の筒 P4-06 ポケモンカード",
+                      url="https://example.test/k1",
+                      price=1000.0, currency=Currency.JPY, seller_id="s9")
+        candidates: list = []
+        pipeline._snipe_write = True
+        rows = pipeline._collect_candidates([lst], "test", candidates)
+        assert candidates == [] and rows == []                # 商業過濾確實丟了它
+        hits = pipeline.store.list_card_watch_hits(watch_id=wid)
+        assert len(hits) == 1 and hits[0]["tier"] == "exact"  # 但狙擊帳有
+
+    def test_dry_run_does_not_write_hits(self, pipeline):
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        wid = pipeline.store.insert_card_watch(**WATCH_KW)
+        lst = Listing(site=Site.BUYEE_YAHOO, external_id="k1",
+                      title="【ARS10】魔法の筒 P4-06",
+                      url="https://example.test/k1",
+                      price=1000.0, currency=Currency.JPY)
+        pipeline._snipe_write = False                         # dry-run 的旗標
+        pipeline._collect_candidates([lst], "test", [])
+        assert pipeline.store.list_card_watch_hits(watch_id=wid) == []
+
+    def test_notification_outcome_carries_snipe_matches(self, pipeline):
+        """規則 4 的最後一哩：脈絡沒接進 `evaluate` 的話它恆為 0 命中，
+        而「今天沒有狙擊命中」與「這條規則根本沒跑」外顯一模一樣。"""
+        from ygo_sniper.domain import Currency, Listing, Site
+
+        pipeline.store.insert_card_watch(**WATCH_KW)
+        lst = Listing(site=Site.BUYEE_YAHOO, external_id="k7",
+                      title="【ARS10】魔法の筒 P4-06", url="https://example.test/k7",
+                      price=1000.0, currency=Currency.JPY)
+        pipeline._collect_candidates([lst], "test", [])
+        outcome = pipeline.notification_outcome()
+        assert [m.row["listing_key"] for m in outcome.card_snipe] == ["buyee_yahoo:k7"]

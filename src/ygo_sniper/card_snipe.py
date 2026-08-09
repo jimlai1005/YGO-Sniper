@@ -189,6 +189,9 @@ def observe_listings(
                 price_native=float(lst.price) if lst.price is not None else None,
                 currency=str(getattr(currency, "value", currency) or ""),
                 end_time=end.isoformat() if end is not None else "",
+                # 通知附圖（notify.photo_url_of）。抓不到就傳空字串——store 那層
+                # 「只補不抹」，不會把先前抓到的圖覆蓋掉。
+                image_url=getattr(lst, "image_url", None) or "",
             )
             n += 1
     return n

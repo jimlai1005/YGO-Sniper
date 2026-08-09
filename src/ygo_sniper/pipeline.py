@@ -213,6 +213,10 @@ class Pipeline:
         #: 一輪掃描裡建一次就好，但必須在 refresh_comps 之後才建，否則新收進來的
         #: 成交樣本不會進到這一輪的公允價裡。懶建剛好滿足這兩件事。
         self._valuator = None
+        #: 狙擊比對器（一輪掃描建一次；lazy——沒有 active watch 時是空 list）。
+        self._snipe_cache = None
+        #: dry_run 時不寫狙擊帳（`_scan` 設定；預設 True 讓單獨呼叫也能寫）。
+        self._snipe_write = True
 
     # ------------------------------------------------------------------
     def valuator(self):
@@ -445,6 +449,14 @@ class Pipeline:
         return results
 
     # ------------------------------------------------------------------
+    def _snipe_matchers(self):
+        """狙擊比對器（一輪建一次）。沒有 active watch 時是空 list，掛鉤等於沒開。"""
+        if self._snipe_cache is None:
+            from .card_snipe import load_matchers
+
+            self._snipe_cache = load_matchers(self.store)
+        return self._snipe_cache
+
     def _collect_candidates(
         self, listings: list, source_name: str, candidates: list
     ) -> list[dict]:
@@ -455,6 +467,18 @@ class Pipeline:
         監控賣家的貨若走另一條轉換路徑，同一個標的會因為「從哪裡發現的」
         而得到不同的判定（工程原則 1）。
         """
+        # 狙擊比對走在商業過濾**之前**：狙擊目標不能被排除字／年代／min_grade
+        # 吃掉（實測 `【ARS10】魔法の筒 P4-06 ポケモンカード` → 排除字 ポケモン，
+        # 一個賣家亂塞的關鍵字就會讓等了半年的標的整筆消失）。那些閘門是為
+        # 「大海撈針」設計的，狙擊是「等一根已知的針」——誤殺是靜默的
+        # （CLAUDE.md 第一節）。掛在這裡是因為關鍵字掃描與賣家頁列舉都走這一支，
+        # 兩條路一次蓋到。
+        matchers = self._snipe_matchers()
+        if matchers and self._snipe_write:
+            from .card_snipe import observe_listings
+
+            observe_listings(self.store, matchers, listings, source_name=source_name)
+
         wl = self.cfg.watchlist
         rows: list[dict] = []
         for lst in listings:
@@ -721,6 +745,8 @@ class Pipeline:
             self.comps.load_from_store()
 
         wl = self.cfg.watchlist
+        # `scan --dry-run` 的語意是「只掃不寫庫」——狙擊帳也是庫。
+        self._snipe_write = not dry_run
         scanned = 0
         candidates = []
         search_results: list[SearchResult] = []
@@ -729,7 +755,17 @@ class Pipeline:
         #: healthy 旗標**——離場判定要用它決定「這一批的缺席算不算證據」。
         obs_batches: list[dict] = []
 
-        for query in (load_queries(wl) if not watch_only else []):
+        # 狙擊卡自己的關鍵字查詢：等一根已知的針，就得主動去找它，不能只靠
+        # watchlist 那些廣撒查詢碰巧掃到。來源沿用既有查詢的聯集（不猜來源名）；
+        # base 是空的（watch_only）就不跑——那一輪根本沒有關鍵字管道。
+        base_queries = load_queries(wl) if not watch_only else []
+        if base_queries:
+            from .card_snipe import scan_queries
+
+            base_queries = base_queries + scan_queries(
+                self._snipe_matchers(), base_queries
+            )
+        for query in base_queries:
             for source_name in query.sources:
                 src = self.sources.get(source_name)
                 if src is None:
@@ -874,6 +910,12 @@ class Pipeline:
             obs_pruned = self.store.prune_listing_obs(
                 int(self.cfg.scan.get("listing_obs_retain_days", 0) or 0)
             )
+            from .card_snipe import NEAR_HIT_RETAIN_DAYS, TIER_NEAR
+
+            # 只回收 near（現代重印與未鑑定貨會把它洗出大量列）；exact／partial
+            # 永久保留，那是這張卡的出現史。tier 是必填關鍵字參數：保留政策屬於
+            # card_snipe，store 只做 CRUD。
+            self.store.prune_card_watch_hits(NEAR_HIT_RETAIN_DAYS, tier=TIER_NEAR)
             # keep_all 打開之後每輪落庫的量級從個位數變成上百筆，所以要有出口：
             # 很久沒再被掃到、而且你從沒動過的 new 列標成 expired（不刪除、不碰
             # 人工標過的狀態）。0 或負數 = 關閉。
@@ -977,6 +1019,7 @@ class Pipeline:
             now=now,
             notified=self.store.notify_log_map(),
             seller_ctx=self._seller_notify_context(),
+            snipe_ctx=self._snipe_notify_context(),
         )
 
     def _seller_notify_context(self):
@@ -993,6 +1036,18 @@ class Pipeline:
             return build_notify_context(self.store, self.cfg)
         except Exception as exc:  # noqa: BLE001 - 見 docstring
             print(f"[warn] 賣家同儕脈絡建立失敗，本輪規則 3 跳過：{type(exc).__name__}: {exc}")
+            return None
+
+    def _snipe_notify_context(self):
+        """規則 4 的資料脈絡。建不起來就跳過該規則，不拖垮整輪推播
+        （同 `_seller_notify_context` 的立場：降級要看得見，不是靜默）。"""
+        from .card_snipe import build_notify_context
+
+        try:
+            return build_notify_context(self.store)
+        except Exception as exc:  # noqa: BLE001 - 同 _seller_notify_context 的立場
+            print(f"[warn] 狙擊脈絡建立失敗，本輪規則 4 跳過："
+                  f"{type(exc).__name__}: {exc}")
             return None
 
     def notify(self):
