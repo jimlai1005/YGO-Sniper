@@ -757,40 +757,64 @@ def build_recommendation(
         """
         _seller(key)["listed_n"] += 1
 
-    #: 已經計過次的成交身分。**先跑 `sales` 再跑 `evidence`**：市場檔案是主要
-    #: 來源、欄位較完整（有 origin_url、bid_count、sale_kind），evidence 只補
-    #: sales 沒有的那幾筆。`_note_listing`（在架）不參與——它記的是另一組數字。
+    #: **「我們知道的成交」只有這一份**：去重後的 `sales` ∪ `evidence`，賣家歸因
+    #: 與下面的出現頻率共用它。兩邊各自再數一次就是同一個 bug 換個地方長出來——
+    #: 而且遲早會當著使用者的面打架：`evidence` 存在的理由正是「那場成交已經滾出
+    #: 落札檔案（Yahoo 只留 150-180 天）、挖不到了」，所以「證據有、檔案沒有」
+    #: 不是邊角情境，是這個功能的正常終局。
+    #: **先跑 `sales` 再跑 `evidence`**：市場檔案欄位較完整（有 origin_url、
+    #: bid_count、sale_kind），evidence 只補檔案裡沒有的那幾筆。
+    #: `_note_listing`（在架）不參與去重——它記的是另一組數字。
+    known: list[dict[str, Any]] = []
     seen_sales: set[str] = set()
 
-    def _first_time(ident: str) -> bool:
-        if not ident:          # 沒有可比對的身分：一律當成不同筆，不去重
-            return True
-        if ident in seen_sales:
-            return False
-        seen_sales.add(ident)
-        return True
+    def _remember(
+        *, ident: str, seller_key: str, sold_at: str, price: Any,
+        origin: str, sale_kind: str,
+    ) -> None:
+        if ident:                  # 空身分 ＝ 沒有可比對的依據，一律當成不同筆
+            if ident in seen_sales:
+                return
+            seen_sales.add(ident)
+        known.append({"seller_key": seller_key, "sold_at": sold_at,
+                      "price": price, "origin": origin, "sale_kind": sale_kind})
 
     for s in sales:
-        if s.get("tier") == TIER_EXACT and s.get("seller_id"):
-            if not _first_time(_sale_identity(
+        if s.get("tier") != TIER_EXACT:
+            continue
+        seller_id = str(s.get("seller_id") or "")
+        _remember(
+            ident=_sale_identity(
                 url=str(s.get("url") or ""),
                 origin_url=str(s.get("origin_url") or ""),
                 sold_at=str(s.get("sold_at") or ""),
-                price=s.get("price_native"), seller_id=str(s["seller_id"]),
-            )):
-                continue
-            _note_sale(f"{s.get('site') or ''}:{s['seller_id']}",
-                       str(s.get("sold_at") or ""), s.get("price_native"))
+                price=s.get("price_native"), seller_id=seller_id,
+            ),
+            seller_key=f"{s.get('site') or ''}:{seller_id}" if seller_id else "",
+            sold_at=str(s.get("sold_at") or ""), price=s.get("price_native"),
+            origin="archive", sale_kind=str(s.get("sale_kind") or ""),
+        )
     for e in evidence:
-        if e.get("status") == "ok" and e.get("seller_id"):
-            if not _first_time(_sale_identity(
-                url=str(e.get("url") or ""),
-                sold_at=str(e.get("sold_at") or ""),
-                price=e.get("price_native"), seller_id=str(e["seller_id"]),
-            )):
-                continue
-            _note_sale(f"{e.get('site') or 'buyee_yahoo'}:{e['seller_id']}",
-                       str(e.get("sold_at") or ""), e.get("price_native"))
+        if e.get("status") != "ok":
+            continue
+        seller_id = str(e.get("seller_id") or "")
+        _remember(
+            ident=_sale_identity(
+                url=str(e.get("url") or ""), sold_at=str(e.get("sold_at") or ""),
+                price=e.get("price_native"), seller_id=seller_id,
+            ),
+            seller_key=(f"{e.get('site') or 'buyee_yahoo'}:{seller_id}"
+                        if seller_id else ""),
+            sold_at=str(e.get("sold_at") or ""), price=e.get("price_native"),
+            # 證據快照沒有存成交型態欄位——**不知道就是不知道**，不從 bids 推導
+            # （フリマ 定價成交的 bidCount 也是 1，那是佔位值）。空字串代表
+            # 「這筆不參與成交型態的宣稱」，見下面的 kinds。
+            origin="evidence", sale_kind="",
+        )
+
+    for k in known:
+        if k["seller_key"]:        # 沒有賣家可歸因的成交仍然算次數，只是沒人可釘
+            _note_sale(k["seller_key"], k["sold_at"], k["price"])
     for h in hits:
         if h.get("tier") == TIER_EXACT and h.get("seller_id"):
             _note_listing(f"{h.get('site') or ''}:{h['seller_id']}")
@@ -826,24 +850,29 @@ def build_recommendation(
             "（狙擊查詢已自動加入每一輪掃描）。"
         )
 
-    exact_sales = [s for s in sales if s.get("tier") == TIER_EXACT]
-    if exact_sales:
+    if known:
         # ⚠️ **只有帶真實成交時刻的才進「什麼時候／幾次」的宣稱。**
         # Mercari／露天的搜尋頁給不出落札時間（實測 99/206 筆 sold_at 是空的），
         # 把它們算進次數或期間，就是拿兩種基準的東西合成一個數字
         # （CLAUDE.md 第三節；comps 的 sold_at_is_ingest 是同一個立場）。
-        dated = [s for s in exact_sales if s.get("sold_at")]
-        undated_n = len(exact_sales) - len(dated)
-        stamps = sorted(str(s.get("sold_at"))[:10] for s in dated)
-        kinds = {s.get("sale_kind") for s in dated}
+        dated = [k for k in known if k["sold_at"]]
+        undated_n = len(known) - len(dated)
+        stamps = sorted(k["sold_at"][:10] for k in dated)
+        # 成交型態只由**真的存了型態的那批**決定（證據快照沒這個欄位）——
+        # 「沒記錄」不等於「是競標」，不知道的一筆不該讓宣稱變強也不該讓它消失。
+        kinds = {k["sale_kind"] for k in dated if k["sale_kind"]}
         span = f"（{stamps[0]} → {stamps[-1]}）" if stamps else ""
         if dated:
             # 這句**只要有帶日期的成交就一定要講**（不是只在 >= 2 筆時）：一筆的時候
-            # 更需要知道那不是全部歷史，否則會把「檔案裡只有 1 次」讀成「一年只出現 1 次」。
+            # 更需要知道那不是全部歷史，否則會把「我們知道 1 次」讀成「一年只出現 1 次」。
+            from_archive = sum(1 for k in dated if k["origin"] == "archive")
             lines.append(
-                f"出現頻率：成交檔案裡 {len(dated)} 次{span}"
-                f"——**這是檔案涵蓋期間內的次數，不是全部歷史**（Yahoo 落札相場約"
-                f"保留 150-180 天，更早的已經被平台刪掉，我們挖不到）。"
+                f"出現頻率：已知 {len(dated)} 次成交{span}——市場檔案挖到 "
+                f"{from_archive} 筆、你提供的證據 {len(dated) - from_archive} 筆"
+                f"（與上面賣家行同一份去重後的紀錄）"
+                f"——**這是我們知道的次數，不是全部歷史**（Yahoo 落札相場約保留 "
+                f"150-180 天，更早的已經被平台刪掉，我們挖不到；證據那幾筆正是"
+                f"因此才需要你手動指定）。"
             )
         if undated_n:
             lines.append(

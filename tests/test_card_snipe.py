@@ -629,7 +629,7 @@ class TestDossier:
         d = build_dossier(store, store.get_card_watch(res.watch_id))
         assert len(d.sales) == 4                 # 四筆都留著，一筆都沒丟
         joined = "\n".join(d.recommendation)
-        assert "成交檔案裡 1 次" in joined        # 次數只算有日期的那一筆
+        assert "已知 1 次成交" in joined          # 次數只算有日期的那一筆
         assert "3 筆" in joined and "沒給成交時刻" in joined   # 缺口要說出來
         assert "4 次" not in joined              # 絕不把無日期的算進次數
 
@@ -694,6 +694,42 @@ class TestDossier:
         assert "賣掉過這張卡 1 次" in joined
         assert "2 次" not in joined
         assert joined.count("6,350") == 1        # 同一筆成交價不得印兩遍
+
+    def test_frequency_and_seller_lines_share_one_count(self, store):
+        """賣家行與頻率行必須數同一份東西——兩套計次遲早會當著使用者的面打架。
+
+        `evidence` 存在的**理由**就是「那場成交已經滾出落札檔案、挖不到了」
+        （Yahoo 只保留約 150-180 天）。所以「證據有、檔案沒有」不是邊角情境，
+        是這個功能的正常終局：屆時只數 `sales` 的頻率行會比賣家行少。
+        兩個數字同源，並且講得出各有幾筆來自哪裡。
+        """
+        res = add_card_watch(store, PageFetcher({}), grader="ars", grade_input="10",
+                             name_ja="魔法の筒", code="P4-06")
+        S = "AiUkMq1pEUfNxvPeCv5PnfGpsFLrx"
+        # 新的那場：還在檔案裡挖得到
+        store.upsert_card_watch_sale(
+            res.watch_id, "buyee_yahoo:n1235105710", tier="exact",
+            title="【ARS10】魔法の筒",
+            url="https://buyee.jp/item/yahoo/auction/n1235105710",
+            origin_url="https://page.auctions.yahoo.co.jp/jp/auction/n1235105710",
+            site="buyee_yahoo", seller_id=S, price_native=6350.0, currency="JPY",
+            sold_at="2026-07-01T13:53:03+00:00", bid_count=15, sale_kind="auction",
+        )
+        # 舊的那場：已經滾出檔案，只剩使用者當初貼的證據
+        store.upsert_card_watch_evidence(
+            res.watch_id, "https://auctions.yahoo.co.jp/jp/auction/l1230920412",
+            status="ok", title="【ARS10】魔法の筒", price_native=7750.0,
+            sold_at="2026-05-27T13:27:38+00:00", bids=10, seller_id=S,
+            seller_name="Natural Cards",
+        )
+
+        d = build_dossier(store, store.get_card_watch(res.watch_id))
+        joined = "\n".join(d.recommendation)
+        assert "賣掉過這張卡 2 次" in joined       # 賣家行
+        assert "已知 2 次成交" in joined           # 頻率行——同一個數字
+        # 來源分解要看得見：使用者得知道有幾筆是他自己貼的
+        assert "市場檔案挖到 1 筆" in joined and "你提供的證據 1 筆" in joined
+        assert "不是全部歷史" in joined            # 檔案期間的極限照舊要講
 
 
 class TestNotifyContext:
