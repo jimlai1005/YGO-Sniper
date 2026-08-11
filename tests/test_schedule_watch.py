@@ -12,9 +12,11 @@ from ygo_sniper.schedule_watch import (
     RUN_FINISHED_KEY,
     RUN_STARTED_KEY,
     expected_next_gap_minutes,
+    missed_slots_between,
     next_slot_after,
     resolve_alert,
     schedule_health,
+    watchdog_message,
 )
 
 _PLIST = Path(__file__).resolve().parents[1] / "scripts" / "com.jim.ygosniper.plist"
@@ -59,7 +61,7 @@ def test_alert_fires_when_drifted_run_masks_missed_slot():
     msg = schedule_health(
         "2026-08-10T18:15:00", "2026-08-10T18:18:00", _dt("2026-08-10T19:00:00")
     )
-    assert msg is not None and "空窗" in msg
+    assert msg is not None and "漏跑" in msg and "18:30" in msg
 
 
 def test_alert_fires_when_drift_near_window_boundary_swallows_next_slot():
@@ -67,7 +69,63 @@ def test_alert_fires_when_drift_near_window_boundary_swallows_next_slot():
     msg = schedule_health(
         "2026-08-11T15:31:00", "2026-08-11T15:33:00", _dt("2026-08-11T18:00:00")
     )
-    assert msg is not None and "空窗" in msg
+    assert msg is not None and "漏跑" in msg and "17:30" in msg
+
+
+# ---------------------------------------------------------------------------
+# Fix B：missed_slots_between——不再比「經過了多久」，改成直接列舉漏跑的格子。
+#
+# 事故背景（見 schedule_watch.py 模組開頭）：Fix 1 之後仍留了一個
+# `now - prev > 20 分寬容值` 的判準，實測 10 天真實 log 出現 2 次假警報／
+# 重複告警——36 分鐘的正常晚開機被報成「排程空窗 11.6 小時」（因為訊息把
+# 整個隔夜空窗也算了進去）。Fix B 改成「這一輪自己代表哪一格、prev 與那一
+# 格之間還有哪幾格沒人代表」的絕對集合運算，drift 不再需要任何寬容值。
+# ---------------------------------------------------------------------------
+def test_no_false_positive_on_normal_late_morning_start():
+    """複查案例（08-08）：當天第一輪 10:06:33 才起跑，比 09:30 晚 36 分鐘
+    ——純粹是筆電晚開機，那一整天 15 個時段一個都沒漏。prev 是前一晚最後
+    一輪（22:32 開始），22:30→09:30 是刻意的夜間空窗，兩者之間沒有任何
+    網格時間點，所以必須完全不出聲——這正是舊版會誤報的案例。"""
+    msg = schedule_health(
+        "2026-08-07T22:32:00", "2026-08-07T22:35:00", _dt("2026-08-08T10:06:33")
+    )
+    assert msg is None
+
+
+def test_missed_slots_between_lists_exact_missed_times():
+    """複查給的精確算式驗證：prev=15:45、now=18:30，漏跑 17:30 與 18:00
+    兩格（18:30 是這一輪自己代表的那一格，不算漏跑）。"""
+    missed = missed_slots_between(_dt("2026-08-10T15:45:00"), _dt("2026-08-10T18:30:00"))
+    assert missed == [_dt("2026-08-10T17:30:00"), _dt("2026-08-10T18:00:00")]
+
+    msg = schedule_health(
+        "2026-08-10T15:45:00", "2026-08-10T15:48:00", _dt("2026-08-10T18:30:00")
+    )
+    assert msg is not None
+    assert "漏跑 2 個時段（17:30、18:00）" in msg
+
+
+def test_missed_slots_between_excludes_the_current_runs_own_slot():
+    """`now` 剛好落在一個網格時間點上時，那一格本身不算漏跑——它就是
+    這一輪的存在本身。"""
+    assert missed_slots_between(_dt("2026-08-11T19:00:00"), _dt("2026-08-11T19:30:00")) == []
+
+
+def test_missed_slots_between_truncates_long_outages_in_message():
+    """筆電放了好幾天沒開機：訊息只報頭尾＋筆數，不要把幾十個時間戳
+    全部塞進 Telegram 訊息。"""
+    msg = schedule_health(
+        "2026-08-05T09:30:00", "2026-08-05T09:33:00", _dt("2026-08-08T09:30:00")
+    )
+    assert msg is not None
+    assert "個時段" in msg
+    assert "～" in msg  # 頭尾格式，不是逐一列舉
+
+
+def test_missed_slots_between_silent_when_clock_moves_backward():
+    """時鐘被往回校正、prev 落在 now 之後——維持舊版「未來基準值不出聲」
+    的行為，不崩潰、也不誤報。"""
+    assert missed_slots_between(_dt("2026-08-11T20:00:00"), _dt("2026-08-11T19:00:00")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -86,11 +144,13 @@ def test_no_alert_on_overnight_window():
 
 
 def test_alert_when_evening_slots_were_skipped():
-    # 08-10 事故的形狀：20:49 之後直接跳到 23:00（21:00-22:30 四班消失）
+    # 08-10 事故的形狀：20:49 之後直接跳到 23:00（21:00-22:30 四班消失，
+    # 22:30 是這一輪自己代表的那一格，不算在漏跑清單裡）
     msg = schedule_health(
         "2026-08-10T20:00:00", "2026-08-10T20:49:00", _dt("2026-08-10T23:00:44")
     )
-    assert msg is not None and "空窗" in msg
+    assert msg is not None
+    assert "漏跑 4 個時段（20:30、21:00、21:30、22:00）" in msg
 
 
 def test_alert_when_previous_run_never_finished():
@@ -203,7 +263,17 @@ def no_fx_network(monkeypatch):
 
 @pytest.fixture
 def pipeline(tmp_path, no_fx_network):
-    """真的 `Pipeline`，db 在 tmp_path、不碰網路——與 test_card_snipe.py 同款。"""
+    """真的 `Pipeline`，db 在 tmp_path、不碰網路——與 test_card_snipe.py 同款。
+
+    `_fold_watchdog_ledger`（Fix A）讀的帳本路徑算成
+    `cfg.db_path.parent / "last_run_exit"`，不是 `cfg.root / "data" / ...`
+    ——`db_path` 就是這裡覆寫成 `tmp_path` 的那個絕對路徑，所以帳本檔
+    自動落在沙盒裡，不需要另外覆寫 `root`。見 pipeline.py
+    `_fold_watchdog_ledger` docstring 裡對這個選擇的完整說明
+    （簡言之：改用 `root` 的話，全 repo 沒覆寫過 `root` 的既有測試
+    ——例如 `test_card_snipe.py` 呼叫 `pipeline.scan(...)`——就會在跑
+    測試時去讀、甚至刪掉正式環境真正的 `data/last_run_exit`）。
+    """
     from dataclasses import replace as dc_replace
 
     import ygo_sniper.config as config_mod
@@ -255,9 +325,9 @@ def test_manual_scan_leaves_pending_for_next_daily_to_deliver(pipeline, monkeypa
     pipeline.store.set_meta(RUN_STARTED_KEY, _ANCIENT_START)
     pipeline.store.set_meta(RUN_FINISHED_KEY, _ANCIENT_FINISH)
 
-    # 模擬一次手動 `ygo-sniper scan`：偵測到空窗、正常收尾，但不推播。
+    # 模擬一次手動 `ygo-sniper scan`：偵測到漏跑、正常收尾，但不推播。
     pipeline._update_schedule_state(dry_run=False, watch_only=False)
-    assert pipeline._schedule_alert is not None and "空窗" in pipeline._schedule_alert
+    assert pipeline._schedule_alert is not None and "漏跑" in pipeline._schedule_alert
     pipeline._finish_schedule_state(dry_run=False, watch_only=False)
 
     pending_after_manual_scan = pipeline.store.get_meta(PENDING_ALERT_KEY)
@@ -267,7 +337,7 @@ def test_manual_scan_leaves_pending_for_next_daily_to_deliver(pipeline, monkeypa
     # 才寫的），本身不會再觸發新偵測，但舊 pending 必須被原樣帶出來。
     pipeline._update_schedule_state(dry_run=False, watch_only=False)
     assert pipeline._schedule_alert is not None
-    assert "空窗" in pipeline._schedule_alert
+    assert "漏跑" in pipeline._schedule_alert
 
     fake = _FakeNotifier(ok=True)
     monkeypatch.setattr(pipeline, "notifier", fake)
@@ -286,12 +356,12 @@ def test_crashed_run_alert_survives_and_is_delivered_next_time(pipeline, monkeyp
     pipeline.store.set_meta(RUN_STARTED_KEY, _ANCIENT_START)
     pipeline.store.set_meta(RUN_FINISHED_KEY, _ANCIENT_FINISH)
 
-    # 這一輪偵測到空窗（等同 scan() 開頭呼叫 _update_schedule_state），
+    # 這一輪偵測到漏跑（等同 scan() 開頭呼叫 _update_schedule_state），
     # 然後「崩潰」——刻意不呼叫 _finish_schedule_state，模擬 _scan() 拋例外、
     # scan() 的 except 分支落狀態後直接 raise，never reaching finish。
     pipeline._update_schedule_state(dry_run=False, watch_only=False)
     first_alert = pipeline._schedule_alert
-    assert first_alert is not None and "空窗" in first_alert
+    assert first_alert is not None and "漏跑" in first_alert
 
     finished_before_crash = pipeline.store.get_meta(RUN_FINISHED_KEY)
     assert finished_before_crash == _ANCIENT_FINISH  # 還沒被這一輪覆寫
@@ -333,3 +403,134 @@ def test_failed_push_keeps_pending_for_retry(pipeline, monkeypatch):
 
     assert fake.sent  # 有嘗試送
     assert pipeline.store.get_meta(PENDING_ALERT_KEY) != ""  # 但沒清帳
+
+
+# ---------------------------------------------------------------------------
+# Fix A：watchdog_message——純函式，把 run_daily.sh 寫的帳本 dict 翻成一句話。
+#
+# 事故背景（見 schedule_watch.py 模組開頭）：2026-08-10 卡死 8.5 小時的那次，
+# 卡點在 pipe.close()／直譯器結束，發生在 RUN_FINISHED_KEY 已經正常寫下
+# 之後——schedule_health 對此完全沒有偵測力。唯一的線索是 watchdog 的
+# exit=124，但原本那則失敗通知的 curl 結果被直接丟棄，筆電剛醒 Wi-Fi
+# 沒穩時會送不出去，導致整個事故 100% 無聲。
+# ---------------------------------------------------------------------------
+def test_watchdog_message_none_when_ledger_missing_or_malformed():
+    assert watchdog_message(None) is None
+    assert watchdog_message([1, 2, 3]) is None
+    assert watchdog_message({}) is None
+    assert watchdog_message({"exit": "not-an-int"}) is None
+    assert watchdog_message({"exit": True}) is None  # bool 是 int 子類，故意排除
+
+
+def test_watchdog_message_none_on_success():
+    assert watchdog_message({"exit": 0, "notify_attempted": False}) is None
+
+
+def test_watchdog_message_fires_on_watchdog_kill_when_notify_not_delivered():
+    msg = watchdog_message(
+        {"exit": 124, "notify_attempted": False, "notify_http": "000", "notify_curl_exit": 0}
+    )
+    assert msg is not None and "watchdog" in msg and "124" in msg
+
+
+def test_watchdog_message_fires_when_curl_itself_failed():
+    """通知有嘗試但 curl 自己失敗（筆電剛醒 Wi-Fi 還沒穩）——一樣要出聲，
+    這正是 Fix A 要解的事故形狀。"""
+    msg = watchdog_message(
+        {"exit": 124, "notify_attempted": True, "notify_http": "000", "notify_curl_exit": 6}
+    )
+    assert msg is not None and "watchdog" in msg
+
+
+def test_watchdog_message_silent_when_notification_already_delivered():
+    """run_daily.sh 自己那則失敗通知已經確認送達（http=200）——不重複講，
+    否則兩套告警管道疊在一起就是 Fix B 想解決的那種雜訊。"""
+    msg = watchdog_message(
+        {"exit": 124, "notify_attempted": True, "notify_http": "200", "notify_curl_exit": 0}
+    )
+    assert msg is None
+
+
+def test_watchdog_message_generic_wording_for_non_watchdog_failure():
+    """一般失敗（非 124）要用泛用文案，不能被誤標成 watchdog 終止
+    ——與 test_run_daily_script.py 的 test_ordinary_failure_exit_7 呼應。"""
+    msg = watchdog_message(
+        {"exit": 7, "notify_attempted": False, "notify_http": "000", "notify_curl_exit": 0}
+    )
+    assert msg is not None
+    assert "exit=7" in msg
+    assert "watchdog" not in msg
+
+
+# ---------------------------------------------------------------------------
+# Fix A：_fold_watchdog_ledger——不純的那一半，讀真的檔案、真的會刪檔案。
+# 用 tmp_path（透過 pipeline fixture 的 db_path.parent）而不是真的 data/。
+# ---------------------------------------------------------------------------
+def test_fold_watchdog_ledger_reads_and_consumes_the_file(pipeline):
+    ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
+    ledger_path.write_text(
+        '{"exit": 124, "notify_attempted": false, "notify_http": "000", '
+        '"notify_curl_exit": 0}',
+        encoding="utf-8",
+    )
+
+    msg = pipeline._fold_watchdog_ledger()
+
+    assert msg is not None and "watchdog" in msg
+    assert not ledger_path.exists()  # 折出東西之後要「讀了就算數」
+
+
+def test_fold_watchdog_ledger_none_when_file_absent(pipeline):
+    ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
+    assert not ledger_path.exists()
+    assert pipeline._fold_watchdog_ledger() is None
+
+
+def test_fold_watchdog_ledger_leaves_clean_file_untouched(pipeline):
+    """exit=0（成功）沒有東西可折——檔案不需要被消費，反正下一輪
+    run_daily.sh 自己就會覆寫掉。"""
+    ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
+    ledger_path.write_text('{"exit": 0, "notify_attempted": false}', encoding="utf-8")
+
+    assert pipeline._fold_watchdog_ledger() is None
+    assert ledger_path.exists()  # 沒折出東西，不必刪
+
+
+def test_fold_watchdog_ledger_tolerates_corrupt_json(pipeline):
+    ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
+    ledger_path.write_text("not valid json{{{", encoding="utf-8")
+
+    assert pipeline._fold_watchdog_ledger() is None  # 不崩潰
+
+
+def test_update_schedule_state_folds_watchdog_ledger_into_pending(pipeline):
+    """端到端：帳本檔案 → `_update_schedule_state` → `_schedule_alert` 與
+    `PENDING_ALERT_KEY` 都要看得到，而且檔案要被消費掉（不重複折）。"""
+    ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
+    ledger_path.write_text(
+        '{"exit": 124, "notify_attempted": false, "notify_http": "000", '
+        '"notify_curl_exit": 0}',
+        encoding="utf-8",
+    )
+    # 沒有排程基準（第一次跑）——這一輪的訊息應該完全來自 watchdog 帳本，
+    # 不是排程空窗（沒有 prev_started，schedule_health 回 None）。
+    assert pipeline.store.get_meta(RUN_STARTED_KEY) is None
+
+    pipeline._update_schedule_state(dry_run=False, watch_only=False)
+
+    assert pipeline._schedule_alert is not None
+    assert "watchdog" in pipeline._schedule_alert
+    assert not ledger_path.exists()
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY) != ""
+
+
+def test_dry_run_does_not_consume_watchdog_ledger(pipeline):
+    """`--dry-run` 不吃邊緣觸發——連 watchdog 帳本也不該被 dry-run 消費掉，
+    不然下一次真正的 scan 就讀不到了。"""
+    ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
+    ledger_path.write_text('{"exit": 124, "notify_attempted": false}', encoding="utf-8")
+
+    pipeline._update_schedule_state(dry_run=True, watch_only=False)
+
+    assert ledger_path.exists()
+    assert pipeline._schedule_alert is None

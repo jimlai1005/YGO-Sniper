@@ -16,6 +16,7 @@ curl 分支在原始碼層級就進不去；另外還疊了一層 curl stub 當�
 需求），而且腳本失敗時會重試 6 次、每次補 10 秒，stub 掉才能讓測試維持在秒等級。
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -50,6 +51,7 @@ class Sandbox:
         self.venv_bin = self.project_dir / ".venv" / "bin"
         self.log_dir = self.project_dir / "data" / "logs"
         self.lock_dir = self.project_dir / "data" / "run_daily.lock"
+        self.last_run_file = self.project_dir / "data" / "last_run_exit"
         self.marker_file = tmp_path / "ygo_sniper_ran.marker"
         self.curl_marker_file = tmp_path / "curl_called.marker"
 
@@ -117,6 +119,25 @@ class Sandbox:
             "curl 被呼叫了——這代表失敗通知路徑在沙盒裡意外送出了真的網路請求"
         )
 
+    def last_run_ledger(self) -> dict:
+        """排程監督帳本（Fix A）：`_fold_watchdog_ledger` 讀的就是這個檔案，
+        用 json 解析驗證欄位，不用字串比對——欄位名才是介面，不是格式。"""
+        assert self.last_run_file.exists(), "data/last_run_exit 沒有被寫出來"
+        return json.loads(self.last_run_file.read_text())
+
+    def write_fake_env(self) -> None:
+        """只在**特定測試**（驗證失敗通知的送達記錄）刻意打破「沙盒永遠沒有
+        .env」的預設——curl 本身仍然是沙盒 stub（見 `set_curl_stub`），
+        不會打出真的網路請求，只是要讓腳本裡 `if [ -f .env ]` 那個分支
+        走得進去，才能驗證 notify_attempted／notify_http 有沒有被正確填。
+        """
+        (self.project_dir / ".env").write_text(
+            'TELEGRAM_BOT_TOKEN="fake"\nTELEGRAM_CHAT_ID="fake"\n'
+        )
+
+    def set_curl_stub(self, body: str) -> None:
+        _write_executable(self.venv_bin / "curl", body)
+
 
 @pytest.fixture
 def sandbox(tmp_path) -> Sandbox:
@@ -145,6 +166,12 @@ def test_happy_path_exit_0_logs_start_and_end(sandbox):
     assert not sandbox.lock_dir.exists(), "成功結束後鎖應該被 trap 釋放掉"
     sandbox.assert_no_network_call()
 
+    # Fix A：成功也要覆寫排程監督帳本——不覆寫的話，前一輪如果剛好是
+    # exit=124，這一輪明明成功了，下一輪卻還會讀到舊的 124 紀錄。
+    ledger = sandbox.last_run_ledger()
+    assert ledger["exit"] == 0
+    assert ledger["notify_attempted"] is False
+
 
 def test_watchdog_timeout_exits_124_and_logs_watchdog_line(sandbox):
     """全套測試裡最有價值的一條：證明「supervisor 卡死 → 124 → 專屬告警文案」
@@ -167,6 +194,14 @@ def test_watchdog_timeout_exits_124_and_logs_watchdog_line(sandbox):
     assert not sandbox.lock_dir.exists(), "被 watchdog 終止後鎖也應該被 trap 釋放掉"
     sandbox.assert_no_network_call()
 
+    # Fix A：這是 8.5 小時卡死事故唯一留得住證據的地方——沒有 .env，
+    # 失敗通知連嘗試都沒有，帳本要老實記下「沒送達」，讓下一輪的
+    # ygo-sniper daily（schedule_watch.watchdog_message）撿得到。
+    ledger = sandbox.last_run_ledger()
+    assert ledger["exit"] == 124
+    assert ledger["notify_attempted"] is False
+    assert "失敗通知沒有送出" in log
+
 
 def test_ordinary_failure_exit_7_records_exit_code(sandbox):
     sandbox.set_ygo_sniper_stub(_STUB_EXIT_7)
@@ -181,6 +216,83 @@ def test_ordinary_failure_exit_7_records_exit_code(sandbox):
     assert "watchdog 強制終止" not in log
     assert not sandbox.lock_dir.exists()
     sandbox.assert_no_network_call()
+
+    ledger = sandbox.last_run_ledger()
+    assert ledger["exit"] == 7
+    assert ledger["notify_attempted"] is False
+
+
+def test_missing_venv_writes_ledger_and_attempts_notify(sandbox):
+    """`.venv/bin/activate` 不見了（venv 壞掉或整包沒裝）是最早的一個
+    early exit，過去只寫 log 就 `exit 1`，完全不進失敗通知、也不留任何
+    排程監督看得到的痕跡——這種情況下本輪根本沒執行到 `ygo-sniper daily`，
+    連 schedule_health 那條路都摸不到，所以帳本是唯一的線索。"""
+    sandbox.venv_bin.joinpath("activate").unlink()
+
+    result = sandbox.run()
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert not sandbox.marker_file.exists(), "venv 都不見了，不該執行到 ygo-sniper stub"
+    log = sandbox.log_text()
+    assert "找不到 .venv" in log
+    sandbox.assert_no_network_call()  # 沒有 .env，不該真的打 curl
+
+    ledger = sandbox.last_run_ledger()
+    assert ledger["exit"] == 1
+    assert ledger["notify_attempted"] is False
+
+
+def test_notify_delivery_recorded_when_curl_succeeds(sandbox):
+    """失敗通知的 curl 真的送達（http=200）——帳本要記下「已送達」，
+    這樣下一輪的 watchdog_message 才不會對著已經通知過的失敗重複講一次。
+
+    刻意打破沙盒平常「永遠沒有 .env」的預設（見 `write_fake_env` 的
+    docstring）：curl 本身仍然是沙盒 stub，不是真的網路，只是要讓
+    `if [ -f .env ]` 那個分支走得進去。
+    """
+    sandbox.set_ygo_sniper_stub(_STUB_EXIT_7)
+    sandbox.write_fake_env()
+    sandbox.set_curl_stub(
+        f'#!/bin/bash\ntouch "{sandbox.curl_marker_file}"\nprintf "200"\nexit 0\n'
+    )
+
+    result = sandbox.run()
+
+    assert result.returncode == 7, result.stderr
+    assert sandbox.curl_marker_file.exists(), "curl stub 應該被叫到"
+    log = sandbox.log_text()
+    assert "失敗通知已送達（http=200）" in log
+
+    ledger = sandbox.last_run_ledger()
+    assert ledger["exit"] == 7
+    assert ledger["notify_attempted"] is True
+    assert ledger["notify_http"] == "200"
+    assert ledger["notify_curl_exit"] == 0
+
+
+def test_notify_delivery_recorded_when_curl_itself_fails(sandbox):
+    """失敗通知的 curl 自己也失敗（模擬筆電剛醒、Wi-Fi 還沒穩）——這正是
+    Fix A 要解的事故形狀：連失敗通知都送不出去，帳本必須留下痕跡，
+    不能像過去那樣 `> /dev/null` 把結果直接丟掉。
+    """
+    sandbox.set_ygo_sniper_stub(_STUB_EXIT_7)
+    sandbox.write_fake_env()
+    sandbox.set_curl_stub(
+        f'#!/bin/bash\ntouch "{sandbox.curl_marker_file}"\nprintf "000"\nexit 6\n'
+    )
+
+    result = sandbox.run()
+
+    assert result.returncode == 7, result.stderr
+    log = sandbox.log_text()
+    assert "失敗通知本身也沒送成功" in log
+    assert "curl exit=6" in log
+
+    ledger = sandbox.last_run_ledger()
+    assert ledger["exit"] == 7
+    assert ledger["notify_attempted"] is True
+    assert ledger["notify_http"] == "000"
+    assert ledger["notify_curl_exit"] == 6
 
 
 def test_reentrancy_skips_when_lock_owner_is_alive(sandbox):

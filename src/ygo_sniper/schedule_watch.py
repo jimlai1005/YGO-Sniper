@@ -11,15 +11,35 @@ log 裡就是少幾行，與「今天沒好貨」無法區分。唯一可靠的�
 **2026-08-12 修正（Fix 1，事故背景）**：舊版拿「now - prev」（實際經過的時間，
 基準是上一輪*真正*開始的時刻，帶著 launchd 喚醒漂移）去跟「expected」
 （基準是理想排程網格的固定間隔）比大小——兩個數字來自不同的基準，是
-CLAUDE.md 第三節／工程原則 1 的same錯誤。後果：只要上一輪本身晚起
-（哪怕只晚 1-15 分鐘，而 15 分正是本模組自己文件裡承認的正常喚醒漂移），
-「expected」就會因為算法非單調而膨脹（例如 15:30→120 但 15:31→145），
-吃掉緊接著被漏掉的那個時段——實測整個 18:00-22:30 晚間結標高峰，只要有
-15 分鐘的正常漂移疊上任何一個被跳過的時段，就完全不出聲。
+CLAUDE.md 第三節／工程原則 1 的同一種錯誤。修法：改成解出「上一輪之後，
+排程網格上絕對的下一個時間點」（`next_slot_after`），不再比較「經過了幾分鐘」。
 
-修法：不比較「經過了幾分鐘」，改成解出「上一輪之後，排程網格上絕對的
-下一個時間點」（`next_slot_after`），拿它直接跟現在的絕對時鐘時間比。
-兩邊都是絕對時間，drift 不會再汙染判準，也不會有非單調的問題。
+**2026-08-12 修正（Fix B，事故背景）**：Fix 1 把比較基準換成了絕對時間點，
+但仍然留了一個 `now - prev > 寬容值` 的判準（`_SLACK_MINUTES=20`）——這個
+固定寬容值本身又是一次粗糙近似：實測 10 天真實 log，08-08 那天第一輪在
+10:06 才起跑（比 09:30 晚 36 分，純粹是筆電晚開機，當天 15 個時段一個都
+沒漏），因為 36 分鐘的「經過時間」把整個隔夜空窗（22:30→09:30，本來就是
+刻意的夜間空窗）也算了進去，被報成「排程空窗 11.6 小時」——**假警報**；
+另一次是 27 分鐘的正常漂移在鄰近時段又觸發一次重複告警。兩週跑下來假警報
+與重複告警各發生一次，而告警訊息的使用者只有一個人，這正是 CLAUDE.md 第一節
+「誤放看得見」的反面教材：假警報比沒有告警更快讓人不再看這個頻道。
+修法：不再比較「經過了多久」，改成直接列舉「網格上有哪幾格落在上一輪
+與這一輪之間、卻沒有任何一輪去代表它」（`missed_slots_between`）——
+這一輪自己的存在就代表它所在的那一格，不論它自己漂移了幾分鐘；
+漂移因此在結構上不會被誤判成漏跑，**不再需要任何寬容值**，
+`_SLACK_MINUTES` 已整個刪除。
+
+**2026-08-12 修正（Fix A，事故背景）**：2026-08-10 那次真正卡死 8.5 小時的
+事故，卡點其實在 `pipe.close()`／直譯器結束（Playwright 行程洩漏），
+不在 `pipe.scan()` 中途——`ygo-sniper daily` 早就把完整輸出都印完、
+`RUN_FINISHED_KEY` 也已經正常寫下，下一輪的 `schedule_health` 因此完全看
+不出異狀。唯一還留著證據的地方是 `run_with_timeout.py` 的 watchdog：卡死
+超過門檻會被強制殺掉、exit=124，但原本那則失敗通知是 `curl -s ... >
+/dev/null` 直接丟掉結果的——筆電剛醒、Wi-Fi 還沒穩時那顆 curl 送不出去，
+整個事故就 100% 無聲。修法見 `watchdog_message`：`run_daily.sh` 把每一輪
+的結束狀態與通知有沒有確認送達寫進 `data/last_run_exit`，這裡讀出來、
+折進同一套 `resolve_alert` pending 帳本，跟排程空窗共用「只有送達才消耗」
+的保障。
 """
 
 from __future__ import annotations
@@ -42,11 +62,9 @@ PENDING_ALERT_KEY = "schedule_alert_pending"
 _WINDOWS = [(9 * 60 + 30, 17 * 60 + 30, 120), (18 * 60, 22 * 60 + 30, 30)]
 
 #: 把 _WINDOWS 展開成當天所有排程時間點（分鐘數，已排序去重）。
-#: `next_slot_after` 的唯一資料來源——不再另外維護一份「間隔」邏輯。
+#: `next_slot_after`／`_latest_slot_at_or_before` 的唯一資料來源
+#: ——不再另外維護一份「間隔」邏輯。
 _ALL_SLOTS: list[int] = sorted({m for lo, hi, step in _WINDOWS for m in range(lo, hi + 1, step)})
-
-#: launchd 喚醒漂移的寬限（實測 ~15 分，見上）。
-_SLACK_MINUTES = 20
 
 
 def next_slot_after(prev: datetime) -> datetime:
@@ -66,10 +84,66 @@ def next_slot_after(prev: datetime) -> datetime:
     return datetime(tomorrow.year, tomorrow.month, tomorrow.day, first // 60, first % 60)
 
 
+def _latest_slot_at_or_before(now: datetime) -> datetime:
+    """排程網格上最後一個 `<= now` 的時間點——`now` 這一輪自己代表的那一格。
+
+    不論這一輪實際跑得多準時或多晚，它的存在本身就是「這一格有被執行到」
+    的證明；`missed_slots_between` 靠這個值劃出「不算漏跑」的那一格。
+    """
+    today = now.date()
+    todays = [
+        datetime(today.year, today.month, today.day, m // 60, m % 60) for m in _ALL_SLOTS
+    ]
+    at_or_before = [c for c in todays if c <= now]
+    if at_or_before:
+        return max(at_or_before)
+    yesterday = today - timedelta(days=1)
+    last = _ALL_SLOTS[-1]
+    return datetime(yesterday.year, yesterday.month, yesterday.day, last // 60, last % 60)
+
+
+def missed_slots_between(prev: datetime, now: datetime) -> list[datetime]:
+    """`prev` 之後、`now` 這一輪自己代表的那一格之前，被跳過的排程時間點。
+
+    見模組開頭 Fix B 的事故背景：這取代了「經過分鐘數 vs 理想間隔 + 寬容值」
+    的比較。兩邊都只用來定位網格上的絕對格子，drift 因此在結構上不會被
+    誤判成漏跑，不需要任何 magic constant 去容忍它。
+
+    保證終止：`next_slot_after` 每次呼叫都嚴格前進，`_latest_slot_at_or_before`
+    是固定值，所以迴圈次數以「兩者之間隔了幾格」為上限——即使停機一整年，
+    也只是幾千次迭代，不會失控。`prev > now`（時鐘被往回校正）時第一次
+    迭代就會直接超過 attributed，回傳空list，維持舊版「未來基準值不出聲」
+    的行為不變。
+    """
+    attributed = _latest_slot_at_or_before(now)
+    slots: list[datetime] = []
+    cursor = prev
+    while True:
+        nxt = next_slot_after(cursor)
+        if nxt >= attributed:
+            break
+        slots.append(nxt)
+        cursor = nxt
+    return slots
+
+
+def _format_missed(slots: list[datetime]) -> str:
+    """漏跑時段列表變成一句話。超過 6 個就只報頭尾＋筆數，避免筆電放了
+    一整週沒開機時，Telegram 訊息被幾十個時間戳灌爆。"""
+    if len(slots) <= 6:
+        listed = "、".join(f"{s:%H:%M}" for s in slots)
+        return f"漏跑 {len(slots)} 個時段（{listed}）"
+    return f"漏跑 {len(slots)} 個時段（{slots[0]:%m-%d %H:%M} ～ {slots[-1]:%m-%d %H:%M}）"
+
+
 def expected_next_gap_minutes(prev: datetime) -> int:
-    """`next_slot_after(prev) - prev` 的分鐘數——純粹是給人看／給舊測試相容用的
-    衍生量，**不是**告警判準本身（告警判準見 `schedule_health` 內部直接用
-    `next_slot_after` 與絕對時鐘比較，理由見模組開頭的 Fix 1 說明）。
+    """`next_slot_after(prev) - prev` 的分鐘數。
+
+    **`src/` 與 `web/` 裡沒有任何production呼叫端**——`schedule_health` 的
+    告警判準已經改用 `missed_slots_between`（見 Fix B），這個函式純粹是
+    給人（REPL／debug）與既有回歸測試用的衍生量，刻意留著沒刪：它是
+    `next_slot_after` 最直覺的人類可讀投影，拿掉的話下次要手算「上一輪
+    到下一格還有幾分鐘」得重新推導一次。
     """
     delta = next_slot_after(prev) - prev
     return int(delta.total_seconds() // 60)
@@ -126,19 +200,18 @@ def schedule_health(
 
     兩件事分開檢查、可以同時成立：
     1. 上一輪有開始沒收尾（當機／被 kill／watchdog 終止）。
-    2. 現在的時鐘已經超過「上一輪之後的下一個排程時間點 + 寬限」——
-       這是 Fix 1 改過的比較：`next_slot_after(prev)` 是絕對時間，
-       跟 `now` 這個絕對時間直接比，drift 不會汙染判準。
+    2. `prev` 與這一輪之間，排程網格上有沒有格子被跳過（`missed_slots_between`，
+       見模組開頭 Fix B 的事故背景——不再是「經過分鐘數 vs 寬容值」）。
 
     刻意對輸入寬容：解析失敗（壞掉的 ISO 字串、naive/aware 混用等）一律當作
     「沒有可用基準」處理而不是往外拋——這是一個純資訊性的偵測器，不是
     安全關鍵動作（不動資料、不下單），讓它的例外炸掉整個 scan()
     比「這一輪沒偵測到空窗」的代價高得多。
 
-    時鐘被往回校正、或基準髒到跑到未來時，`now > due + slack` 天然為假
-    → 不出聲。這是刻意的：一個「未來」的基準值本身就不可信，硬要對著它算
-    空窗只會生出更沒意義的訊息；等下一輪基準被覆寫回正常值，偵測會自己
-    恢復正常，不需要額外處理這個分支。
+    時鐘被往回校正、或基準髒到跑到未來時，`missed_slots_between` 天然回傳
+    空 list → 不出聲。這是刻意的：一個「未來」的基準值本身就不可信，
+    硬要對著它算漏了幾格只會生出更沒意義的訊息；等下一輪基準被覆寫回
+    正常值，偵測會自己恢復正常，不需要額外處理這個分支。
     """
     if not prev_started:
         return None
@@ -162,19 +235,50 @@ def schedule_health(
         )
 
     try:
-        due = next_slot_after(prev)
-        late = now > due + timedelta(minutes=_SLACK_MINUTES)
+        missed = missed_slots_between(prev, now)
     except TypeError:
         # naive/aware 混用等無法比較的狀況：資訊性偵測器寧可漏報也不能讓
         # 整輪 scan() 因為 TypeError 而中斷。
-        due = None
-        late = False
+        missed = []
 
-    if late and due is not None:
-        gap_hours = (now - prev).total_seconds() / 3600
-        msgs.append(
-            f"排程空窗 {gap_hours:.1f} 小時（上輪 {prev:%m-%d %H:%M} 開始，"
-            f"預期 {due:%m-%d %H:%M} 前接棒）——可能筆電睡眠漏跑或鎖被卡住"
-        )
+    if missed:
+        msgs.append(f"{_format_missed(missed)}——可能筆電睡眠漏跑或鎖被卡住")
 
     return "🚨 排程監督：" + "；".join(msgs) if msgs else None
+
+
+def watchdog_message(ledger: dict | None) -> str | None:
+    """把 `run_daily.sh` 寫的「上一輪結束帳本」（`data/last_run_exit`）翻成一句話。
+
+    純函式：只吃一個已經解析好的 dict，不碰檔案系統——讀檔／刪檔是呼叫端
+    （pipeline.py）的事，跟本模組其他函式的純／不純分工一致（見模組開頭）。
+
+    見模組開頭 Fix A 的事故背景：只有「上一輪真的失敗（`exit != 0`），
+    而且 `run_daily.sh` 自己那則失敗通知也沒確認送達」才出聲——已經成功
+    送達的失敗通知不重複講一次，重複講就是 Fix B 想解決的那種雜訊
+    （兩套告警管道疊在一起，比只有一套更容易被使用者關掉）。
+
+    對輸入寬容：ledger 格式不對、缺欄位、`exit` 不是 int，一律當作
+    「沒有可用資訊」回傳 None，不往外拋——理由與 `schedule_health` 相同。
+    """
+    if not isinstance(ledger, dict):
+        return None
+    exit_code = ledger.get("exit")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code == 0:
+        return None
+    delivered = (
+        ledger.get("notify_attempted") is True
+        and ledger.get("notify_http") == "200"
+        and ledger.get("notify_curl_exit") == 0
+    )
+    if delivered:
+        return None
+    if exit_code == 124:
+        return (
+            "上一輪被 watchdog 強制終止（exit=124），"
+            "run_daily.sh 的失敗通知本身也沒確認送達"
+        )
+    return (
+        f"上一輪掃描失敗（exit={exit_code}），"
+        "run_daily.sh 的失敗通知本身也沒確認送達"
+    )

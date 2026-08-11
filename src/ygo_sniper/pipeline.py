@@ -26,6 +26,7 @@ from .schedule_watch import (
     RUN_STARTED_KEY,
     resolve_alert,
     schedule_health,
+    watchdog_message,
 )
 from .scoring import evaluate, is_triggered, seller_histogram
 from .sources import CachedFetcher, build_sources
@@ -811,6 +812,15 @@ class Pipeline:
                 self.store.get_meta(RUN_FINISHED_KEY),
                 now,
             )
+            # Fix A：watchdog 帳本（run_daily.sh 寫的 data/last_run_exit）折進
+            # 同一條偵測。兩者都算「這一輪偵測到的問題」，合併成一句話一起
+            # 進 resolve_alert——共用同一套 pending／送達才消耗的保障，
+            # 不是另開一條沒有重送機制的路（見 schedule_watch.py 模組開頭
+            # Fix A 的事故背景：8.5 小時卡死那次唯一的線索就是這個帳本，
+            # 而原本的 curl 通知本身可能也送不出去）。
+            watchdog_msg = self._fold_watchdog_ledger()
+            if watchdog_msg:
+                detected = f"{detected}；{watchdog_msg}" if detected else watchdog_msg
             self._schedule_alert, new_pending = resolve_alert(
                 self.store.get_meta(PENDING_ALERT_KEY), detected
             )
@@ -827,6 +837,52 @@ class Pipeline:
                 f"[warn] 排程空窗偵測失敗（不影響本輪掃描）："
                 f"{type(exc).__name__}: {exc}"
             )
+
+    def _fold_watchdog_ledger(self) -> str | None:
+        """讀 `run_daily.sh` 寫的上一輪結束帳本（`data/last_run_exit`），
+        折成一句話；如果折出了東西就順手刪掉檔案（「讀了就算數」，
+        下一輪不會再重複折進來）。
+
+        純／不純分工：檔案讀寫（不純）留在這裡，訊息怎麼寫（純，包含
+        「已經送達的失敗通知不重複講」的判斷）在 `schedule_watch.watchdog_message`。
+
+        對檔案不存在／壞掉一律寬容：找不到帳本是**最常見**的正常狀態
+        （上一輪成功、run_daily.sh 覆寫成 exit=0，`watchdog_message` 對
+        exit=0 回 None，等於沒東西可折——但如果連讀取本身都失敗，這裡
+        也不例外拋出，理由與 `schedule_health` 相同：偵測器壞掉不能拖垮
+        真正的掃描（外層 `_update_schedule_state` 的 try/except 是最後一道，
+        這裡先擋一層是因為「檔案讀不到」本來就不是例外狀況，用 if 處理
+        比讓它落進 except 分支更清楚）。
+
+        路徑刻意算成 `cfg.db_path.parent / "last_run_exit"` 而不是
+        `cfg.root / "data" / "last_run_exit"`：production 兩者算出來是
+        同一個目錄（`storage.db_path` 預設是 `"data/sniper.db"`），但
+        `db_path` 是**全 repo 測試已經在用的隔離點**——每一個建立臨時
+        `Pipeline` 的測試 fixture 都會覆寫 `storage.db_path` 成
+        `tmp_path` 底下的絕對路徑（CLAUDE.md 第六節：測試絕不碰真實
+        世界）。如果這裡改用 `cfg.root`，任何沒有額外覆寫 `root` 的既有
+        測試（例如 `test_card_snipe.py` 呼叫 `pipeline.scan(...)`）就會
+        在跑測試時真的去讀、甚至**刪掉**這台機器上正式環境的
+        `data/last_run_exit`——比讀錯資料更糟，是直接吃掉正式帳本。
+        沿用 `db_path` 讓這裡自動繼承全 repo 既有的隔離保證，不必逐一
+        去改其他測試檔案。
+        """
+        path = self.cfg.db_path.parent / "last_run_exit"
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            ledger = json.loads(raw)
+        except (TypeError, ValueError):
+            ledger = None
+        msg = watchdog_message(ledger)
+        if msg:
+            try:
+                path.unlink()
+            except OSError:
+                pass  # 刪不掉不影響這次要不要出聲；下一輪頂多重複折一次
+        return msg
 
     def _finish_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
         """排程空窗偵測的收尾那一半：只有真正走到這裡才代表「正常收尾」。
