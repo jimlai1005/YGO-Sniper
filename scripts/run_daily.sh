@@ -82,11 +82,19 @@ for i in 1 2 3 4 5 6; do
     sleep 10
 done
 
-ygo-sniper daily >> "$LOG_FILE" 2>&1
+# watchdog：醒著卡死不得超過 25 分（睡眠凍結不計入，見 run_with_timeout.py）。
+# 124 = 被 watchdog 終止，下面的失敗通知會用不同文案。
+python scripts/run_with_timeout.py "${YGO_CYCLE_TIMEOUT:-1500}" \
+    ygo-sniper daily >> "$LOG_FILE" 2>&1
 STATUS=$?
 
 if [ $STATUS -ne 0 ]; then
     echo "[$(date '+%H:%M:%S')] 掃描失敗，exit=$STATUS" >> "$LOG_FILE"
+    if [ "$STATUS" -eq 124 ]; then
+        MSG="🚨 ygo-sniper 本輪被 watchdog 強制終止（超過 ${YGO_CYCLE_TIMEOUT:-1500}s），可能 Playwright 卡死，請看 data/logs/"
+    else
+        MSG="⚠️ ygo-sniper 掃描失敗 (exit=${STATUS})，請看 data/logs/"
+    fi
     # 失敗一定要主動告訴你。沉默的失敗是這類排程工具最大的坑：
     # 你會連續三週以為市場沒好貨，其實是 parser 早就掛了。
     if [ -f .env ]; then
@@ -95,7 +103,7 @@ if [ $STATUS -ne 0 ]; then
         curl -s -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
-            -d "text=⚠️ ygo-sniper 掃描失敗 (exit=${STATUS})，請看 data/logs/" \
+            -d "text=${MSG}" \
             > /dev/null
     fi
 fi
