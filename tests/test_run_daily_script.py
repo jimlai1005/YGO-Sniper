@@ -18,6 +18,7 @@ curl 分支在原始碼層級就進不去；另外還疊了一層 curl stub 當�
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,52 @@ RUN_WITH_TIMEOUT_SCRIPT = REPO_ROOT / "scripts" / "run_with_timeout.py"
 # 不要假紅；如果 ping stub 失效、腳本真的跑進 6 次 x 10 秒的重試迴圈，這個 timeout
 # 會讓測試明確失敗（而不是安靜地變慢、被誤以為是「稍微久一點」）。
 _SUBPROCESS_TIMEOUT = 20
+
+
+def test_watchdog_ledger_path_agrees_between_shell_writer_and_python_reader():
+    """`data/last_run_exit` 有兩處獨立推導：`run_daily.sh` 從 `PROJECT_DIR`
+    寫，`pipeline._fold_watchdog_ledger` 從 `cfg.db_path.parent` 讀。今天
+    兩者算出同一個路徑，純粹是 `config/settings.yaml` 的 `storage.db_path`
+    恰好長這樣（`"data/sniper.db"`）——不是因為兩者共用同一份推導。改一行
+    `db_path`（例如搬進 `data/db/sniper.db`，稀鬆平常的整理）就會讓 shell
+    繼續寫舊路徑、Python 開始找新路徑：讀不到檔案、折不出任何東西、
+    watchdog 告警從此靜默消失——沒有錯誤、沒有 log 行、沒有測試會紅燈。
+    這正是 CLAUDE.md 第五節的病，也是這次任務裡 `_ALL_SLOTS` 那個洞
+    （`test_windows_match_plist`）同一種形狀，只是往外挪了一層：
+    「重新推導出來的值」冒充「真正被使用的那個值」。
+
+    路徑刻意不硬編：`PROJECT_DIR=` 與 `LAST_RUN_FILE=` 兩行都從
+    `run_daily.sh` 的原始碼解析出來——硬編字串本身就是第三份推導，
+    一樣會漂移，等於用另一個「重新推導的值」去驗證「重新推導的值」。
+
+    讀的那一側刻意載入**真正的生產設定**（`load_config()`，不覆寫任何
+    欄位）——這裡要驗證的正是「今天的 settings.yaml 到底算出什麼」，
+    不是某個測試專用的假設定。
+    """
+    script_text = RUN_DAILY_SCRIPT.read_text()
+
+    project_dir_m = re.search(r'^PROJECT_DIR="([^"]+)"', script_text, re.MULTILINE)
+    assert project_dir_m, "run_daily.sh 找不到 PROJECT_DIR= 那一行，腳本格式是不是變了？"
+    project_dir = project_dir_m.group(1).replace("$HOME", str(Path.home()))
+
+    last_run_m = re.search(r'^LAST_RUN_FILE="([^"]+)"', script_text, re.MULTILINE)
+    assert last_run_m, "run_daily.sh 找不到 LAST_RUN_FILE= 那一行，腳本格式是不是變了？"
+    writer_path = Path(last_run_m.group(1).replace("$PROJECT_DIR", project_dir))
+
+    import ygo_sniper.config as config_mod
+
+    config_mod.load_config.cache_clear()
+    try:
+        cfg = config_mod.load_config()
+        reader_path = cfg.db_path.parent / "last_run_exit"
+    finally:
+        config_mod.load_config.cache_clear()
+
+    assert writer_path == reader_path, (
+        f"帳本路徑兩處推導不一致：run_daily.sh 會寫到 {writer_path}，"
+        f"pipeline.py 會去讀 {reader_path}——storage.db_path 動過手腳，"
+        "watchdog 告警會從此靜默失聯（見本測試的 docstring）"
+    )
 
 
 def _write_executable(path: Path, body: str) -> None:
