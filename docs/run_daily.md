@@ -87,7 +87,8 @@ daily` 早就把完整輸出（comps、掃描摘要、推播、告警）都印�
 「還沒被處理過」，永遠重複告警下去；每一輪不分成敗都寫，档案內容因此
 永遠只反映「最近一次真正執行」的結果。
 
-下一輪 `ygo-sniper daily` 起跑時（`Pipeline._fold_watchdog_ledger`）會讀
+下一輪 `ygo-sniper daily` 起跑時（`Pipeline._read_watchdog_ledger`，讀完
+確認 pending 已落帳才由 `_consume_watchdog_ledger` 刪檔）會讀
 這個檔案、丟給純函式 `schedule_watch.watchdog_message` 判斷要不要出聲
 ——只有「上一輪真的失敗，而且 `run_daily.sh` 自己那則失敗通知也沒確認
 送達」才折進排程監督的 `PENDING_ALERT_KEY` 帳本，跟排程空窗共用同一套

@@ -39,7 +39,7 @@ _SUBPROCESS_TIMEOUT = 20
 
 def test_watchdog_ledger_path_agrees_between_shell_writer_and_python_reader():
     """`data/last_run_exit` 有兩處獨立推導：`run_daily.sh` 從 `PROJECT_DIR`
-    寫，`pipeline._fold_watchdog_ledger` 從 `cfg.db_path.parent` 讀。今天
+    寫，`pipeline._read_watchdog_ledger` 從 `cfg.db_path.parent` 讀。今天
     兩者算出同一個路徑，純粹是 `config/settings.yaml` 的 `storage.db_path`
     恰好長這樣（`"data/sniper.db"`）——不是因為兩者共用同一份推導。改一行
     `db_path`（例如搬進 `data/db/sniper.db`，稀鬆平常的整理）就會讓 shell
@@ -167,7 +167,7 @@ class Sandbox:
         )
 
     def last_run_ledger(self) -> dict:
-        """排程監督帳本（Fix A）：`_fold_watchdog_ledger` 讀的就是這個檔案，
+        """排程監督帳本（Fix A）：`_read_watchdog_ledger` 讀的就是這個檔案，
         用 json 解析驗證欄位，不用字串比對——欄位名才是介面，不是格式。"""
         assert self.last_run_file.exists(), "data/last_run_exit 沒有被寫出來"
         return json.loads(self.last_run_file.read_text())
