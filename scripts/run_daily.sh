@@ -84,7 +84,32 @@ done
 
 # watchdog：醒著卡死不得超過 25 分（睡眠凍結不計入，見 run_with_timeout.py）。
 # 124 = 被 watchdog 終止，下面的失敗通知會用不同文案。
-python scripts/run_with_timeout.py "${YGO_CYCLE_TIMEOUT:-1500}" \
+#
+# 用 .venv/bin/python 而不是裸 python：上面已經 source .venv/bin/activate，
+# 裸 python 理論上也會落在 venv 的 bin 裡，但那樣就是在依賴「activate 這步
+# 真的成功把 PATH 排到前面」——多一層隱含順序。改成 .venv/bin/python 直接指名，
+# 不繞 PATH 解析；而且上面的 `.venv/bin/activate` 存在檢查已經保證了
+# `.venv/bin/python` 必定存在，不是新增依賴，只是把既有保證講得更明白。
+# （stock macOS 沒有 `python`，只有 `python3`；活動失敗時裸 python 會是
+# exit 127，雖然照樣會走進下面失敗分支大聲告警，不是靜默失敗，但沒必要
+# 讓失敗多繞一層猜測。）
+#
+# watchdog 的新孤兒視窗（只記錄，不重新設計鎖）：如果有東西只殺掉了
+# run_with_timeout.py 這個 supervisor 行程本身、而不是它的 process group
+# （例如 OOM killer 挑上了 supervisor 的 pid，或有人手動 kill -9 這個 pid），
+# 這裡的 shell wait 會直接拿到回傳、往下走、觸發 EXIT trap 把鎖釋放掉——
+# 但孫行程 `ygo-sniper daily` 的 process group 沒人管了，變成孤兒，
+# 而且從此沒有任何 timeout 在管它。下一輪排程一看鎖已經沒了，就會開始
+# 跑第二個 `ygo-sniper daily`，兩個行程同時打同一批賣場、同時寫同一個
+# sqlite DB。鎖檔存的是這支 shell 自己的 $$，不是 supervisor 或
+# ygo-sniper 的 pid，所以殘鎖回收邏輯（上面 acquire_lock 那段）看不出這個孤兒。
+# 這個洞被判定為可接受：範圍窄（要精準殺中 supervisor pid 而不動整組），
+# 而且不是新問題——加 watchdog 之前，只要 shell 本身被 SIGKILL，鎖一樣會
+# 被釋放、`ygo-sniper daily` 一樣會變孤兒，形狀相同。2am 除錯線索：如果
+# log 裡看到兩段重疊的「===== 開始 =====」／「===== 結束 =====」區塊，
+# 或同一時段 sqlite 出現寫入衝突／重複推播，先懷疑這個孤兒視窗，
+# 去找有沒有系統層級的 OOM kill 或手動 kill -9 紀錄（`log show` / `dmesg`）。
+.venv/bin/python scripts/run_with_timeout.py "${YGO_CYCLE_TIMEOUT:-1500}" \
     ygo-sniper daily >> "$LOG_FILE" 2>&1
 STATUS=$?
 
