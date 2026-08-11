@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 
 from ..config import Config
-from .base import BlockedError, CachedFetcher
+from .base import BlockedError, CachedFetcher, _log_request
 
 #: 實測 282s 通 / 327s 擋 → 預算 240s 留 42s 邊際。
 #: 連兩天觸發反應式重取就降 180（PLAN 風險 3）。
@@ -101,7 +101,19 @@ class WafSession:
             try:
                 context = browser.new_context(user_agent=self.cfg.fetch["user_agent"])
                 page = context.new_page()
-                page.goto(seed_url, wait_until="domcontentloaded")
+                # 這是全專案「被節流了嗎」問題裡最切題的一次網路往返——
+                # 解 WAF 挑戰本身就是本功能要調查的目標，且實測可能吃掉 20+ 秒
+                # 完全沒有痕跡。outcome 用 "playwright-goto" 而不是 HTTP 狀態碼，
+                # 因為這條路徑是瀏覽器導航，成不成功不是 httpx 那套分類；
+                # 失敗要先記錄再往外拋，跟 CachedFetcher._check 同一個原則——
+                # 診斷紀錄不能因為之後被歸類成失敗就消失。
+                t0 = time.monotonic()
+                try:
+                    page.goto(seed_url, wait_until="domcontentloaded")
+                except Exception as exc:  # noqa: BLE001 - 記錄後原樣重拋，不吞
+                    _log_request(seed_url, type(exc).__name__, t0)
+                    raise
+                _log_request(seed_url, "playwright-goto", t0)
                 try:
                     # 等結果骨架渲染完（也等掉 WAF 過場）；等不到不算致命——
                     # 有些頁（如查無結果）骨架是空的，token 照樣拿得到

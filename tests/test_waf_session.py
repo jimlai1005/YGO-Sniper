@@ -343,3 +343,144 @@ def test_launch_failure_trips_breaker_across_get_calls(make_session):
         session.get(OTHER_URL, use_cache=False)
     assert acquire.calls == 1, "斷路器跳開後不該再開瀏覽器"
     assert server.calls == 0, "沒有 token 就不該裸奔去打網路"
+
+
+# ---------------------------------------------------------------------------
+# 10. `_acquire()` 本體的 [req] log —— 解 WAF 挑戰的 page.goto()
+#
+# 上面所有測試都把 `_acquire`整個換掉（PLAN Q4 的隔離），從沒真的跑過它
+# 內部那段 Playwright 邏輯。這裡反過來：偽造 `playwright.sync_api`，
+# 讓 `_acquire` 的真實程式碼跑起來，才測得到新加的 [req] log。
+# ---------------------------------------------------------------------------
+
+
+class FakePage:
+    def __init__(self, *, goto_error=None, html="<html>ok</html>", cookies=None):
+        self.goto_error = goto_error
+        self._html = html
+        self._cookies = cookies if cookies is not None else []
+
+    def goto(self, url, wait_until=None):
+        if self.goto_error is not None:
+            raise self.goto_error
+
+    def wait_for_selector(self, *_a, **_kw):
+        pass  # `_acquire` 把這裡的例外吞掉，不是這次要測的重點
+
+    def content(self):
+        return self._html
+
+
+class FakeBrowserContext:
+    def __init__(self, page: FakePage):
+        self._page = page
+
+    def new_page(self):
+        return self._page
+
+    def cookies(self):
+        return self._page._cookies
+
+
+class FakeBrowser:
+    def __init__(self, context: FakeBrowserContext):
+        self._context = context
+        self.closed = False
+
+    def new_context(self, **_kw):
+        return self._context
+
+    def close(self):
+        self.closed = True
+
+
+class FakeChromium:
+    def __init__(self, browser: FakeBrowser):
+        self._browser = browser
+
+    def launch(self, **_kw):
+        return self._browser
+
+
+class FakePW:
+    def __init__(self, browser: FakeBrowser):
+        self.chromium = FakeChromium(browser)
+
+
+class FakeSyncPlaywrightCM:
+    """`sync_playwright()` 回傳的 context manager 替身。"""
+
+    def __init__(self, pw: FakePW):
+        self._pw = pw
+
+    def __enter__(self):
+        return self._pw
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _install_fake_playwright(monkeypatch, page: FakePage) -> FakeBrowser:
+    context = FakeBrowserContext(page)
+    browser = FakeBrowser(context)
+    pw = FakePW(browser)
+    monkeypatch.setattr(
+        "playwright.sync_api.sync_playwright", lambda: FakeSyncPlaywrightCM(pw)
+    )
+    return browser
+
+
+def _bare_session(cfg, tmp_path) -> WafSession:
+    scoped = replace(
+        cfg,
+        storage={**cfg.storage, "cache_dir": str(tmp_path / "cache")},
+        fetch={**cfg.fetch, "delay_seconds": 0.0, "backoff_seconds": 0.0},
+    )
+    return WafSession(scoped)
+
+
+SEED_URL = "https://buyee.jp/mercari/search?keyword=test&lang=ja"
+
+
+def test_acquire_success_logs_playwright_goto(cfg, tmp_path, monkeypatch, capsys):
+    """token 拿到手的那次 page.goto() 要留下一行 [req]——這是全專案回答
+    「被節流了嗎」最切題的一次網路往返，之前完全沒有痕跡。
+    """
+    page = FakePage(
+        html="<html><body>" + "item" * 300 + "</body></html>",
+        cookies=[{"name": "aws-waf-token", "value": "tok-123"}],
+    )
+    _install_fake_playwright(monkeypatch, page)
+    session = _bare_session(cfg, tmp_path)
+
+    token, html = session._acquire(SEED_URL)
+
+    assert token == "tok-123"
+    lines = [
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("[req]")
+    ]
+    assert len(lines) == 1
+    assert "buyee.jp" in lines[0]
+    assert "playwright-goto" in lines[0]  # 不是 HTTP 狀態碼——這條是瀏覽器導航
+    assert "ms" in lines[0]
+
+
+def test_acquire_goto_failure_logs_before_raising(cfg, tmp_path, monkeypatch, capsys):
+    """page.goto() 本身失敗（挑戰頁逾時、導航被中斷……）也要留痕跡，
+    而且要在例外往外拋之前就記下來——跟 CachedFetcher._check 同一個順序原則：
+    失敗的請求不能因為之後被分類成錯誤就從 log 上消失。
+    """
+    boom = TimeoutError("Timeout 30000ms exceeded navigating to seed_url")
+    page = FakePage(goto_error=boom)
+    _install_fake_playwright(monkeypatch, page)
+    session = _bare_session(cfg, tmp_path)
+
+    with pytest.raises(TimeoutError):
+        session._acquire(SEED_URL)
+
+    lines = [
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("[req]")
+    ]
+    assert len(lines) == 1
+    assert "buyee.jp" in lines[0]
+    assert "TimeoutError" in lines[0]

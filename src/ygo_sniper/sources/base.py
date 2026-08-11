@@ -47,18 +47,37 @@ def _log_request(url: str, outcome: object, started: float) -> None:
     本專案所有來源的查詢字串只有關鍵字／價格／分類／分頁這類公開參數，
     憑證一律走 header（見 ebay.py 的 Authorization Bearer/Basic）。
     若未來新增一個把 token 放進 URL 的來源，要在那個呼叫點先遮蔽，
-    不能指望這裡的截斷。
+    不能指望這裡的截斷（`notify.py:826` 的 Telegram bot token 就是直接嵌在
+    URL 裡的例子——那個模組完全不叫這個函式，但將來若有人想把它也接進來，
+    這裡的截斷不構成遮蔽，必須在呼叫點先處理過再傳進來）。
+
+    這個函式包在最外層的 `try/except Exception` 裡，而且**故意**是全捕、
+    不重新拋出——這違反本專案「失敗要分類、要大聲」的一般原則（見全域
+    工程原則 2/3/5），但這裡是刻意的例外，理由寫在這裡：這個函式的唯一
+    契約是「純觀察，絕不影響呼叫端」（CLAUDE.md 第八節「工具只計算，不碰
+    錢」的同一種精神——這裡是「log 只記錄，不碰請求結果」）。它被呼叫在
+    `CachedFetcher.get` 的 `except httpx.HTTPError` 分支裡；那個分支正在
+    建構一個 `FetchError(transient=True)` 準備讓上層重試——如果 `_log_request`
+    在那個當下拋出例外（例如 `urlsplit()` 對某些畸形 authority／IPv6 寫法
+    會拋 `ValueError`），它會**取代**那個 FetchError、讓例外種類從「可重試
+    的抓取失敗」變成「未分類的 log 函式內部錯誤」，直接打斷重試迴圈——
+    診斷用的旁路把主路徑弄壞了。目前不可達（本專案所有 URL 的 host 段
+    都來自寫死的常數），但「目前不可達」不是「結構上不可能」，這個函式
+    不該靠呼叫端的巧合守住這個契約。
     """
-    if os.environ.get("YGO_REQ_LOG", "1") == "0":
-        return
-    parts = urlsplit(url)
-    ms = (time.monotonic() - started) * 1000
-    q = f"?{parts.query[:80]}" if parts.query else ""
-    print(
-        f"[req] {datetime.now().isoformat(timespec='seconds')} "
-        f"{parts.netloc} {outcome} {ms:.0f}ms {parts.path}{q}",
-        flush=True,
-    )
+    try:
+        if os.environ.get("YGO_REQ_LOG", "1") == "0":
+            return
+        parts = urlsplit(url)
+        ms = (time.monotonic() - started) * 1000
+        q = f"?{parts.query[:80]}" if parts.query else ""
+        print(
+            f"[req] {datetime.now().isoformat(timespec='seconds')} "
+            f"{parts.netloc} {outcome} {ms:.0f}ms {parts.path}{q}",
+            flush=True,
+        )
+    except Exception:  # noqa: BLE001 - 見上方 docstring：這個函式絕不能影響呼叫端
+        pass
 
 
 def extra_ca_files(root: Path) -> list[Path]:

@@ -283,3 +283,57 @@ def test_req_log_disabled_by_env_var(make_fetcher, capsys, monkeypatch):
     fetcher.get(URL)
 
     assert _req_lines(capsys.readouterr().out) == []
+
+
+#: authority 段有不成對的 `[`——`urlsplit()` 對這種寫法真的會拋
+#: `ValueError: Invalid IPv6 URL`（已用純 stdlib 重現），但 httpx 自己的
+#: URL 解析不介意，一路抓得到內容。這正是診斷旁路可能弄壞主路徑的縫隙：
+#: `_log_request` 內部會炸，但抓取本身沒有理由跟著炸。
+IPV6_BROKEN_URL = "https://exa[mple.test/search?q=blue-eyes"
+
+
+def test_log_request_internal_failure_does_not_break_successful_fetch(make_fetcher):
+    """`_log_request` 內部真的壞掉（urlsplit 對畸形 authority 拋 ValueError）
+    時，抓取結果必須跟沒有這行 log 一模一樣——這是它的契約：純觀察，
+    絕不影響呼叫端。
+    """
+    server = FakeServer(httpx.Response(200, text=GOOD_HTML))
+    fetcher = make_fetcher(server)
+
+    result = fetcher.get(IPV6_BROKEN_URL)
+
+    assert result == GOOD_HTML
+    assert server.calls == 1
+
+
+def test_log_request_internal_failure_does_not_mask_transient_error(make_fetcher):
+    """這是這次要補的漏洞本身：`except httpx.HTTPError` 分支裡準備好的
+    `FetchError(transient=True)` 不能被 `_log_request` 內部炸出的
+    `ValueError` 取代——取代的話重試迴圈會被一個未分類的例外打斷，
+    上層再也分不出「可重試」與「log 函式壞了」。
+    """
+    server = FakeServer(httpx.Response(500))
+    fetcher = make_fetcher(server)
+
+    with pytest.raises(FetchError) as exc:
+        fetcher.get(IPV6_BROKEN_URL)
+
+    assert exc.value.transient is True
+    assert server.calls == fetcher.max_attempts  # 證明重試迴圈真的跑完，沒被中途打斷
+
+
+def test_log_request_swallows_urlsplit_error_via_monkeypatch(make_fetcher, monkeypatch):
+    """不依賴 IPv6 這個特定寫法繼續有效——直接讓 `urlsplit` 炸，
+    確認 `_log_request` 的 try/except 包住的是整個函式本體，不是只有
+    IPv6 這一種輸入形狀。
+    """
+    import ygo_sniper.sources.base as base_mod
+
+    def _boom(_url: str):
+        raise ValueError("模擬 urlsplit 內部炸掉")
+
+    monkeypatch.setattr(base_mod, "urlsplit", _boom)
+    server = FakeServer(httpx.Response(200, text=GOOD_HTML))
+    fetcher = make_fetcher(server)
+
+    assert fetcher.get(URL) == GOOD_HTML
