@@ -302,9 +302,12 @@ def _reason_bucket(why: str) -> str:
 # ---------------------------------------------------------------------------
 # 已售出查詢的組合展開與請求節流
 # ---------------------------------------------------------------------------
-#: 每小時排程跑一輪；這個計數器決定「第幾輪才真的跑已售出查詢」。
-#: 存在 store 的 meta 表（跨行程、跨重啟都要記得住，用記憶體變數等於沒節流）。
-SOLD_RUN_COUNTER_KEY = "comps_sold_run_counter"
+#: 分片游標：下一輪從展開後清單的第幾個 (source, keyword) 開始跑。
+#: 存 store meta（跨行程、跨重啟都要記得住，用記憶體變數等於沒節流）。
+SOLD_CURSOR_KEY = "comps_sold_cursor"
+#: 同一分片連續整片失敗的次數；達 3 次就強制推進游標並出聲，避免壞片卡死輪替。
+SOLD_STALL_KEY = "comps_sold_stall"
+SOLD_STALL_LIMIT = 3
 
 #: 展開後的查詢數硬上限。組合展開是「乘法」，稀有度 6 × 年代 6 × 機構 2 = 72，
 #: 手一滑多加兩個詞就變 120——而每個查詢最多還要翻 N 頁。這個上限不是禮貌，
@@ -361,6 +364,17 @@ def expand_comps_queries(spec: Mapping | None) -> list[str]:
         print(f"[comps] 展開出 {len(deduped)} 個已售出查詢，超過上限 {cap}，截斷尾端")
         deduped = deduped[:cap]
     return deduped
+
+
+@dataclass(slots=True)
+class SoldShard:
+    """一輪要跑的已售出查詢分片。`next_cursor is None` = 不推進游標
+    （無 store、every_n_runs<=1 的「每輪全跑」情境；force 全量會給 0，
+    仍然推進，見 `sold_shard`）。"""
+
+    queries: list[tuple[str, str]]
+    label: str
+    next_cursor: int | None
 
 
 @dataclass(slots=True)
@@ -599,37 +613,94 @@ class CompsEngine:
         spec = self.cfg.watchlist.get("comps_queries") or {}
         return max(1, int(spec.get("pages", 2)))
 
-    def claim_sold_run(self, *, force: bool = False) -> tuple[bool, str]:
-        """這一輪要不要跑已售出查詢？**有副作用：每呼叫一次計數 +1。**
+    def sold_shard(self, sources, *, force: bool = False) -> SoldShard:
+        """這一輪要跑哪一片已售出查詢。
 
-        行情是以「週」為單位在變的，但排程每小時跑一輪。已售出查詢展開後
-        有數十個關鍵字 × 數頁，每小時全跑一次等於每天對人家打幾千個請求，
-        換來的是幾乎完全重複的資料（落札相場的日流量遠小於我們的抓取量）。
-        所以節流：每 `comps_queries.every_n_runs` 輪才真的跑一次
-        （每小時排程 → 12 代表一天兩次）。
+        舊制是「每 every_n_runs 輪跑一次全量」——一口氣 88 查詢 × 4 頁
+        ≈ 352 請求，是全 log 唯一與硬 blocked 同輪出現過的批次形態
+        （daily-20260810.log:450-477）。改成每輪走 ceil(N/every) 個，
+        every 輪走完一整份：對方看到的是穩定小流量，每查詢的更新頻率不變，
+        而且一片塞得進一顆 WAF token 的 240s 預算。
 
-        計數器落在 store 的 meta 表而不是記憶體：CLI 每輪都是全新的行程，
-        記憶體變數的「節流」在這個部署形態下等於沒有節流。
-        `every_n_runs <= 1` 或沒有 store（單元測試、dry-run 情境）→ 每輪都跑。
+        游標推進在 `commit_sold_shard`（呼叫端跑完才知道成敗）；
+        `force=True` 回全量並在 commit 時把游標歸零（人工逃生門）。
 
-        `force=True` 無視節流（人工「我現在就要更新行情」的逃生門），
-        但**計數器照樣前進**——手動跑過一次就等於這一輪的配額用掉了，
-        不然人工跑幾次就把排程的節流洗掉了。
-
-        回傳 `(要不要跑, 說明)`；說明會被印出來，讓「這輪為什麼沒有新行情」
-        永遠有一句話交代——安靜地跳過與安靜地壞掉，外顯是一樣的。
+        ⚠️ **`force` 目前沒有接到任何 CLI／排程路徑**（`pipeline.py` 與
+        `cli.py` 都呼叫不帶參數的 `refresh_comps()`）——這是死碼但不是安全碼：
+        它一次回傳全量、不分片，正是這整個改動要拆掉的 352 請求尖峰形狀。
+        將來要接 `ygo-sniper comps --force` 之類的手動入口之前，先想清楚
+        怎麼分批（例如強制模式也照 shard size 跑但連續跑完整輪），
+        不要原樣接一顆按鈕上去。
         """
         spec = self.cfg.watchlist.get("comps_queries") or {}
         every = int(spec.get("every_n_runs", 1) or 1)
-        if every <= 1 or self.store is None:
-            return True, ""
-        try:
-            counter = int(self.store.get_meta(SOLD_RUN_COUNTER_KEY) or 0)
-        except (TypeError, ValueError):
-            counter = 0
-        self.store.set_meta(SOLD_RUN_COUNTER_KEY, str((counter + 1) % every))
-        if counter % every == 0:
-            return True, f"第 {counter} 輪（每 {every} 輪跑一次）"
+        all_q = self.sold_queries(sources)
+        if not all_q:
+            return SoldShard([], "", None)
         if force:
-            return True, f"第 {counter} 輪，本應節流（每 {every} 輪一次）但被 force 蓋過"
-        return False, f"節流：第 {counter} 輪，每 {every} 輪才跑一次已售出查詢"
+            label = (
+                f"force：整份全跑 {len(all_q)} 查詢 × {self.sold_pages} 頁"
+                "——WAF 風險高，非排程用；游標歸零"
+            )
+            return SoldShard(all_q, label, 0 if self.store is not None else None)
+        if every <= 1 or self.store is None:
+            return SoldShard(all_q, "", None)
+        try:
+            cursor = int(self.store.get_meta(SOLD_CURSOR_KEY) or 0)
+        except (TypeError, ValueError):
+            cursor = 0
+        cursor %= len(all_q)
+        size = -(-len(all_q) // every)  # ceil
+        shard = all_q[cursor : cursor + size]
+        nxt = (cursor + len(shard)) % len(all_q)
+        # 用游標位置本身當進度顯示，不用合成的序數：config 改過（every_n_runs
+        # 或查詢清單長度變了）之後，「第幾片」這種序數會立刻對不上、誤導操作者，
+        # 但「游標從哪到哪／全份多大」永遠是事實。
+        label = f"游標 {cursor}→{nxt}／全份 {len(all_q)} 查詢"
+        return SoldShard(shard, label, nxt)
+
+    def commit_sold_shard(
+        self, shard: SoldShard, *, any_success: bool, blocked: bool = False
+    ) -> None:
+        """跑完一片之後推進游標，依失敗性質分兩條路（工程原則 2：
+        transient 重試、semantic 不重試）：
+
+        - **`blocked=True`**（整片失敗且全是 `BlockedError`）：對方剛拒絕過
+          我們，semantic 失敗，重試同一片只是再被拒絕一次——立刻推進，
+          不佔 stall 名額。
+        - **其餘整片失敗**（transient，例如逾時、連線中斷）：原地重試，
+          連續 `SOLD_STALL_LIMIT` 輪仍全失敗才強制推進——避免一個真的壞掉
+          的查詢（不是 WAF、是自己解析壞了之類）永遠卡住輪替。
+        - `any_success=True`：至少有一條查過，游標照常前進、stall 歸零。
+        """
+        if shard.next_cursor is None or self.store is None:
+            return
+        if any_success:
+            self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
+            self.store.set_meta(SOLD_STALL_KEY, "0")
+            return
+        if blocked:
+            print(
+                "[comps] 整片被擋（semantic，非 transient）——不重試同一片，"
+                "直接推進游標；下一份輪到時若仍被擋，代表該來源整體失效"
+            )
+            self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
+            self.store.set_meta(SOLD_STALL_KEY, "0")
+            return
+        try:
+            stall = int(self.store.get_meta(SOLD_STALL_KEY) or 0) + 1
+        except (TypeError, ValueError):
+            stall = 1
+        if stall >= SOLD_STALL_LIMIT:
+            print(
+                f"[comps] ⚠️ 同一分片連續 {stall} 輪整片失敗，強制推進游標"
+                "（跳過這片；訊號只有這行與同一輪印出的每條 "
+                "`[warn] comps <來源> 「<關鍵字>」失敗` —— 去 "
+                "data/logs/daily-*.log 找。不要指望 dashboard 的來源健康度："
+                "comps_queries 展開查詢主要打 yahoo_closed，它沒有 canary、"
+                "不進 AlertEngine，壞了那個面板不會變紅）"
+            )
+            self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
+            self.store.set_meta(SOLD_STALL_KEY, "0")
+        else:
+            self.store.set_meta(SOLD_STALL_KEY, str(stall))

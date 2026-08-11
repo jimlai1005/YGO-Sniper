@@ -16,7 +16,6 @@ from conftest import FakeFx
 
 from ygo_sniper.comps import (
     DEFAULT_MAX_COMPS_QUERIES,
-    SOLD_RUN_COUNTER_KEY,
     CompsEngine,
     expand_comps_queries,
 )
@@ -205,82 +204,166 @@ def test_yahoo_closed_is_not_in_the_onshelf_scan_path(cfg):
 
 
 # ---------------------------------------------------------------------------
-# 3. 節流
+# 3. 已售出查詢分片（游標輪替，取代整批節流）
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def store(tmp_path):
     return Store(tmp_path / "t.db")
 
 
-def test_throttle_runs_first_then_skips(cfg, store):
-    engine = _engine(cfg, {"every_n_runs": 3}, store=store)
-
-    assert engine.claim_sold_run()[0] is True     # 第 0 輪：跑
-    assert engine.claim_sold_run()[0] is False    # 第 1 輪：跳過
-    assert engine.claim_sold_run()[0] is False    # 第 2 輪：跳過
-    assert engine.claim_sold_run()[0] is True     # 第 3 輪：又輪到了
+def _sold_sources():
+    return {"buyee_mercari": _SoldSource("buyee_mercari")}
 
 
-def test_throttle_skip_reason_is_explainable(cfg, store):
-    engine = _engine(cfg, {"every_n_runs": 12}, store=store)
-    engine.claim_sold_run()
-    due, why = engine.claim_sold_run()
-
-    assert due is False
-    # 「這輪為什麼沒有新行情」必須有一句話交代：
-    # 安靜地跳過與安靜地壞掉，外顯是一模一樣的
-    assert "節流" in why and "12" in why
+def _kw(shard):
+    return [k for _, k in shard.queries]
 
 
-def test_throttle_survives_a_fresh_engine(cfg, store):
+def test_sold_shard_walks_list_and_wraps(cfg, tmp_path):
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(
+        cfg,
+        {"sources": ["buyee_mercari"], "extra": ["kw0", "kw1", "kw2", "kw3", "kw4"], "every_n_runs": 2},
+        store=store,
+    )
+    s1 = eng.sold_shard(_sold_sources())
+    assert _kw(s1) == ["kw0", "kw1", "kw2"]  # ceil(5/2)=3
+    eng.commit_sold_shard(s1, any_success=True)
+    s2 = eng.sold_shard(_sold_sources())
+    assert _kw(s2) == ["kw3", "kw4"]
+    eng.commit_sold_shard(s2, any_success=True)
+    assert _kw(eng.sold_shard(_sold_sources())) == ["kw0", "kw1", "kw2"]  # 繞回
+
+
+def test_sold_shard_cursor_survives_process_restart(cfg, tmp_path):
     """跨行程才是真的節流：CLI 每輪都是新的 python 行程、新的 CompsEngine。
 
-    計數器若放在記憶體，每輪都會從 0 開始 → 每輪都「第 0 輪」→ 每輪都跑，
-    節流參數看起來有設、實際上完全沒生效。
+    游標若放在記憶體，每輪都會從 0 開始 → 每輪都跑同一片，
+    輪替參數看起來有設、實際上完全沒生效。
     """
-    assert _engine(cfg, {"every_n_runs": 4}, store=store).claim_sold_run()[0] is True
-    assert _engine(cfg, {"every_n_runs": 4}, store=store).claim_sold_run()[0] is False
-    assert _engine(cfg, {"every_n_runs": 4}, store=store).claim_sold_run()[0] is False
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2}, store=store)
+    eng.commit_sold_shard(eng.sold_shard(_sold_sources()), any_success=True)
+    # 新行程 = 新 engine，同一個 store
+    eng2 = _engine(cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2}, store=store)
+    assert _kw(eng2.sold_shard(_sold_sources())) == ["c", "d"]
 
 
-def test_force_overrides_throttle_but_still_consumes_the_slot(cfg, store):
-    """人工「我現在就要更新行情」的逃生門。
+def test_sold_shard_does_not_advance_on_total_failure_then_force_advances(cfg, tmp_path, capsys):
+    """工程原則 2：transient 失敗原地重試，但連續 3 輪整片全失敗代表片本身
+    壞了（不是被擋，是別的原因，例如逾時），強制推進避免輪替永遠卡死在同一片。
 
-    計數器照樣前進——force 若不計數，人工跑幾次就能把排程的節流洗掉，
-    那節流參數就變成裝飾品。
+    「大聲」是本專案的頭號規則（見 CLAUDE.md 第五節）——不只測游標真的動了，
+    還要測 ⚠️ 那行真的印出來，而且**只在**第 3 次才印（前兩次原地重試不出聲，
+    出聲的話操作者會誤以為每次失敗都是異常，而不是設計內的重試）。
     """
-    engine = _engine(cfg, {"every_n_runs": 3}, store=store)
-    assert engine.claim_sold_run()[0] is True            # 第 0 輪
-    due, why = engine.claim_sold_run(force=True)         # 第 1 輪，本應跳過
-    assert due is True and "force" in why
-    assert engine.claim_sold_run()[0] is False           # 第 2 輪：仍照原節奏跳過
-    assert engine.claim_sold_run()[0] is True            # 第 3 輪：回到正常輪次
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2}, store=store)
+    first = eng.sold_shard(_sold_sources())
+    eng.commit_sold_shard(first, any_success=False)
+    assert _kw(eng.sold_shard(_sold_sources())) == _kw(first)  # 第 1 次失敗：原地重試
+    assert "⚠️" not in capsys.readouterr().out
+    eng.commit_sold_shard(first, any_success=False)
+    assert _kw(eng.sold_shard(_sold_sources())) == _kw(first)  # 第 2 次失敗：仍原地
+    assert "⚠️" not in capsys.readouterr().out
+    eng.commit_sold_shard(first, any_success=False)            # 第 3 次：強制推進
+    assert _kw(eng.sold_shard(_sold_sources())) != _kw(first)
+    out = capsys.readouterr().out
+    assert "⚠️" in out and "3" in out
 
 
-def test_throttle_disabled_by_every_n_runs_1(cfg, store):
-    engine = _engine(cfg, {"every_n_runs": 1}, store=store)
-    assert all(engine.claim_sold_run()[0] for _ in range(5))
+def test_sold_shard_blocked_failure_advances_on_first_commit(cfg, tmp_path, capsys):
+    """`blocked=True`（整片全是 BlockedError）是 semantic 失敗：對方剛拒絕過
+    我們，重試同一片沒有意義，第一次就要推進，不能像 transient 失敗一樣
+    原地卡三輪——那正是「拿槍指自己」：對著剛擋我們的來源連打三輪。
+    """
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2}, store=store)
+    first = eng.sold_shard(_sold_sources())
+    eng.commit_sold_shard(first, any_success=False, blocked=True)
+    second = eng.sold_shard(_sold_sources())
+    assert _kw(second) != _kw(first)  # 第一次 commit 就推進，不是第三次
+    out = capsys.readouterr().out
+    assert "整片被擋" in out
+    # stall 帳沒被動過：之後若換成 transient 失敗，還是從 0 開始算三振
+    from ygo_sniper.comps import SOLD_STALL_KEY
+
+    assert store.get_meta(SOLD_STALL_KEY) in (None, "0")
 
 
-def test_throttle_without_store_always_runs(cfg):
-    """沒有 store（單元測試／dry-run）→ 不節流，但也不會炸。"""
-    engine = _engine(cfg, {"every_n_runs": 12}, store=None)
-    assert engine.claim_sold_run()[0] is True
+def test_sold_shard_force_returns_full_list_and_resets_cursor(cfg, tmp_path):
+    """人工「我現在就要更新行情」的逃生門：force 回全量，且完成後游標歸零，
+    不然下一輪照常節奏又會跳到某個中間位置，跟人工跑過一次的直覺不符。"""
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2}, store=store)
+    eng.commit_sold_shard(eng.sold_shard(_sold_sources()), any_success=True)  # 游標→2
+    forced = eng.sold_shard(_sold_sources(), force=True)
+    assert _kw(forced) == ["a", "b", "c", "d"]
+    eng.commit_sold_shard(forced, any_success=True)
+    assert _kw(eng.sold_shard(_sold_sources())) == ["a", "b"]  # 游標已歸零
 
 
-def test_throttle_recovers_from_corrupt_counter(cfg, store):
-    store.set_meta(SOLD_RUN_COUNTER_KEY, "not-a-number")
-    engine = _engine(cfg, {"every_n_runs": 3}, store=store)
+def test_sold_shard_without_store_runs_everything(cfg):
+    """沒有 store（單元測試／dry-run）→ 不分片，但也不會炸。"""
+    eng = _engine(cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c"], "every_n_runs": 2}, store=None)
+    shard = eng.sold_shard(_sold_sources())
+    assert _kw(shard) == ["a", "b", "c"]
+    eng.commit_sold_shard(shard, any_success=True)  # 不得炸
 
-    assert engine.claim_sold_run()[0] is True   # 壞值當 0，不拋例外
-    assert engine.claim_sold_run()[0] is False
+
+def test_sold_shard_disabled_by_every_n_runs_1(cfg, store):
+    eng = _engine(cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c"], "every_n_runs": 1}, store=store)
+    assert _kw(eng.sold_shard(_sold_sources())) == ["a", "b", "c"]
 
 
-def test_pipeline_refresh_comps_skips_second_call(monkeypatch, tmp_path, cfg, capsys):
-    """端到端：連續呼叫兩次 `refresh_comps`，第二次不得再打任何請求。
+def test_sold_shard_recovers_from_corrupt_cursor(cfg, store):
+    from ygo_sniper.comps import SOLD_CURSOR_KEY
 
-    這條是節流真正要守的東西——單測 `claim_sold_run` 只證明計數器會動，
-    證明不了 pipeline 真的有問它。這裡數的是 source 的 search 被呼叫幾次。
+    store.set_meta(SOLD_CURSOR_KEY, "not-a-number")
+    eng = _engine(cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2}, store=store)
+    assert _kw(eng.sold_shard(_sold_sources())) == ["a", "b"]  # 壞值當 0，不拋例外
+
+
+def test_sold_shard_empty_query_list_is_a_noop(cfg, store):
+    eng = _engine(cfg, {"every_n_runs": 2}, store=store)
+    shard = eng.sold_shard(_sold_sources())
+    assert shard.queries == [] and shard.next_cursor is None
+    eng.commit_sold_shard(shard, any_success=True)  # 不得炸
+
+
+def test_sold_shard_survives_list_length_change_mid_walk(cfg, tmp_path):
+    """watchlist 設定可能在輪替途中被改（extra 清單增刪）。游標是用位置存的，
+    不是用查詢內容存的，所以清單一變短，舊游標可能落在新清單範圍外
+    ——這條釘住「不會永久餓死某條查詢」：清單縮小後游標會被 modulo 拉回
+    合法範圍，繼續往下走終究會覆蓋到全部剩下的查詢，不會卡在一個洞裡出不來。
+    """
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(
+        cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d", "e"], "every_n_runs": 2},
+        store=store,
+    )
+    eng.commit_sold_shard(eng.sold_shard(_sold_sources()), any_success=True)  # 游標 0→3
+    # 清單縮短成三個：舊游標 3 現在指向清單外
+    eng2 = _engine(
+        cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c"], "every_n_runs": 2}, store=store
+    )
+    seen: set[str] = set()
+    shard = eng2.sold_shard(_sold_sources())
+    for kw in _kw(shard):
+        assert kw in {"a", "b", "c"}  # 游標必須落在合法範圍內，不拋例外
+    seen.update(_kw(shard))
+    eng2.commit_sold_shard(shard, any_success=True)
+    shard2 = eng2.sold_shard(_sold_sources())
+    seen.update(_kw(shard2))
+    eng2.commit_sold_shard(shard2, any_success=True)
+    shard3 = eng2.sold_shard(_sold_sources())
+    seen.update(_kw(shard3))
+    assert seen == {"a", "b", "c"}, "縮短清單後繼續走幾輪，應該覆蓋到全部查詢"
+
+
+def test_pipeline_refresh_comps_walks_shards_across_calls(monkeypatch, tmp_path, cfg, capsys):
+    """端到端：連續呼叫 `refresh_comps` 兩次，第二次要打的是**剩下那一份**，
+    不是重打第一份、也不是什麼都不打——分片是輪替，不是節流開關。
     """
     import dataclasses
 
@@ -303,7 +386,7 @@ def test_pipeline_refresh_comps_skips_second_call(monkeypatch, tmp_path, cfg, ca
             "queries": [],
             "comps_queries": {
                 "sources": ["yahoo_closed"],
-                "every_n_runs": 12,
+                "every_n_runs": 2,
                 "template": "遊戯王 {era}",
                 "eras": ["初期", "二期"],
             },
@@ -315,13 +398,15 @@ def test_pipeline_refresh_comps_skips_second_call(monkeypatch, tmp_path, cfg, ca
     try:
         pipe.refresh_comps()
         first = list(calls)
+        calls.clear()
         pipe.refresh_comps()
+        second = list(calls)
     finally:
         pipe.close()
 
-    assert first == ["遊戯王 初期", "遊戯王 二期"]
-    assert calls == first, "第二次 refresh_comps 還是打了請求，節流沒生效"
-    assert "跳過已售出查詢" in capsys.readouterr().out
+    assert first == ["遊戯王 初期"]
+    assert second == ["遊戯王 二期"]
+    assert "游標" in capsys.readouterr().out
 
 
 def test_sold_pages_defaults_and_floor(cfg):

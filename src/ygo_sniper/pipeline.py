@@ -252,34 +252,41 @@ class Pipeline:
     def refresh_comps(self, *, force: bool = False) -> int:
         """跑「已售出」搜尋，累積日本市場真實成交價。
 
-        **先過節流閘門**：排程每小時跑一輪，但行情是以週為單位在變的，
-        而已售出查詢展開後有數十個關鍵字 × 數頁。每輪都跑等於每天打幾千個
-        重複請求。`comps_queries.every_n_runs` 決定每幾輪才真的跑一次
-        （見 `CompsEngine.claim_sold_run`）；跳過時仍然 `load_from_store()`，
-        所以後面的評分照樣拿得到行情，只是沒有新資料進來。
+        **每輪只跑一小片，`comps_queries.every_n_runs` 輪走完一整份**
+        （見 `CompsEngine.sold_shard`）：行情是以週為單位在變的，但排程
+        每小時跑一輪，已售出查詢展開後有數十個關鍵字 × 數頁，舊制「每
+        every_n_runs 輪一次全跑」會把整份查詢擠成一次幾百請求的尖峰——
+        這正是全 log 唯一與硬 blocked 同輪出現過的批次形態。分片把同樣的
+        總請求量攤平成每輪一小口，對方看到的是穩定小流量。
 
         每條 (source, query) 各自隔離：任何一個來源壞掉（現階段 Buyee 系
         的 stub fetcher 就是必拋 BlockedError），只跳過它自己，
-        不能拖垮整輪 comps 更新、更不能拖垮後面的掃描。
+        不能拖垮整輪 comps 更新、更不能拖垮後面的掃描。游標只在**這一片
+        至少一條查詢成功**時推進（`commit_sold_shard`）——整片全失敗時
+        再分兩種：全是 `BlockedError`（semantic，對方剛拒絕過我們，重試
+        沒有意義）立刻推進；其餘（transient，例如逾時）原地重試，
+        連續三輪才強制推進（工程原則 2）。
 
         回傳「真的入庫幾筆」（int，CLI 直接印）；擋掉的筆數與原因分布
         印在 log —— 過濾器自己也會壞，擋掉 100% 跟擋掉 0% 一樣需要被看見。
         """
-        due, why = self.comps.claim_sold_run(force=force)
-        if not due:
-            print(f"[comps] 跳過已售出查詢（{why}）")
+        shard = self.comps.sold_shard(self.sources, force=force)
+        if not shard.queries:
+            print("[comps] 已售出查詢：展開後為空，跳過")
             self.comps.load_from_store()
             return 0
 
         pages = self.comps.sold_pages
-        queries = self.comps.sold_queries(self.sources)
-        if why:
-            print(f"[comps] 跑 {len(queries)} 個已售出查詢 × 最多 {pages} 頁（{why}）")
+        suffix = f"（{shard.label}）" if shard.label else ""
+        print(f"[comps] 跑 {len(shard.queries)} 個已售出查詢 × 最多 {pages} 頁{suffix}")
 
         total = 0
         rejected = 0
         reasons: dict[str, int] = {}
-        for source_name, keyword in queries:
+        any_success = False
+        blocked_failures = 0
+        other_failures = 0
+        for source_name, keyword in shard.queries:
             src = self.sources[source_name]
             try:
                 sold = src.search(keyword, sold=True, pages=pages)
@@ -288,7 +295,12 @@ class Pipeline:
                     f"[warn] comps {source_name} 「{keyword}」失敗，跳過："
                     f"{type(exc).__name__}: {exc}"
                 )
+                if isinstance(exc, BlockedError):
+                    blocked_failures += 1
+                else:
+                    other_failures += 1
                 continue
+            any_success = True
             report = self.comps.ingest_sold(sold)
             total += report.kept
             rejected += report.rejected
@@ -299,6 +311,13 @@ class Pipeline:
                 f"{k}×{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])[:5]
             )
             print(f"[comps] 收 {total} 筆、擋 {rejected} 筆（{top}）")
+        self.comps.commit_sold_shard(
+            shard,
+            any_success=any_success,
+            # 整片失敗、而且沒有任何一個非 blocked 的失敗，才算「純被擋」。
+            # 混著其他失敗類型時，走一般的 transient 重試路徑更保守。
+            blocked=blocked_failures > 0 and other_failures == 0,
+        )
         self.comps.load_from_store()
         return total
 
