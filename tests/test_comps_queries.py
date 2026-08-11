@@ -404,6 +404,94 @@ def test_sold_shard_survives_list_length_change_mid_walk(cfg, tmp_path):
     assert seen == {"a", "b", "c"}, "縮短清單後繼續走幾輪，應該覆蓋到全部查詢"
 
 
+# ---------------------------------------------------------------------------
+# 4. 分片游標對 SIGKILL 免疫（sold_shard 交出去卻等不到 commit）
+# ---------------------------------------------------------------------------
+def test_sold_shard_force_advances_after_repeated_uncommitted_attempts(cfg, tmp_path, capsys):
+    """模擬 watchdog SIGKILL：`sold_shard` 交出分片之後，呼叫端直接消失
+    （不呼叫 `commit_sold_shard`）。連續交出去 N 次都沒等到 commit，
+    第 N+1 次呼叫必須跳過這個卡死的游標，並且大聲講清楚——不然同一段
+    （實測分片 0 正是 Playwright/WAF 那條路）會被反覆殺死、永遠卡在原地，
+    後面 yahoo_closed 的 80 條查詢永遠輪不到。
+    """
+    from ygo_sniper.comps import SOLD_ATTEMPT_LIMIT
+
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(
+        cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2},
+        store=store,
+    )
+    first = eng.sold_shard(_sold_sources())
+    for _ in range(SOLD_ATTEMPT_LIMIT - 1):
+        # 每次都「交出去就消失」：完全不呼叫 commit_sold_shard
+        again = eng.sold_shard(_sold_sources())
+        assert _kw(again) == _kw(first)  # 還沒到門檻，原地重發同一片
+
+    # 第 N 次已經把次數推到門檻，這次呼叫（第 N+1 次）要強制跳過
+    moved = eng.sold_shard(_sold_sources())
+    assert _kw(moved) != _kw(first)
+    out = capsys.readouterr().out
+    assert "⚠️" in out and "游標 0" in out  # 卡死的游標是 0，訊息要點名
+    assert "SIGKILL" in out
+
+
+def test_sold_shard_commit_clears_attempt_marker(cfg, tmp_path):
+    """一輪正常跑完（不管成敗，只要真的呼叫了 commit）就代表這一輪沒被殺死，
+    之前的嘗試次數不該延續到下一次真正的 crash——不然「乾淨地失敗過幾次」
+    會跟「被殺過幾次」混進同一個計數器，是另一種混源比較。
+    """
+    from ygo_sniper.comps import SOLD_ATTEMPT_KEY, SOLD_ATTEMPT_LIMIT, _parse_sold_attempt
+
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(
+        cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2},
+        store=store,
+    )
+    shard = eng.sold_shard(_sold_sources())
+    _, count = _parse_sold_attempt(store.get_meta(SOLD_ATTEMPT_KEY))
+    assert count == 1
+    eng.commit_sold_shard(shard, any_success=False)  # 跑完了，只是查詢乾淨地失敗
+    assert store.get_meta(SOLD_ATTEMPT_KEY) == ""
+
+    # 之後即使真的連續被殺，也是從 0 開始算，不是從舊次數接著算
+    for _ in range(SOLD_ATTEMPT_LIMIT):
+        again = eng.sold_shard(_sold_sources())
+    assert _kw(again) == _kw(shard)  # 剛好卡在門檻，還沒被強制跳過
+
+
+def test_sold_shard_normal_path_sets_then_clears_attempt_marker(cfg, tmp_path):
+    """正常路徑（沒有 crash）：`sold_shard` 交出分片時寫下嘗試標記，
+    `commit_sold_shard` 一跑完就清掉，游標只前進一次——crash-safety 補丁
+    不能改變原本「一輪一次前進」的行為。
+    """
+    from ygo_sniper.comps import SOLD_ATTEMPT_KEY, SOLD_CURSOR_KEY
+
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(
+        cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2},
+        store=store,
+    )
+    shard = eng.sold_shard(_sold_sources())
+    assert store.get_meta(SOLD_ATTEMPT_KEY) == "0:1"
+    eng.commit_sold_shard(shard, any_success=True)
+    assert store.get_meta(SOLD_ATTEMPT_KEY) == ""
+    assert store.get_meta(SOLD_CURSOR_KEY) == "2"  # 只前進了一次
+
+
+def test_sold_shard_recovers_from_corrupt_attempt_marker(cfg, tmp_path):
+    from ygo_sniper.comps import SOLD_ATTEMPT_KEY
+
+    store = Store(tmp_path / "comps.db")
+    store.set_meta(SOLD_ATTEMPT_KEY, "garbage-not-a-marker")
+    eng = _engine(
+        cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2},
+        store=store,
+    )
+    shard = eng.sold_shard(_sold_sources())  # 壞值當「沒有進行中的嘗試」，不拋例外
+    assert _kw(shard) == ["a", "b"]
+    assert store.get_meta(SOLD_ATTEMPT_KEY) == "0:1"
+
+
 def test_pipeline_refresh_comps_walks_shards_across_calls(monkeypatch, tmp_path, cfg, capsys):
     """端到端：連續呼叫 `refresh_comps` 兩次，第二次要打的是**剩下那一份**，
     不是重打第一份、也不是什麼都不打——分片是輪替，不是節流開關。

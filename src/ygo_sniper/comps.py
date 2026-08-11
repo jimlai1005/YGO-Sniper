@@ -315,6 +315,51 @@ SOLD_STALL_LIMIT = 3
 SOLD_BLOCKED_STREAK_KEY = "comps_sold_blocked_streak"
 SOLD_BLOCKED_STREAK_LIMIT = 3
 
+#: 「正在嘗試哪個游標、嘗試了幾次」，值是 "<cursor>:<count>"。
+#:
+#: 這本帳補的是一個真實的 crash-safety 破洞：這個分支把「發哪個游標的片」
+#: （`sold_shard`）跟「跑完了嗎、要不要前進」（`commit_sold_shard`）拆開，
+#: 換來精準（只有真的做完事才前進），但代價是不再對「跑到一半被殺」免疫。
+#: 舊制 `claim_sold_run` 是「問之前先扣」——一問就把配額算掉，天然扛得住
+#: crash（配額已經扣了，不會重複問）；這裡的新制是「先問再扣」，中途被殺
+#: （這個 repo 另外加了 25 分鐘 watchdog，逾時 SIGKILL 整棵行程樹）就會
+#: 兩個帳本都沒寫到：游標沒動、SOLD_STALL_KEY 也沒動（stall 只數「跑完但
+#: 全失敗」，不數「根本沒跑完」）。實測分片 0 剛好是 buyee_mercari／
+#: paypay_direct（Playwright/WAF 那條路），也就是全部歷史 hang 都出在的
+#: 那一段——會活生生撞上這個洞：卡在分片 0 → 被殺 → 下一輪原地重跑分片 0
+#: → 再卡 → 再殺，永遠到不了後面 80 條 yahoo_closed，comps 靜默停更新，
+#: 而 watchdog 的 Telegram 只會說「殺了一次」，不會說「comps 已經連續
+#: 幾天沒進度」。
+#:
+#: 這裡記的是「正要試游標 N」，不是「已經吃掉游標 N 的配額」——`sold_shard`
+#: 寫這個標記本身**不會**推進 `SOLD_CURSOR_KEY`，一輪正常跑完
+#: （`commit_sold_shard` 真的被叫到）就會清掉它，不干擾原本 commit-on-success
+#: 的精準度。只有「連續交出去卻沒等到 commit」累積到門檻，才由 `sold_shard`
+#: 自己強制把游標推過去（因為呼叫端是 `pipeline.refresh_comps`，這次改動
+#: 刻意不動它——分片選擇與「發現卡死該怎麼辦」被迫擠進同一個入口）。
+SOLD_ATTEMPT_KEY = "comps_sold_attempt"
+#: 比 SOLD_STALL_LIMIT（3）小：兩者量的不是同一件事，不能共用同一個門檻
+#: （那會是另一種混源比較）。stall 數的是「跑完了，但查詢乾淨地失敗」，
+#: 失敗一次很便宜（幾秒鐘），多容忍幾輪換一次網路狀況的成本很低；這裡數的
+#: 是「整個行程被 25 分鐘 watchdog SIGKILL」，一次就是 25 分鐘蒸發，連續
+#: 兩次已經是強訊號（同一段真的卡死，不是雜訊），沒必要拖到 3 次再放手，
+#: 那只是讓 comps 多停擺一輪。
+SOLD_ATTEMPT_LIMIT = 2
+
+
+def _parse_sold_attempt(raw: str | None) -> tuple[int | None, int]:
+    """解析 `SOLD_ATTEMPT_KEY` 的 "<cursor>:<count>"。沒有標記或壞值一律當作
+    「沒有進行中的嘗試」（游標 None、次數 0）——與 SOLD_CURSOR_KEY／
+    SOLD_STALL_KEY 同一套容錯慣例：壞掉的 meta 值不該讓排程整個炸掉。
+    """
+    if not raw:
+        return None, 0
+    try:
+        cursor_str, count_str = raw.split(":", 1)
+        return int(cursor_str), int(count_str)
+    except (ValueError, TypeError):
+        return None, 0
+
 
 def _sold_observability_warning() -> str:
     """整片失敗（被擋或其他原因）時要附的觀測指引，被擋與 stall 兩條路徑共用
@@ -655,6 +700,17 @@ class CompsEngine:
         將來要接 `ygo-sniper comps --force` 之類的手動入口之前，先想清楚
         怎麼分批（例如強制模式也照 shard size 跑但連續跑完整輪），
         不要原樣接一顆按鈕上去。
+
+        ⚠️ **這個方法有一個刻意保留的副作用**：正常路徑上會在 store 寫入
+        `SOLD_ATTEMPT_KEY`（見該常數的完整說明）。上一輪審查才剛稱讚這個
+        方法把「問要跑哪片」跟「跑完了沒有」拆乾淨、不再像舊制 `claim_sold_run`
+        一樣「問一次就燒一次配額」；這裡等於是把那個副作用的一小塊撿回來——
+        差別在於這次寫的是「正要試游標 N」而不是「已經吃掉游標 N」，
+        真正的配額（`SOLD_CURSOR_KEY`）仍然只由 `commit_sold_shard` 推進。
+        會做這個取捨，是因為 crash-safety 補丁的天然位置是「風險發生前的
+        那一刻」，而這個改動被要求不能碰 `pipeline.py`（無法新增一個
+        `begin_sold_shard()` 讓呼叫端額外呼叫一次）——`sold_shard` 是唯一
+        剩下、每輪必經的入口，只能在這裡順便記一筆。
         """
         spec = self.cfg.watchlist.get("comps_queries") or {}
         every = int(spec.get("every_n_runs", 1) or 1)
@@ -675,8 +731,31 @@ class CompsEngine:
             cursor = 0
         cursor %= len(all_q)
         size = -(-len(all_q) // every)  # ceil
+
+        attempted_cursor, attempted_count = _parse_sold_attempt(
+            self.store.get_meta(SOLD_ATTEMPT_KEY)
+        )
+        if attempted_cursor == cursor and attempted_count >= SOLD_ATTEMPT_LIMIT:
+            # 同一個游標連續交出去 SOLD_ATTEMPT_LIMIT 次，一次 commit 都沒等到
+            # ——不是重試慢，是每次都被殺在半路（這個 repo 另外加的 25 分鐘
+            # watchdog，逾時 SIGKILL 整棵行程樹）。強制跳過這片，直接推進，
+            # 不然會在同一段（實測分片 0 正是 Playwright/WAF 那條路）永遠卡死。
+            skipped = all_q[cursor : cursor + size]
+            nxt = (cursor + len(skipped)) % len(all_q)
+            print(
+                f"[comps] ⚠️ 游標 {cursor} 連續交出 {attempted_count} 次都沒等到"
+                f" commit——像是每次都被 SIGKILL 殺在半路，視為卡死，"
+                f"強制跳過這片、推進到 {nxt}。{_sold_observability_warning()}"
+            )
+            self.store.set_meta(SOLD_CURSOR_KEY, str(nxt))
+            cursor = nxt
+
         shard = all_q[cursor : cursor + size]
         nxt = (cursor + len(shard)) % len(all_q)
+        # 記下「正要試這個游標」，不是「已經吃掉這個游標」——見 SOLD_ATTEMPT_KEY
+        # 的說明。同一游標延續次數，換了游標（包含剛剛的強制跳過）就重新起算。
+        next_count = attempted_count + 1 if attempted_cursor == cursor else 1
+        self.store.set_meta(SOLD_ATTEMPT_KEY, f"{cursor}:{next_count}")
         # 用游標位置本身當進度顯示，不用合成的序數：config 改過（every_n_runs
         # 或查詢清單長度變了）之後，「第幾片」這種序數會立刻對不上、誤導操作者，
         # 但「游標從哪到哪／全份多大」永遠是事實。
@@ -703,9 +782,19 @@ class CompsEngine:
           的查詢（不是 WAF、是自己解析壞了之類）永遠卡住輪替。
         - `any_success=True`：至少有一條查過，游標照常前進、stall 與
           blocked streak 都歸零——只要有一條成功，代表來源沒有整體掛掉。
+
+        **無論走哪條分支都會清掉 `SOLD_ATTEMPT_KEY`**——不只在真的推進游標
+        的分支清，三條分支都清。這個方法會被叫到，本身就證明這一輪的行程
+        撐過去了（沒被 watchdog SIGKILL），所以「正在嘗試、還沒等到 commit」
+        這件事對這個游標已經不成立，該清。故意不把它收窄成「只在寫游標的
+        分支清」：如果只在寫游標時清，「transient 失敗但 stall 還沒到頂、
+        游標原地不動」那條分支就會放著舊的嘗試次數不管，讓下一輪
+        `sold_shard` 誤把「乾淨地失敗過幾次」跟「被殺過幾次」加在一起計數
+        ——那正是把兩種不同性質的失敗混進同一把尺（工程原則 1 的同型陷阱）。
         """
         if shard.next_cursor is None or self.store is None:
             return
+        self.store.set_meta(SOLD_ATTEMPT_KEY, "")
         if any_success:
             self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
             self.store.set_meta(SOLD_STALL_KEY, "0")
