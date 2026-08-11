@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ygo_sniper.schedule_watch import (
-    _WINDOWS,
+    _ALL_SLOTS,
     PENDING_ALERT_KEY,
     RUN_FINISHED_KEY,
     RUN_STARTED_KEY,
@@ -152,7 +152,15 @@ def test_resolve_alert_only_caller_can_clear_pending():
 
 
 # ---------------------------------------------------------------------------
-# Fix 5：_WINDOWS 是 plist 的手抄本，兩邊必須實測相等，不能只靠註解提醒
+# Fix 5：_ALL_SLOTS 是 plist 的手抄本，兩邊必須實測相等，不能只靠註解提醒
+#
+# **必須比對 `_ALL_SLOTS` 本尊**，不能自己重新展開 `_WINDOWS` 再比一份副本
+# ——`next_slot_after` 讀的是 `_ALL_SLOTS`，測試比另一份獨立算出來的複本，
+# 等於守門守在偵測器根本不會走到的地方（跟這次修的 Fix 1 同一種錯：拿
+# 「重新推導出來的值」冒充「真正被使用的那個值」去比較）。
+# 2026-08-12 複查時用 mutant 證實過：只改 `_ALL_SLOTS` 漏掉 22:30、
+# `_WINDOWS` 與 plist 都不動，若測試比的是重新展開的 `_WINDOWS`，這條測試
+# 仍然綠燈，但 22:30 那個尖峰時段的偵測會真的失聰。
 # ---------------------------------------------------------------------------
 def test_windows_match_plist():
     with open(_PLIST, "rb") as f:
@@ -160,9 +168,9 @@ def test_windows_match_plist():
     plist_slots = {
         e["Hour"] * 60 + e["Minute"] for e in plist["StartCalendarInterval"]
     }
-    code_slots = {m for lo, hi, step in _WINDOWS for m in range(lo, hi + 1, step)}
+    code_slots = set(_ALL_SLOTS)
     assert code_slots == plist_slots, (
-        f"schedule_watch._WINDOWS 與 {_PLIST.name} 的 StartCalendarInterval 不同步：\n"
+        f"schedule_watch._ALL_SLOTS 與 {_PLIST.name} 的 StartCalendarInterval 不同步：\n"
         f"code only: {sorted(code_slots - plist_slots)}\n"
         f"plist only: {sorted(plist_slots - code_slots)}"
     )

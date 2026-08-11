@@ -836,10 +836,21 @@ class Pipeline:
         例外處理**之外**——`_scan()` 拋例外時這個方法完全不會被呼叫，
         `RUN_FINISHED_KEY` 因此維持舊值，下一輪 `schedule_health` 才報得出
         「有開始沒收尾」。
+
+        這裡也包一層 `try/except`，跟 `_update_schedule_state` 對稱：這行只是
+        排程監督自己的記帳，不能讓它的失敗把已經跑完、已經 `finish_scan`
+        成功的一輪掃描結果拖著一起往外拋例外（工程原則 3 的反面：安全關鍵的
+        是「這一輪掃描的結果」本身，記帳失敗只需要出聲，不需要連坐）。
         """
         if dry_run or watch_only:
             return
-        self.store.set_meta(RUN_FINISHED_KEY, datetime.now().isoformat())
+        try:
+            self.store.set_meta(RUN_FINISHED_KEY, datetime.now().isoformat())
+        except Exception as exc:  # noqa: BLE001 - 記帳壞掉不能拖垮已經跑完的掃描
+            print(
+                f"[warn] 排程收尾記帳失敗（不影響本輪掃描結果）："
+                f"{type(exc).__name__}: {exc}"
+            )
 
     def _scan(
         self,
