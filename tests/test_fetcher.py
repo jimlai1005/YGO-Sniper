@@ -199,3 +199,87 @@ def test_success_is_cached_and_second_call_skips_network(make_fetcher):
     second = fetcher.get(URL)
     assert second == first
     assert server.calls == 1  # 沒有增加 = 第二次完全沒碰網路
+
+
+# ---------------------------------------------------------------------------
+# [req] 逐請求 log —— 「被節流了嗎」的一手證據（見 CLAUDE.md 常用指令附近
+# 對本任務的說明）。這裡只釘住「有沒有記」與「記幾次」，不對格式做脆弱的
+# 全字串比對，免得未來調格式時測試變成噪音。
+# ---------------------------------------------------------------------------
+
+
+def _req_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith("[req]")]
+
+
+def test_successful_fetch_emits_one_req_line(make_fetcher, capsys):
+    """成功打到網路要留下一行 [req]，帶 host 與耗時，之後才有東西可以拿來比對延遲。"""
+    server = FakeServer(httpx.Response(200, text=GOOD_HTML))
+    fetcher = make_fetcher(server)
+
+    fetcher.get(URL)
+
+    lines = _req_lines(capsys.readouterr().out)
+    assert len(lines) == 1
+    assert "example.test" in lines[0]
+    assert "ms" in lines[0]
+
+
+def test_cache_hit_emits_no_req_line(make_fetcher, capsys):
+    """快取命中不算一次網路請求——記進去的話，log 上的請求量會虛胖，
+    「兩個請求間隔多久」這個問題也會被假的間隔污染。
+    """
+    server = FakeServer(httpx.Response(200, text=GOOD_HTML))
+    fetcher = make_fetcher(server)
+
+    fetcher.get(URL)
+    capsys.readouterr()  # 清掉第一次真的出網那行
+
+    fetcher.get(URL)  # 這次應該直接吃快取，完全不碰 server
+
+    assert server.calls == 1
+    assert _req_lines(capsys.readouterr().out) == []
+
+
+def test_retried_transient_failure_logs_one_line_per_attempt(make_fetcher, capsys):
+    """重試三次就該有三行 [req]——這是整個功能的存在意義：
+    log 上看得到的請求數，必須等於真的打到對方伺服器幾次。
+    """
+    server = FakeServer(
+        httpx.Response(503),
+        httpx.Response(503),
+        httpx.Response(200, text=GOOD_HTML),
+    )
+    fetcher = make_fetcher(server)
+
+    fetcher.get(URL)
+
+    lines = _req_lines(capsys.readouterr().out)
+    assert len(lines) == 3
+    assert server.calls == 3
+
+
+def test_req_log_line_reflects_real_status_even_when_check_rejects(make_fetcher, capsys):
+    """被 WAF 擋下的請求也是一次真的網路往返，狀態碼必須留在 log 裡——
+    這條診斷的目的就是調查被擋，記錄不能在被擋的那一刻反而消失。
+    """
+    server = FakeServer(waf_challenge())
+    fetcher = make_fetcher(server)
+
+    with pytest.raises(BlockedError):
+        fetcher.get(URL)
+
+    lines = _req_lines(capsys.readouterr().out)
+    assert len(lines) == 1
+    assert "202" in lines[0]
+
+
+def test_req_log_disabled_by_env_var(make_fetcher, capsys, monkeypatch):
+    """YGO_REQ_LOG=0 要能整個關掉，給不想要這行雜訊的場合一個退路。"""
+    monkeypatch.setenv("YGO_REQ_LOG", "0")
+    server = FakeServer(httpx.Response(200, text=GOOD_HTML))
+    fetcher = make_fetcher(server)
+
+    fetcher.get(URL)
+
+    assert _req_lines(capsys.readouterr().out) == []
