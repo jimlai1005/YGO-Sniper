@@ -130,6 +130,12 @@
         font:13px/1.4 var(--mono)}
   .apr-form input:focus{outline:none;border-color:var(--accent)}
   .apr-form button{padding:8px 18px;font-size:13px}
+  /* 給跳出 .apr-form 之外、但仍需要同一套深色配色的欄位用（例如指定卡狙擊
+     裡刻意留窄寬度的 grader/grade/code 三格與多行 evidence textarea）——
+     不套 .apr-form input 的 flex-basis:240px，避免把刻意留窄的欄寬撐開。 */
+  .dark-field{background:var(--bg);color:var(--ink);border:1px solid var(--line);
+        border-radius:7px;padding:6px 8px;font:12px/1.4 var(--mono)}
+  .dark-field:focus{outline:none;border-color:var(--accent)}
   .hint{font-size:11.5px;color:var(--dim);margin-top:8px;line-height:1.6}
   .verdict{border-radius:10px;padding:14px 16px;margin:14px 0;border:1px solid}
   .verdict h3{margin:0 0 4px;font-size:22px;letter-spacing:.5px}
@@ -611,12 +617,12 @@
       <button type="submit" id="sn-add-btn">➕ 登錄狙擊</button>
     </form>
     <div class="row" style="gap:6px;margin-top:6px">
-      <input id="sn-grader" type="text" style="width:70px" placeholder="ARS">
-      <input id="sn-grade" type="text" style="width:60px" placeholder="10">
-      <input id="sn-code" type="text" style="width:100px" placeholder="P4-06">
-      <input id="sn-name-en" type="text" style="width:180px" placeholder="英文卡名（主檔有會自動補）">
+      <input id="sn-grader" class="dark-field" type="text" style="width:70px" placeholder="ARS">
+      <input id="sn-grade" class="dark-field" type="text" style="width:60px" placeholder="10">
+      <input id="sn-code" class="dark-field" type="text" style="width:100px" placeholder="P4-06">
+      <input id="sn-name-en" class="dark-field" type="text" style="width:180px" placeholder="英文卡名（主檔有會自動補）">
     </div>
-    <textarea id="sn-evidence" rows="2" style="width:100%;margin-top:6px;box-sizing:border-box"
+    <textarea id="sn-evidence" class="dark-field" rows="2" style="width:100%;margin-top:6px;box-sizing:border-box"
               placeholder="過去出現的商品頁 URL（一行一個）。登錄當下就抓快照存證——Yahoo 結標頁約 120 天會刪"></textarea>
     <div class="hint">
       ARS 的鑑定量（census）會用卡名自動搜；唯一定位不了會列候選讓你確認。
@@ -716,8 +722,11 @@ function auctionFiltersConflict(filterMode, hideAuction){
 const CLEARABLE_STATES = ["watching", "asked_seller", "offer_sent"];
 
 /* 「這一筆算不算待清」只有一份定義，來自後端的 expiry 物件（expiry.py）。
-   沒有 expiry 欄位的舊回應一律**不算**——不確定時偏向不清除。 */
-const isExpiredItem = it => !!(it && it.expiry && it.expiry.kind !== "live");
+   沒有 expiry 欄位的舊回應一律**不算**——不確定時偏向不清除。
+   state="new"（待處理）一律不算：這個分頁沒有清除按鈕，「疑似已售出」在這裡
+   只是掃描沒看到的推論、不是實證，2026-08-11 停用其顯示——回歸只在觀察中／
+   已詢問／已出價按下清除鈕時才走 verify_departed 開頁實證查核。 */
+const isExpiredItem = it => !!(it && it.expiry && it.expiry.kind !== "live" && it.state !== "new");
 
 /** 回 {count, hidden, sources} 或 null（不顯示 banner）。
     count = 整個分頁的待清筆數（＝後端會清的筆數）
