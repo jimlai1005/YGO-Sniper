@@ -309,6 +309,30 @@ SOLD_CURSOR_KEY = "comps_sold_cursor"
 SOLD_STALL_KEY = "comps_sold_stall"
 SOLD_STALL_LIMIT = 3
 
+#: 連續幾輪「整片被擋」（跟上面的 stall 是不同的帳——被擋不重試，
+#: 每輪都會前進，所以不能用 SOLD_STALL_KEY 數）。與 SOLD_STALL_LIMIT 同值
+#: 只是巧合對齊操作者心智模型（連三次都不對勁），兩個帳本各自獨立記帳。
+SOLD_BLOCKED_STREAK_KEY = "comps_sold_blocked_streak"
+SOLD_BLOCKED_STREAK_LIMIT = 3
+
+
+def _sold_observability_warning() -> str:
+    """整片失敗（被擋或其他原因）時要附的觀測指引，被擋與 stall 兩條路徑共用
+    同一份文字——分開寫的話，其中一條被改了用詞、另一條沒跟上，訊息就會
+    悄悄失真（這正是這份訊息第一版被抓到的問題：宣稱了 AlertEngine 涵蓋
+    不到的事）。
+
+    真話只有這幾件：印出來的 `[warn] comps …` 明細與 log 檔案才是唯一訊號，
+    dashboard 的來源健康度看不到——comps_queries 展開查詢主要打
+    yahoo_closed，它沒有 canary、不進 AlertEngine，壞了那個面板不會變紅。
+    """
+    return (
+        "訊號只有這行與同一輪印出的每條 `[warn] comps <來源> 「<關鍵字>」失敗`"
+        "——去 data/logs/daily-*.log 找。不要指望 dashboard 的來源健康度："
+        "comps_queries 展開查詢主要打 yahoo_closed，它沒有 canary、不進 "
+        "AlertEngine，壞了那個面板不會變紅。"
+    )
+
 #: 展開後的查詢數硬上限。組合展開是「乘法」，稀有度 6 × 年代 6 × 機構 2 = 72，
 #: 手一滑多加兩個詞就變 120——而每個查詢最多還要翻 N 頁。這個上限不是禮貌，
 #: 是**結構性的請求預算**：超出就截斷並印出來，讓人看得見自己開了多少水龍頭
@@ -667,23 +691,44 @@ class CompsEngine:
 
         - **`blocked=True`**（整片失敗且全是 `BlockedError`）：對方剛拒絕過
           我們，semantic 失敗，重試同一片只是再被拒絕一次——立刻推進，
-          不佔 stall 名額。
+          不佔 stall 名額。**連續幾輪都被擋**落在獨立的
+          `SOLD_BLOCKED_STREAK_KEY` 帳本上（被擋的路每輪都會推進，不能借用
+          會被歸零的 `SOLD_STALL_KEY`），達到 `SOLD_BLOCKED_STREAK_LIMIT`
+          時訊息升級成「這來源看起來整體失效了」，附上要查什麼。
+          **這個帳本只被這裡增、被下面的 `any_success` 分支歸零**——不是只
+          印一句「代表整體失效」卻沒人真的數——那正是這句話第一版被抓到的
+          問題（宣稱了程式碼沒做的事）。
         - **其餘整片失敗**（transient，例如逾時、連線中斷）：原地重試，
           連續 `SOLD_STALL_LIMIT` 輪仍全失敗才強制推進——避免一個真的壞掉
           的查詢（不是 WAF、是自己解析壞了之類）永遠卡住輪替。
-        - `any_success=True`：至少有一條查過，游標照常前進、stall 歸零。
+        - `any_success=True`：至少有一條查過，游標照常前進、stall 與
+          blocked streak 都歸零——只要有一條成功，代表來源沒有整體掛掉。
         """
         if shard.next_cursor is None or self.store is None:
             return
         if any_success:
             self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
             self.store.set_meta(SOLD_STALL_KEY, "0")
+            self.store.set_meta(SOLD_BLOCKED_STREAK_KEY, "0")
             return
         if blocked:
-            print(
-                "[comps] 整片被擋（semantic，非 transient）——不重試同一片，"
-                "直接推進游標；下一份輪到時若仍被擋，代表該來源整體失效"
-            )
+            try:
+                streak = int(self.store.get_meta(SOLD_BLOCKED_STREAK_KEY) or 0) + 1
+            except (TypeError, ValueError):
+                streak = 1
+            self.store.set_meta(SOLD_BLOCKED_STREAK_KEY, str(streak))
+            if streak >= SOLD_BLOCKED_STREAK_LIMIT:
+                print(
+                    f"[comps] ⚠️ 連續 {streak} 輪整片被擋——不是單輪運氣不好，"
+                    "這個來源看起來整體失效了（WAF 永久擋 IP、token 拿不到、"
+                    "或帳號被鎖）。跑 `ygo-sniper health` 看來源健康度、"
+                    f"手動開一次該來源的搜尋頁確認。{_sold_observability_warning()}"
+                )
+            else:
+                print(
+                    f"[comps] 整片被擋（semantic，非 transient，連續第 {streak} 輪）"
+                    f"——不重試同一片，直接推進游標。{_sold_observability_warning()}"
+                )
             self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
             self.store.set_meta(SOLD_STALL_KEY, "0")
             return
@@ -694,11 +739,7 @@ class CompsEngine:
         if stall >= SOLD_STALL_LIMIT:
             print(
                 f"[comps] ⚠️ 同一分片連續 {stall} 輪整片失敗，強制推進游標"
-                "（跳過這片；訊號只有這行與同一輪印出的每條 "
-                "`[warn] comps <來源> 「<關鍵字>」失敗` —— 去 "
-                "data/logs/daily-*.log 找。不要指望 dashboard 的來源健康度："
-                "comps_queries 展開查詢主要打 yahoo_closed，它沒有 canary、"
-                "不進 AlertEngine，壞了那個面板不會變紅）"
+                f"（跳過這片。{_sold_observability_warning()}）"
             )
             self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
             self.store.set_meta(SOLD_STALL_KEY, "0")

@@ -314,8 +314,11 @@ class Pipeline:
         self.comps.commit_sold_shard(
             shard,
             any_success=any_success,
-            # 整片失敗、而且沒有任何一個非 blocked 的失敗，才算「純被擋」。
-            # 混著其他失敗類型時，走一般的 transient 重試路徑更保守。
+            # 「有被擋、且沒有其他種類的失敗」——這個表達式本身在有成功查詢時
+            # 也會是 True（any_success=True 時 blocked_failures 可能仍 >0、
+            # other_failures 仍 ==0），單看這行不足以保證「純被擋」。
+            # 它今天是安全的，是因為 commit_sold_shard 先檢查 any_success
+            # 才看 blocked（那個分支順序不在這裡，改動它時要記得這裡依賴它）。
             blocked=blocked_failures > 0 and other_failures == 0,
         )
         self.comps.load_from_store()

@@ -291,6 +291,49 @@ def test_sold_shard_blocked_failure_advances_on_first_commit(cfg, tmp_path, caps
     assert store.get_meta(SOLD_STALL_KEY) in (None, "0")
 
 
+def test_sold_shard_blocked_streak_escalates_message_at_limit(cfg, tmp_path, capsys):
+    """被擋每輪都會推進游標（不像 transient 卡在原地），所以「連續被擋幾輪」
+    要另立一本帳（`SOLD_BLOCKED_STREAK_KEY`）才數得出來。門檻之前只講當輪
+    的事實（第幾輪被擋），到門檻才升級成「整體失效」＋要查什麼——不能一被擋
+    就講「來源整體失效」，那是喊假警報；也不能永遠不升級，那是原始發現
+    指出的問題（訊息宣稱了一個永遠不會發生的偵測）。
+    """
+    from ygo_sniper.comps import SOLD_BLOCKED_STREAK_LIMIT
+
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(
+        cfg,
+        {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d", "e", "f"], "every_n_runs": 2},
+        store=store,
+    )
+
+    for i in range(1, SOLD_BLOCKED_STREAK_LIMIT):
+        shard = eng.sold_shard(_sold_sources())
+        eng.commit_sold_shard(shard, any_success=False, blocked=True)
+        out = capsys.readouterr().out
+        assert "整片被擋" in out and str(i) in out
+        assert "整體失效" not in out  # 門檻之前不能提前喊狼來了
+
+    shard = eng.sold_shard(_sold_sources())
+    eng.commit_sold_shard(shard, any_success=False, blocked=True)
+    out = capsys.readouterr().out
+    assert "整體失效" in out and str(SOLD_BLOCKED_STREAK_LIMIT) in out
+    assert "health" in out  # 要講清楚該查什麼，不能只講「壞了」
+
+
+def test_sold_shard_blocked_streak_resets_on_any_success(cfg, tmp_path):
+    from ygo_sniper.comps import SOLD_BLOCKED_STREAK_KEY
+
+    store = Store(tmp_path / "comps.db")
+    eng = _engine(
+        cfg, {"sources": ["buyee_mercari"], "extra": ["a", "b", "c", "d"], "every_n_runs": 2}, store=store
+    )
+    eng.commit_sold_shard(eng.sold_shard(_sold_sources()), any_success=False, blocked=True)
+    assert store.get_meta(SOLD_BLOCKED_STREAK_KEY) == "1"
+    eng.commit_sold_shard(eng.sold_shard(_sold_sources()), any_success=True)
+    assert store.get_meta(SOLD_BLOCKED_STREAK_KEY) == "0"
+
+
 def test_sold_shard_force_returns_full_list_and_resets_cursor(cfg, tmp_path):
     """人工「我現在就要更新行情」的逃生門：force 回全量，且完成後游標歸零，
     不然下一輪照常節奏又會跳到某個中間位置，跟人工跑過一次的直覺不符。"""
@@ -407,6 +450,55 @@ def test_pipeline_refresh_comps_walks_shards_across_calls(monkeypatch, tmp_path,
     assert first == ["遊戯王 初期"]
     assert second == ["遊戯王 二期"]
     assert "游標" in capsys.readouterr().out
+
+
+def test_pipeline_refresh_comps_advances_cursor_immediately_on_blocked_source(
+    monkeypatch, tmp_path, cfg, capsys
+):
+    """CLAUDE.md 第六節（測試路徑必須等於生產路徑）：`commit_sold_shard` 的
+    blocked 契約已經在別的測試裡直接呼叫釘住了，但那樣測不到真正新加的邏輯
+    ——`pipeline.refresh_comps` 裡 `isinstance(exc, BlockedError)` 那段判斷。
+    這條逼真來源丟出 `BlockedError`，走 `refresh_comps` 整條鏈路，
+    確認只跑一輪游標就推進了（不是像 transient 失敗那樣卡三輪才推進）。
+    """
+    import dataclasses
+
+    import ygo_sniper.pipeline as pipeline_mod
+    from ygo_sniper.comps import SOLD_CURSOR_KEY
+    from ygo_sniper.pipeline import Pipeline
+    from ygo_sniper.sources.base import BlockedError
+
+    class _BlockedSource(_SoldSource):
+        def search(self, keyword, **_kw):
+            raise BlockedError("waf challenge", url="https://example.test/search")
+
+    registry = {"yahoo_closed": _BlockedSource("yahoo_closed")}
+    test_cfg = dataclasses.replace(
+        cfg,
+        root=tmp_path,
+        watchlist={
+            **cfg.watchlist,
+            "queries": [],
+            "comps_queries": {
+                "sources": ["yahoo_closed"],
+                "every_n_runs": 2,
+                "template": "遊戯王 {era}",
+                "eras": ["初期", "二期"],
+            },
+        },
+    )
+    monkeypatch.setattr(pipeline_mod, "build_sources", lambda _cfg, _f=None: registry)
+    monkeypatch.setattr(pipeline_mod, "FxRates", lambda _cfg: FakeFx())
+    pipe = Pipeline(test_cfg)
+    try:
+        pipe.refresh_comps()
+        cursor_after_one_run = pipe.store.get_meta(SOLD_CURSOR_KEY)
+    finally:
+        pipe.close()
+
+    assert cursor_after_one_run == "1"  # 一輪就推進，不是三振後才推進
+    out = capsys.readouterr().out
+    assert "整片被擋" in out
 
 
 def test_sold_pages_defaults_and_floor(cfg):
