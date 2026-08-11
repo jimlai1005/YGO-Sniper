@@ -8,6 +8,8 @@ comps 是判斷的基礎，如果先掃在架標的再抓成交價，
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from pathlib import Path
 
 from .alerts import HEALTH_SEVERITY, Alert, AlertEngine
 from .bidding import is_live_auction
@@ -19,6 +21,14 @@ from .fx import FxRates
 from .notify import TelegramNotifier
 from .parsers import is_candidate, parse_card
 from .queries import load_queries, resolve_category
+from .schedule_watch import (
+    PENDING_ALERT_KEY,
+    RUN_FINISHED_KEY,
+    RUN_STARTED_KEY,
+    resolve_alert,
+    schedule_health,
+    watchdog_message,
+)
 from .scoring import evaluate, is_triggered, seller_histogram
 from .sources import CachedFetcher, build_sources
 from .sources.base import BlockedError, FetchError
@@ -223,6 +233,10 @@ class Pipeline:
         #: （CLAUDE.md 第五節）。compared 很大 ＋ hits 0 ＝ 比對跑了但沒貨；
         #: compared 0 ＝ 比對根本沒跑。
         self._snipe_stats = {"compared": 0, "hits": 0}
+        #: 排程空窗告警（`scan()` 開頭填；`None` = 沒偵測到問題，也可能是
+        #: 這輪還沒跑過 scan()——初始化在這裡而不是只在 scan() 裡設，
+        #: 讓呼叫端用 `getattr` 都不必也能安全讀到 None，見 schedule_watch.py）。
+        self._schedule_alert: str | None = None
 
     # ------------------------------------------------------------------
     def valuator(self):
@@ -252,34 +266,41 @@ class Pipeline:
     def refresh_comps(self, *, force: bool = False) -> int:
         """跑「已售出」搜尋，累積日本市場真實成交價。
 
-        **先過節流閘門**：排程每小時跑一輪，但行情是以週為單位在變的，
-        而已售出查詢展開後有數十個關鍵字 × 數頁。每輪都跑等於每天打幾千個
-        重複請求。`comps_queries.every_n_runs` 決定每幾輪才真的跑一次
-        （見 `CompsEngine.claim_sold_run`）；跳過時仍然 `load_from_store()`，
-        所以後面的評分照樣拿得到行情，只是沒有新資料進來。
+        **每輪只跑一小片，`comps_queries.every_n_runs` 輪走完一整份**
+        （見 `CompsEngine.sold_shard`）：行情是以週為單位在變的，但排程
+        每小時跑一輪，已售出查詢展開後有數十個關鍵字 × 數頁，舊制「每
+        every_n_runs 輪一次全跑」會把整份查詢擠成一次幾百請求的尖峰——
+        這正是全 log 唯一與硬 blocked 同輪出現過的批次形態。分片把同樣的
+        總請求量攤平成每輪一小口，對方看到的是穩定小流量。
 
         每條 (source, query) 各自隔離：任何一個來源壞掉（現階段 Buyee 系
         的 stub fetcher 就是必拋 BlockedError），只跳過它自己，
-        不能拖垮整輪 comps 更新、更不能拖垮後面的掃描。
+        不能拖垮整輪 comps 更新、更不能拖垮後面的掃描。游標只在**這一片
+        至少一條查詢成功**時推進（`commit_sold_shard`）——整片全失敗時
+        再分兩種：全是 `BlockedError`（semantic，對方剛拒絕過我們，重試
+        沒有意義）立刻推進；其餘（transient，例如逾時）原地重試，
+        連續三輪才強制推進（工程原則 2）。
 
         回傳「真的入庫幾筆」（int，CLI 直接印）；擋掉的筆數與原因分布
         印在 log —— 過濾器自己也會壞，擋掉 100% 跟擋掉 0% 一樣需要被看見。
         """
-        due, why = self.comps.claim_sold_run(force=force)
-        if not due:
-            print(f"[comps] 跳過已售出查詢（{why}）")
+        shard = self.comps.sold_shard(self.sources, force=force)
+        if not shard.queries:
+            print("[comps] 已售出查詢：展開後為空，跳過")
             self.comps.load_from_store()
             return 0
 
         pages = self.comps.sold_pages
-        queries = self.comps.sold_queries(self.sources)
-        if why:
-            print(f"[comps] 跑 {len(queries)} 個已售出查詢 × 最多 {pages} 頁（{why}）")
+        suffix = f"（{shard.label}）" if shard.label else ""
+        print(f"[comps] 跑 {len(shard.queries)} 個已售出查詢 × 最多 {pages} 頁{suffix}")
 
         total = 0
         rejected = 0
         reasons: dict[str, int] = {}
-        for source_name, keyword in queries:
+        any_success = False
+        blocked_failures = 0
+        other_failures = 0
+        for source_name, keyword in shard.queries:
             src = self.sources[source_name]
             try:
                 sold = src.search(keyword, sold=True, pages=pages)
@@ -288,7 +309,12 @@ class Pipeline:
                     f"[warn] comps {source_name} 「{keyword}」失敗，跳過："
                     f"{type(exc).__name__}: {exc}"
                 )
+                if isinstance(exc, BlockedError):
+                    blocked_failures += 1
+                else:
+                    other_failures += 1
                 continue
+            any_success = True
             report = self.comps.ingest_sold(sold)
             total += report.kept
             rejected += report.rejected
@@ -299,6 +325,16 @@ class Pipeline:
                 f"{k}×{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])[:5]
             )
             print(f"[comps] 收 {total} 筆、擋 {rejected} 筆（{top}）")
+        self.comps.commit_sold_shard(
+            shard,
+            any_success=any_success,
+            # 「有被擋、且沒有其他種類的失敗」——這個表達式本身在有成功查詢時
+            # 也會是 True（any_success=True 時 blocked_failures 可能仍 >0、
+            # other_failures 仍 ==0），單看這行不足以保證「純被擋」。
+            # 它今天是安全的，是因為 commit_sold_shard 先檢查 any_success
+            # 才看 blocked（那個分支順序不在這裡，改動它時要記得這裡依賴它）。
+            blocked=blocked_failures > 0 and other_failures == 0,
+        )
         self.comps.load_from_store()
         return total
 
@@ -715,8 +751,14 @@ class Pipeline:
         例外一律先落 finished(error=…) 再往外拋——**掃爆了不可以讓狀態卡在
         running**（工程原則 3）。真正的崩潰（kill -9、斷電）走 `scan_status`
         的逾時兜底，那是另一道防線。
+
+        排程空窗偵測也記在這裡（開頭讀舊基準＋印告警、寫新基準；成功收尾時
+        再補一個完成戳記，見 `_update_schedule_state`／`_finish_schedule_state`）。
+        `--dry-run` 的語意是「只掃不寫庫」、`watch_only` 是 `watch-scan` 的獨立
+        節奏（見那兩個方法的 docstring），兩者都不吃邊緣觸發、不動基準。
         """
         started = self.store.begin_scan(trigger=trigger, dry_run=dry_run)
+        self._update_schedule_state(dry_run=dry_run, watch_only=watch_only)
         try:
             result = self._scan(
                 started, skip_comps=skip_comps, dry_run=dry_run,
@@ -724,6 +766,12 @@ class Pipeline:
             )
         except BaseException as exc:  # noqa: BLE001 - 落狀態後原樣往外拋，見 docstring
             self.store.finish_scan(started, error=f"{type(exc).__name__}: {exc}")
+            # 這裡刻意不呼叫 `_finish_schedule_state`：崩潰時 RUN_FINISHED_KEY
+            # 必須維持舊值，下一輪的 schedule_health 才會看到「有開始沒收尾」。
+            # 這一輪已經在 `_update_schedule_state` 裡把偵測到的告警寫進
+            # PENDING_ALERT_KEY 了，即使 `daily` 的 try/finally 不會走到
+            # `_run_notifications`（本輪崩潰），那則告警也不會跟著丟失——
+            # 下一輪成功收尾時會把它撿回來一起送（Fix 4）。
             raise
         self.store.finish_scan(
             started,
@@ -733,7 +781,157 @@ class Pipeline:
                 if k in result
             },
         )
+        # 只有走到這裡（沒有例外往外拋）才算「正常收尾」——crash 時上面的
+        # except 分支已經 raise 出去，這行不會執行，基準保持舊值。
+        self._finish_schedule_state(dry_run=dry_run, watch_only=watch_only)
         return result
+
+    def _update_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
+        """排程空窗偵測的開頭那一半：讀舊基準、算這一輪要不要出聲、寫新基準。
+
+        `dry_run`：`--dry-run` 是「只掃不寫庫」，這裡也不能寫、也不能吃掉
+        邊緣觸發。
+
+        `watch_only`：`ygo-sniper watch-scan` 是賣家輪替監控的**人工逃生門**，
+        跑在自己的節奏上（由 `due_sellers` 的節流決定，不是 15 個 plist
+        時間點），而且它跳過關鍵字查詢／canary／comps 回補——排程監督真正
+        要盯的正是那些東西有沒有照表跑。讓 watch-scan 寫這裡的基準，會讓一次
+        跟排程網格無關的手動執行，蓋掉「真正該跑的那一輪其實漏了」的證據
+        （工程原則 1 的變體：基準必須跟被拿去比較的排程表同源，watch-scan
+        的節奏不是那個源）。所以 watch_only 一律跳過整段，基準只由完整掃描
+        （`ygo-sniper scan`／`daily`／dashboard 的 `/api/scan`）維護。
+
+        偵測器本身包一層 `try/except`：它只是資訊性功能，壞掉不能拖垮這一輪
+        真正的掃描（見 schedule_watch.py 與 CLAUDE.md 五、靜默失敗）。
+        """
+        if dry_run or watch_only:
+            return
+        try:
+            now = datetime.now()
+            detected = schedule_health(
+                self.store.get_meta(RUN_STARTED_KEY),
+                self.store.get_meta(RUN_FINISHED_KEY),
+                now,
+            )
+            # Fix A：watchdog 帳本（run_daily.sh 寫的 data/last_run_exit）折進
+            # 同一條偵測。兩者都算「這一輪偵測到的問題」，合併成一句話一起
+            # 進 resolve_alert——共用同一套 pending／送達才消耗的保障，
+            # 不是另開一條沒有重送機制的路（見 schedule_watch.py 模組開頭
+            # Fix A 的事故背景：8.5 小時卡死那次唯一的線索就是這個帳本，
+            # 而原本的 curl 通知本身可能也送不出去）。
+            #
+            # 先讀不刪：`_read_watchdog_ledger` 只回傳訊息與檔案路徑，
+            # 真的刪檔（`_consume_watchdog_ledger`）要等下面 `set_meta`
+            # 把這句話寫進 PENDING_ALERT_KEY **之後**才做——順序反過來的話，
+            # 兩個陳述式之間被殺掉，會出現「證據已刪、但沒人記得這件事」
+            # 的窗口（哪怕只有微秒、哪怕會被下一輪自己的新帳本自癒，
+            # 「先落帳、才能刪證據」這個順序本身不該顛倒）。
+            watchdog_msg, ledger_path = self._read_watchdog_ledger()
+            if watchdog_msg:
+                detected = f"{detected}；{watchdog_msg}" if detected else watchdog_msg
+            self._schedule_alert, new_pending = resolve_alert(
+                self.store.get_meta(PENDING_ALERT_KEY), detected
+            )
+            if self._schedule_alert:
+                print(self._schedule_alert)
+            # 寫入順序無關緊要（三把鍵各自獨立），但 PENDING 先寫、STARTED
+            # 後寫，讓「這輪偵測到的東西已經進帳」與「這輪已經開始」在語意上
+            # 對齊：pending 記的是「偵測時看到的問題」，started 記的是「這輪
+            # 本身何時起跑」，兩者互不覆寫對方。
+            self.store.set_meta(PENDING_ALERT_KEY, new_pending)
+            self.store.set_meta(RUN_STARTED_KEY, now.isoformat())
+            # 帳本已經折進上面的 PENDING_ALERT_KEY，現在才能刪——見本方法
+            # 開頭的順序說明。`set_meta` 這一行沒寫成功就不會走到這裡
+            # （例外會被下面的 except 接住，帳本檔案原封不動留給下一輪重讀）。
+            if watchdog_msg and ledger_path is not None:
+                self._consume_watchdog_ledger(ledger_path)
+        except Exception as exc:  # noqa: BLE001 - 偵測器壞掉不能拖垮本輪掃描
+            print(
+                f"[warn] 排程空窗偵測失敗（不影響本輪掃描）："
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    def _read_watchdog_ledger(self) -> tuple[str | None, Path | None]:
+        """讀 `run_daily.sh` 寫的上一輪結束帳本（`data/last_run_exit`），
+        折成一句話。**不刪檔案**——刪檔是呼叫端（`_update_schedule_state`）
+        在把這句話寫進 `PENDING_ALERT_KEY` 之後才做的事，見那裡的順序說明。
+
+        回傳 `(訊息或 None, 折出訊息時的檔案路徑；沒折出東西就是 None)`——
+        呼叫端只需要在訊息非 None 時才有東西可刪，第二個值把「要不要刪」
+        與「刪哪個檔案」一起帶出來，呼叫端不用重新算一次路徑。
+
+        純／不純分工：檔案讀取（不純）留在這裡，訊息怎麼寫（純，包含
+        「已經送達的失敗通知不重複講」的判斷）在 `schedule_watch.watchdog_message`。
+
+        對檔案不存在／壞掉一律寬容：找不到帳本是**最常見**的正常狀態
+        （上一輪成功、run_daily.sh 覆寫成 exit=0，`watchdog_message` 對
+        exit=0 回 None，等於沒東西可折——但如果連讀取本身都失敗，這裡
+        也不例外拋出，理由與 `schedule_health` 相同：偵測器壞掉不能拖垮
+        真正的掃描（外層 `_update_schedule_state` 的 try/except 是最後一道，
+        這裡先擋一層是因為「檔案讀不到」本來就不是例外狀況，用 if 處理
+        比讓它落進 except 分支更清楚）。
+
+        路徑刻意算成 `cfg.db_path.parent / "last_run_exit"` 而不是
+        `cfg.root / "data" / "last_run_exit"`：production 兩者算出來是
+        同一個目錄（`storage.db_path` 預設是 `"data/sniper.db"`），但
+        `db_path` 是**全 repo 測試已經在用的隔離點**——每一個建立臨時
+        `Pipeline` 的測試 fixture 都會覆寫 `storage.db_path` 成
+        `tmp_path` 底下的絕對路徑（CLAUDE.md 第六節：測試絕不碰真實
+        世界）。如果這裡改用 `cfg.root`，任何沒有額外覆寫 `root` 的既有
+        測試（例如 `test_card_snipe.py` 呼叫 `pipeline.scan(...)`）就會
+        在跑測試時真的去讀、甚至**刪掉**這台機器上正式環境的
+        `data/last_run_exit`——比讀錯資料更糟，是直接吃掉正式帳本。
+        沿用 `db_path` 讓這裡自動繼承全 repo 既有的隔離保證，不必逐一
+        去改其他測試檔案。
+        """
+        path = self.cfg.db_path.parent / "last_run_exit"
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return None, None
+        try:
+            ledger = json.loads(raw)
+        except (TypeError, ValueError):
+            ledger = None
+        msg = watchdog_message(ledger)
+        return msg, (path if msg else None)
+
+    def _consume_watchdog_ledger(self, path: Path) -> None:
+        """刪掉已經折進 `PENDING_ALERT_KEY` 的 watchdog 帳本檔案——
+        「讀了就算數」，下一輪不會重複折同一份失敗。
+
+        只能在 pending 已經確定落地之後呼叫（見 `_update_schedule_state`
+        的呼叫順序）；刪不掉就算了，不算例外——下一輪頂多重複折一次，
+        比「刪掉了但 pending 沒寫進去」的後果輕得多。
+        """
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+    def _finish_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
+        """排程空窗偵測的收尾那一半：只有真正走到這裡才代表「正常收尾」。
+
+        guard 理由與 `_update_schedule_state` 相同（dry-run 不寫庫、
+        watch-scan 不是排程網格的一部分）。呼叫點在 `scan()` 裡故意放在
+        例外處理**之外**——`_scan()` 拋例外時這個方法完全不會被呼叫，
+        `RUN_FINISHED_KEY` 因此維持舊值，下一輪 `schedule_health` 才報得出
+        「有開始沒收尾」。
+
+        這裡也包一層 `try/except`，跟 `_update_schedule_state` 對稱：這行只是
+        排程監督自己的記帳，不能讓它的失敗把已經跑完、已經 `finish_scan`
+        成功的一輪掃描結果拖著一起往外拋例外（工程原則 3 的反面：安全關鍵的
+        是「這一輪掃描的結果」本身，記帳失敗只需要出聲，不需要連坐）。
+        """
+        if dry_run or watch_only:
+            return
+        try:
+            self.store.set_meta(RUN_FINISHED_KEY, datetime.now().isoformat())
+        except Exception as exc:  # noqa: BLE001 - 記帳壞掉不能拖垮已經跑完的掃描
+            print(
+                f"[warn] 排程收尾記帳失敗（不影響本輪掃描結果）："
+                f"{type(exc).__name__}: {exc}"
+            )
 
     def _scan(
         self,

@@ -30,7 +30,7 @@ Seller Alpha 原本的設計是：每小時掃一次在架，把觀測寫進 `li
 被請求預算截斷。沒有帳本的話，續跑只能從頭再來一次——那些請求換回來的是
 **逐位相同的資料**（`comps` 的 `UNIQUE(signature, url)` 會全部 IGNORE 掉）。
 帳本落 `meta` 而不是記憶體：CLI 每次都是全新的行程（與
-`comps.claim_sold_run`、`seller_watch` 的輪替帳同一套理由）。
+`comps.CompsEngine.sold_shard`、`seller_watch` 的輪替帳同一套理由）。
 
 帳本記的是**頁碼**不是「做過了」：同一個關鍵字第一次翻 4 頁、第二次想翻 9 頁，
 續跑要從第 5 頁接下去，不是重抓前 4 頁。`archive_exhausted` 的查詢直接跳過

@@ -46,6 +46,7 @@ import httpx
 from ..bidding import LIVE_AUCTION_KIND, is_live_auction
 from ..config import Config
 from ..domain import Currency, Listing, Site
+from .base import _log_request
 from .health import ParseHealth, SearchResult
 
 _OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
@@ -346,6 +347,7 @@ class EbaySource:
         creds = f"{self.cfg.ebay_client_id}:{self.cfg.ebay_client_secret}"
         auth = base64.b64encode(creds.encode()).decode()
         with httpx.Client(timeout=20) as client:
+            t0 = time.monotonic()
             try:
                 r = client.post(
                     _OAUTH_URL,
@@ -356,7 +358,10 @@ class EbaySource:
                     data={"grant_type": "client_credentials", "scope": _SCOPE},
                 )
             except httpx.HTTPError as exc:
+                # _OAUTH_URL 不帶查詢字串、憑證在 header 不在 URL，記下來不會外洩
+                _log_request(_OAUTH_URL, type(exc).__name__, t0)
                 raise EbayTransientError(f"OAuth 連線失敗: {type(exc).__name__}: {exc}") from exc
+            _log_request(_OAUTH_URL, r.status_code, t0)
             _raise_for_status(r, "OAuth")
             blob = r.json()
         self._token = blob["access_token"]
@@ -384,12 +389,16 @@ class EbaySource:
         token = self._get_token()
         url = _ITEM_URL.format(item_id=item_id_v1(raw_item_id))
         with httpx.Client(timeout=30) as client:
+            t0 = time.monotonic()
             try:
                 r = client.get(url, headers=browse_headers(token, context=context))
             except httpx.HTTPError as exc:
+                # token 在 header（Bearer）不在 url，記下來不會外洩
+                _log_request(url, type(exc).__name__, t0)
                 raise EbayTransientError(
                     f"連線失敗: {type(exc).__name__}: {exc}"
                 ) from exc
+            _log_request(url, r.status_code, t0)
             if r.status_code == 404:
                 raise EbayItemNotFound(
                     f"eBay 找不到這個商品（HTTP 404）：{raw_item_id}"
@@ -622,10 +631,16 @@ class EbaySource:
     @staticmethod
     def _get_page(client: httpx.Client, headers: dict, params: dict) -> tuple[dict, int]:
         """回 (JSON 物件, 回應 bytes)。回應大小是排錯線索——被擋的回應通常異常小。"""
+        # 完整 URL（含 query）才記得出「這頁在查什麼」；params 只有關鍵字／分類／
+        # 分頁這類公開參數，token 在 headers 裡的 Authorization，不會被印出來
+        full_url = str(httpx.URL(_BROWSE_URL, params=params))
+        t0 = time.monotonic()
         try:
             r = client.get(_BROWSE_URL, headers=headers, params=params)
         except httpx.HTTPError as exc:
+            _log_request(full_url, type(exc).__name__, t0)
             raise EbayTransientError(f"連線失敗: {type(exc).__name__}: {exc}") from exc
+        _log_request(full_url, r.status_code, t0)
         _raise_for_status(r, "Browse")
         try:
             blob = r.json()

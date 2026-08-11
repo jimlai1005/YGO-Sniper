@@ -302,9 +302,81 @@ def _reason_bucket(why: str) -> str:
 # ---------------------------------------------------------------------------
 # 已售出查詢的組合展開與請求節流
 # ---------------------------------------------------------------------------
-#: 每小時排程跑一輪；這個計數器決定「第幾輪才真的跑已售出查詢」。
-#: 存在 store 的 meta 表（跨行程、跨重啟都要記得住，用記憶體變數等於沒節流）。
-SOLD_RUN_COUNTER_KEY = "comps_sold_run_counter"
+#: 分片游標：下一輪從展開後清單的第幾個 (source, keyword) 開始跑。
+#: 存 store meta（跨行程、跨重啟都要記得住，用記憶體變數等於沒節流）。
+SOLD_CURSOR_KEY = "comps_sold_cursor"
+#: 同一分片連續整片失敗的次數；達 3 次就強制推進游標並出聲，避免壞片卡死輪替。
+SOLD_STALL_KEY = "comps_sold_stall"
+SOLD_STALL_LIMIT = 3
+
+#: 連續幾輪「整片被擋」（跟上面的 stall 是不同的帳——被擋不重試，
+#: 每輪都會前進，所以不能用 SOLD_STALL_KEY 數）。與 SOLD_STALL_LIMIT 同值
+#: 只是巧合對齊操作者心智模型（連三次都不對勁），兩個帳本各自獨立記帳。
+SOLD_BLOCKED_STREAK_KEY = "comps_sold_blocked_streak"
+SOLD_BLOCKED_STREAK_LIMIT = 3
+
+#: 「正在嘗試哪個游標、嘗試了幾次」，值是 "<cursor>:<count>"。
+#:
+#: 這本帳補的是一個真實的 crash-safety 破洞：這個分支把「發哪個游標的片」
+#: （`sold_shard`）跟「跑完了嗎、要不要前進」（`commit_sold_shard`）拆開，
+#: 換來精準（只有真的做完事才前進），但代價是不再對「跑到一半被殺」免疫。
+#: 舊制 `claim_sold_run` 是「問之前先扣」——一問就把配額算掉，天然扛得住
+#: crash（配額已經扣了，不會重複問）；這裡的新制是「先問再扣」，中途被殺
+#: （這個 repo 另外加了 25 分鐘 watchdog，逾時 SIGKILL 整棵行程樹）就會
+#: 兩個帳本都沒寫到：游標沒動、SOLD_STALL_KEY 也沒動（stall 只數「跑完但
+#: 全失敗」，不數「根本沒跑完」）。實測分片 0 剛好是 buyee_mercari／
+#: paypay_direct（Playwright/WAF 那條路），也就是全部歷史 hang 都出在的
+#: 那一段——會活生生撞上這個洞：卡在分片 0 → 被殺 → 下一輪原地重跑分片 0
+#: → 再卡 → 再殺，永遠到不了後面 80 條 yahoo_closed，comps 靜默停更新，
+#: 而 watchdog 的 Telegram 只會說「殺了一次」，不會說「comps 已經連續
+#: 幾天沒進度」。
+#:
+#: 這裡記的是「正要試游標 N」，不是「已經吃掉游標 N 的配額」——`sold_shard`
+#: 寫這個標記本身**不會**推進 `SOLD_CURSOR_KEY`，一輪正常跑完
+#: （`commit_sold_shard` 真的被叫到）就會清掉它，不干擾原本 commit-on-success
+#: 的精準度。只有「連續交出去卻沒等到 commit」累積到門檻，才由 `sold_shard`
+#: 自己強制把游標推過去（因為呼叫端是 `pipeline.refresh_comps`，這次改動
+#: 刻意不動它——分片選擇與「發現卡死該怎麼辦」被迫擠進同一個入口）。
+SOLD_ATTEMPT_KEY = "comps_sold_attempt"
+#: 比 SOLD_STALL_LIMIT（3）小：兩者量的不是同一件事，不能共用同一個門檻
+#: （那會是另一種混源比較）。stall 數的是「跑完了，但查詢乾淨地失敗」，
+#: 失敗一次很便宜（幾秒鐘），多容忍幾輪換一次網路狀況的成本很低；這裡數的
+#: 是「整個行程被 25 分鐘 watchdog SIGKILL」，一次就是 25 分鐘蒸發，連續
+#: 兩次已經是強訊號（同一段真的卡死，不是雜訊），沒必要拖到 3 次再放手，
+#: 那只是讓 comps 多停擺一輪。
+SOLD_ATTEMPT_LIMIT = 2
+
+
+def _parse_sold_attempt(raw: str | None) -> tuple[int | None, int]:
+    """解析 `SOLD_ATTEMPT_KEY` 的 "<cursor>:<count>"。沒有標記或壞值一律當作
+    「沒有進行中的嘗試」（游標 None、次數 0）——與 SOLD_CURSOR_KEY／
+    SOLD_STALL_KEY 同一套容錯慣例：壞掉的 meta 值不該讓排程整個炸掉。
+    """
+    if not raw:
+        return None, 0
+    try:
+        cursor_str, count_str = raw.split(":", 1)
+        return int(cursor_str), int(count_str)
+    except (ValueError, TypeError):
+        return None, 0
+
+
+def _sold_observability_warning() -> str:
+    """整片失敗（被擋或其他原因）時要附的觀測指引，被擋與 stall 兩條路徑共用
+    同一份文字——分開寫的話，其中一條被改了用詞、另一條沒跟上，訊息就會
+    悄悄失真（這正是這份訊息第一版被抓到的問題：宣稱了 AlertEngine 涵蓋
+    不到的事）。
+
+    真話只有這幾件：印出來的 `[warn] comps …` 明細與 log 檔案才是唯一訊號，
+    dashboard 的來源健康度看不到——comps_queries 展開查詢主要打
+    yahoo_closed，它沒有 canary、不進 AlertEngine，壞了那個面板不會變紅。
+    """
+    return (
+        "訊號只有這行與同一輪印出的每條 `[warn] comps <來源> 「<關鍵字>」失敗`"
+        "——去 data/logs/daily-*.log 找。不要指望 dashboard 的來源健康度："
+        "comps_queries 展開查詢主要打 yahoo_closed，它沒有 canary、不進 "
+        "AlertEngine，壞了那個面板不會變紅。"
+    )
 
 #: 展開後的查詢數硬上限。組合展開是「乘法」，稀有度 6 × 年代 6 × 機構 2 = 72，
 #: 手一滑多加兩個詞就變 120——而每個查詢最多還要翻 N 頁。這個上限不是禮貌，
@@ -361,6 +433,17 @@ def expand_comps_queries(spec: Mapping | None) -> list[str]:
         print(f"[comps] 展開出 {len(deduped)} 個已售出查詢，超過上限 {cap}，截斷尾端")
         deduped = deduped[:cap]
     return deduped
+
+
+@dataclass(slots=True)
+class SoldShard:
+    """一輪要跑的已售出查詢分片。`next_cursor is None` = 不推進游標
+    （無 store、every_n_runs<=1 的「每輪全跑」情境；force 全量會給 0，
+    仍然推進，見 `sold_shard`）。"""
+
+    queries: list[tuple[str, str]]
+    label: str
+    next_cursor: int | None
 
 
 @dataclass(slots=True)
@@ -599,37 +682,173 @@ class CompsEngine:
         spec = self.cfg.watchlist.get("comps_queries") or {}
         return max(1, int(spec.get("pages", 2)))
 
-    def claim_sold_run(self, *, force: bool = False) -> tuple[bool, str]:
-        """這一輪要不要跑已售出查詢？**有副作用：每呼叫一次計數 +1。**
+    def sold_shard(self, sources, *, force: bool = False) -> SoldShard:
+        """這一輪要跑哪一片已售出查詢。
 
-        行情是以「週」為單位在變的，但排程每小時跑一輪。已售出查詢展開後
-        有數十個關鍵字 × 數頁，每小時全跑一次等於每天對人家打幾千個請求，
-        換來的是幾乎完全重複的資料（落札相場的日流量遠小於我們的抓取量）。
-        所以節流：每 `comps_queries.every_n_runs` 輪才真的跑一次
-        （每小時排程 → 12 代表一天兩次）。
+        舊制是「每 every_n_runs 輪跑一次全量」——一口氣 88 查詢 × 4 頁
+        ≈ 352 請求，是全 log 唯一與硬 blocked 同輪出現過的批次形態
+        （daily-20260810.log:450-477）。改成每輪走 ceil(N/every) 個，
+        every 輪走完一整份：對方看到的是穩定小流量，每查詢的更新頻率不變，
+        而且一片塞得進一顆 WAF token 的 240s 預算。
 
-        計數器落在 store 的 meta 表而不是記憶體：CLI 每輪都是全新的行程，
-        記憶體變數的「節流」在這個部署形態下等於沒有節流。
-        `every_n_runs <= 1` 或沒有 store（單元測試、dry-run 情境）→ 每輪都跑。
+        游標的推進者有兩個，不是一個：正常路徑由 `commit_sold_shard`
+        推進（呼叫端跑完才知道成敗）；`sold_shard` 自己的強制跳過分支
+        （見下方 crash-safety 說明）在同一個游標交出去 N 次都沒等到 commit
+        時也會直接寫 `SOLD_CURSOR_KEY`——這不是巧合或疏漏，是刻意的：
+        那個分支要處理的正是「呼叫端這次大概率永遠不會回來呼叫
+        `commit_sold_shard`」，等它推進就永遠等不到。
+        `force=True` 回全量並在 commit 時把游標歸零（人工逃生門）。
 
-        `force=True` 無視節流（人工「我現在就要更新行情」的逃生門），
-        但**計數器照樣前進**——手動跑過一次就等於這一輪的配額用掉了，
-        不然人工跑幾次就把排程的節流洗掉了。
+        ⚠️ **`force` 目前沒有接到任何 CLI／排程路徑**（`pipeline.py` 與
+        `cli.py` 都呼叫不帶參數的 `refresh_comps()`）——這是死碼但不是安全碼：
+        它一次回傳全量、不分片，正是這整個改動要拆掉的 352 請求尖峰形狀。
+        將來要接 `ygo-sniper comps --force` 之類的手動入口之前，先想清楚
+        怎麼分批（例如強制模式也照 shard size 跑但連續跑完整輪），
+        不要原樣接一顆按鈕上去。
 
-        回傳 `(要不要跑, 說明)`；說明會被印出來，讓「這輪為什麼沒有新行情」
-        永遠有一句話交代——安靜地跳過與安靜地壞掉，外顯是一樣的。
+        ⚠️ **這個方法有一個刻意保留的副作用**：正常路徑上會在 store 寫入
+        `SOLD_ATTEMPT_KEY`（見該常數的完整說明）。上一輪審查才剛稱讚這個
+        方法把「問要跑哪片」跟「跑完了沒有」拆乾淨、不再像舊制 `claim_sold_run`
+        一樣「問一次就燒一次配額」；這裡等於是把那個副作用的一小塊撿回來——
+        差別在於這次寫的是「正要試游標 N」，不是「已經吃掉游標 N」。
+        絕大多數輪次裡，真正的配額（`SOLD_CURSOR_KEY`）還是只由
+        `commit_sold_shard` 推進；只有「同一個游標交出去 N 次都等不到
+        commit」這個例外情況，才由這個方法自己出手推進——見上面的
+        「游標的推進者有兩個」段落，不要只看這一句就以為排他。
+        會做這個取捨，是因為 crash-safety 補丁的天然位置是「風險發生前的
+        那一刻」，而這個改動被要求不能碰 `pipeline.py`（無法新增一個
+        `begin_sold_shard()` 讓呼叫端額外呼叫一次）——`sold_shard` 是唯一
+        剩下、每輪必經的入口，只能在這裡順便記一筆。
         """
         spec = self.cfg.watchlist.get("comps_queries") or {}
         every = int(spec.get("every_n_runs", 1) or 1)
-        if every <= 1 or self.store is None:
-            return True, ""
-        try:
-            counter = int(self.store.get_meta(SOLD_RUN_COUNTER_KEY) or 0)
-        except (TypeError, ValueError):
-            counter = 0
-        self.store.set_meta(SOLD_RUN_COUNTER_KEY, str((counter + 1) % every))
-        if counter % every == 0:
-            return True, f"第 {counter} 輪（每 {every} 輪跑一次）"
+        all_q = self.sold_queries(sources)
+        if not all_q:
+            return SoldShard([], "", None)
         if force:
-            return True, f"第 {counter} 輪，本應節流（每 {every} 輪一次）但被 force 蓋過"
-        return False, f"節流：第 {counter} 輪，每 {every} 輪才跑一次已售出查詢"
+            label = (
+                f"force：整份全跑 {len(all_q)} 查詢 × {self.sold_pages} 頁"
+                "——WAF 風險高，非排程用；游標歸零"
+            )
+            return SoldShard(all_q, label, 0 if self.store is not None else None)
+        if every <= 1 or self.store is None:
+            return SoldShard(all_q, "", None)
+        try:
+            cursor = int(self.store.get_meta(SOLD_CURSOR_KEY) or 0)
+        except (TypeError, ValueError):
+            cursor = 0
+        cursor %= len(all_q)
+        size = -(-len(all_q) // every)  # ceil
+
+        attempted_cursor, attempted_count = _parse_sold_attempt(
+            self.store.get_meta(SOLD_ATTEMPT_KEY)
+        )
+        if attempted_cursor == cursor and attempted_count >= SOLD_ATTEMPT_LIMIT:
+            # 同一個游標連續交出去 SOLD_ATTEMPT_LIMIT 次，一次 commit 都沒等到
+            # ——不是重試慢，是這個游標本身有毛病：可能是被 watchdog（25 分鐘
+            # 逾時 SIGKILL 整棵行程樹）殺在半路，也可能是 fetch 完成後、
+            # commit 之前的路上崩潰了（例如 pipeline.refresh_comps 裡
+            # ingest_sold 丟例外——那段不在per-query 的 try 保護範圍內）。
+            # 兩種都是「這片會可靠地讓整輪跑不完」，處置一樣：強制跳過，
+            # 讓其餘查詢有機會繼續走，不然會在同一段（實測分片 0 正是
+            # Playwright/WAF 那條路）永遠卡死。
+            #
+            # ⚠️ 邊界情況（目前不會發生，但改動前先看這裡）：len(all_q)==1
+            # 時 nxt == cursor，這個分支會每輪都印警告卻推不動游標——現實
+            # config 展開後有 88 條，摸不到這個邊界，但如果哪天查詢清單被
+            # 砍到只剩 1 條，這裡要跟著補「只有一片時不算卡死」的例外。
+            skipped = all_q[cursor : cursor + size]
+            nxt = (cursor + len(skipped)) % len(all_q)
+            print(
+                f"[comps] ⚠️ 游標 {cursor} 連續交出 {attempted_count} 次都沒等到"
+                " commit——這片要嘛被殺在半路（watchdog SIGKILL），要嘛是"
+                "拿到資料後、commit 之前的路上崩潰（例如 ingest 階段），視為"
+                f"卡死，強制跳過這片、推進到 {nxt}。{_sold_observability_warning()}"
+            )
+            self.store.set_meta(SOLD_CURSOR_KEY, str(nxt))
+            cursor = nxt
+
+        shard = all_q[cursor : cursor + size]
+        nxt = (cursor + len(shard)) % len(all_q)
+        # 記下「正要試這個游標」，不是「已經吃掉這個游標」——見 SOLD_ATTEMPT_KEY
+        # 的說明。同一游標延續次數，換了游標（包含剛剛的強制跳過）就重新起算。
+        next_count = attempted_count + 1 if attempted_cursor == cursor else 1
+        self.store.set_meta(SOLD_ATTEMPT_KEY, f"{cursor}:{next_count}")
+        # 用游標位置本身當進度顯示，不用合成的序數：config 改過（every_n_runs
+        # 或查詢清單長度變了）之後，「第幾片」這種序數會立刻對不上、誤導操作者，
+        # 但「游標從哪到哪／全份多大」永遠是事實。
+        label = f"游標 {cursor}→{nxt}／全份 {len(all_q)} 查詢"
+        return SoldShard(shard, label, nxt)
+
+    def commit_sold_shard(
+        self, shard: SoldShard, *, any_success: bool, blocked: bool = False
+    ) -> None:
+        """跑完一片之後推進游標，依失敗性質分兩條路（工程原則 2：
+        transient 重試、semantic 不重試）：
+
+        - **`blocked=True`**（整片失敗且全是 `BlockedError`）：對方剛拒絕過
+          我們，semantic 失敗，重試同一片只是再被拒絕一次——立刻推進，
+          不佔 stall 名額。**連續幾輪都被擋**落在獨立的
+          `SOLD_BLOCKED_STREAK_KEY` 帳本上（被擋的路每輪都會推進，不能借用
+          會被歸零的 `SOLD_STALL_KEY`），達到 `SOLD_BLOCKED_STREAK_LIMIT`
+          時訊息升級成「這來源看起來整體失效了」，附上要查什麼。
+          **這個帳本只被這裡增、被下面的 `any_success` 分支歸零**——不是只
+          印一句「代表整體失效」卻沒人真的數——那正是這句話第一版被抓到的
+          問題（宣稱了程式碼沒做的事）。
+        - **其餘整片失敗**（transient，例如逾時、連線中斷）：原地重試，
+          連續 `SOLD_STALL_LIMIT` 輪仍全失敗才強制推進——避免一個真的壞掉
+          的查詢（不是 WAF、是自己解析壞了之類）永遠卡住輪替。
+        - `any_success=True`：至少有一條查過，游標照常前進、stall 與
+          blocked streak 都歸零——只要有一條成功，代表來源沒有整體掛掉。
+
+        **無論走哪條分支都會清掉 `SOLD_ATTEMPT_KEY`**——不只在真的推進游標
+        的分支清，三條分支都清。這個方法會被叫到，本身就證明這一輪的行程
+        撐過去了（沒被 watchdog SIGKILL），所以「正在嘗試、還沒等到 commit」
+        這件事對這個游標已經不成立，該清。故意不把它收窄成「只在寫游標的
+        分支清」：如果只在寫游標時清，「transient 失敗但 stall 還沒到頂、
+        游標原地不動」那條分支就會放著舊的嘗試次數不管，讓下一輪
+        `sold_shard` 誤把「乾淨地失敗過幾次」跟「被殺過幾次」加在一起計數
+        ——那正是把兩種不同性質的失敗混進同一把尺（工程原則 1 的同型陷阱）。
+        """
+        if shard.next_cursor is None or self.store is None:
+            return
+        self.store.set_meta(SOLD_ATTEMPT_KEY, "")
+        if any_success:
+            self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
+            self.store.set_meta(SOLD_STALL_KEY, "0")
+            self.store.set_meta(SOLD_BLOCKED_STREAK_KEY, "0")
+            return
+        if blocked:
+            try:
+                streak = int(self.store.get_meta(SOLD_BLOCKED_STREAK_KEY) or 0) + 1
+            except (TypeError, ValueError):
+                streak = 1
+            self.store.set_meta(SOLD_BLOCKED_STREAK_KEY, str(streak))
+            if streak >= SOLD_BLOCKED_STREAK_LIMIT:
+                print(
+                    f"[comps] ⚠️ 連續 {streak} 輪整片被擋——不是單輪運氣不好，"
+                    "這個來源看起來整體失效了（WAF 永久擋 IP、token 拿不到、"
+                    "或帳號被鎖）。跑 `ygo-sniper health` 看來源健康度、"
+                    f"手動開一次該來源的搜尋頁確認。{_sold_observability_warning()}"
+                )
+            else:
+                print(
+                    f"[comps] 整片被擋（semantic，非 transient，連續第 {streak} 輪）"
+                    f"——不重試同一片，直接推進游標。{_sold_observability_warning()}"
+                )
+            self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
+            self.store.set_meta(SOLD_STALL_KEY, "0")
+            return
+        try:
+            stall = int(self.store.get_meta(SOLD_STALL_KEY) or 0) + 1
+        except (TypeError, ValueError):
+            stall = 1
+        if stall >= SOLD_STALL_LIMIT:
+            print(
+                f"[comps] ⚠️ 同一分片連續 {stall} 輪整片失敗，強制推進游標"
+                f"（跳過這片。{_sold_observability_warning()}）"
+            )
+            self.store.set_meta(SOLD_CURSOR_KEY, str(shard.next_cursor))
+            self.store.set_meta(SOLD_STALL_KEY, "0")
+        else:
+            self.store.set_meta(SOLD_STALL_KEY, str(stall))

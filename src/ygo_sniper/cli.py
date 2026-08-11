@@ -22,6 +22,7 @@ from .config import load_config
 from .costs import breakeven_table
 from .fx import FxRates
 from .pipeline import Pipeline
+from .schedule_watch import PENDING_ALERT_KEY
 from .seller_alpha import SALE_AUCTION, SALE_FIXED, SALE_KIND_LABEL, SALE_UNKNOWN
 from .seller_links import seller_page_url
 from .store import Store
@@ -195,6 +196,7 @@ def _run_notifications(pipe, result: dict) -> int:
     # 順序刻意：先好貨、再壞消息。告警放最後，才不會把撿漏擠出視線。
     # 位置刻意：在 silent 判斷之外——見 docstring。
     _send_alerts(pipe, result.get("alerts") or [])
+    _send_schedule_alert(pipe)
     return n
 
 
@@ -225,6 +227,11 @@ def _report_notify_disabled(pipe, result: dict) -> None:
             f"[yellow]另有 {len(alerts)} 則來源健康告警同樣未送出"
             "（判定照跑、alerts 表照落，`ygo-sniper health` 看得到）[/yellow]"
         )
+    if getattr(pipe, "_schedule_alert", None):
+        console.print(
+            "[yellow]另有 1 則排程監督告警同樣未送出"
+            "（已留在 pending 帳裡，`notify.enabled` 恢復後下一輪會補送）[/yellow]"
+        )
     console.print("[dim]要恢復：把 config/settings.yaml 的 notify.enabled 改回 true。[/dim]")
 
 
@@ -250,6 +257,34 @@ def _send_alerts(pipe: Pipeline, alerts: list) -> None:
         console.print(f"[red]告警 {len(alerts) - len(sent)} 則送出失敗，下輪會再試[/red]")
     else:
         console.print(f"[yellow]已送出 {len(sent)} 則來源告警[/yellow]")
+
+
+def _send_schedule_alert(pipe: Pipeline) -> None:
+    """排程空窗／上輪未收尾告警（schedule_watch.py）的推播與清帳。
+
+    刻意不走 `AlertEngine`／`mark_sent`：那本帳量的是「同一個 source 連續
+    壞了幾次」，排程空窗是完全不同的事件源（邊緣觸發：偵測時就已經覆寫了
+    `RUN_STARTED_KEY` 基準），混在一起會讓來源告警的次數統計失真
+    （CLAUDE.md 第五節「兩本帳不能合併」）。
+
+    清帳的權力只在這裡（送出成功之後），不在 `pipeline._update_schedule_state`
+    ——那一步只負責偵測與合併 pending，見 `schedule_watch.resolve_alert`
+    的 docstring。這是 Fix 2 的核心：**消費 pending 的是「送達確認」，不是
+    「算出了訊息」**，送失敗（例如筆電剛醒來 Wi-Fi 還沒穩）就讓 pending
+    留著，下一輪（不論是下一次 `daily`、還是使用者手動 `scan` 之後的
+    下一次 `daily`）會把它連同新問題一起重送，不會像舊版那樣被覆寫掉。
+
+    用 `getattr` 防呆：只有 `scan()` 真的跑過（且不是 dry-run／watch-scan）
+    才會設 `_schedule_alert` 這個屬性。
+    """
+    schedule_alert = getattr(pipe, "_schedule_alert", None)
+    if not schedule_alert:
+        return
+    if pipe.notifier.send_alert(schedule_alert):
+        pipe.store.set_meta(PENDING_ALERT_KEY, "")
+        console.print("[yellow]已推播排程監督告警[/yellow]")
+    else:
+        console.print("[red]排程監督告警送出失敗——留在 pending 帳裡，下一輪會一併重送[/red]")
 
 
 @app.command()

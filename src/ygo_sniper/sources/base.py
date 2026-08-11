@@ -7,10 +7,13 @@ Buyee 哪天改版壞掉，換掉 buyee.py 一個檔案就好。
 from __future__ import annotations
 
 import hashlib
+import os
 import ssl
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import certifi
 import httpx
@@ -20,6 +23,61 @@ from ..domain import Listing, Site
 
 #: 補充信任錨的落點（相對 `Config.root`）。內容見 `data/certs/README.md`。
 EXTRA_CA_DIR = "data/certs"
+
+
+def _log_request(url: str, outcome: object, started: float) -> None:
+    """一行 `[req]`：真的出網一次就記一次。
+
+    目的是回答「兩個請求間隔多久、對方回什麼、花多久」——目前唯一有的
+    是輪級 banner，逐請求證據完全不存在。**只記真的碰到網路的請求**：
+    快取命中不算（見 `CachedFetcher.get`），不然請求量會虛胖，
+    相鄰兩行的時間差也會被假的「間隔」污染，反而讓「被節流了嗎」更難答。
+
+    耗時只量這一次 `client.get()` 本身（呼叫端在 `_throttle()` 之後才取
+    `started`），刻意不含節流等待——節流延遲本來就已經設定好了（`delay`），
+    重複算進耗時只是雜訊；它真正的證據是「相鄰兩行的時間戳差了多少」，
+    這樣才對得上「這次間隔是節流還是對方變慢」這個問題。
+
+    `outcome`：成功／被 `_check` 拒絕都傳 `resp.status_code`（同一個真實
+    狀態碼——被擋的請求也是一次真的網路往返，不能因為之後被分類成失敗
+    就從 log 上消失，那正好是這個功能要調查的東西）；連線層失敗
+    （沒有 response 可言）傳例外的類名。
+
+    query string 只印前 80 字元純粹是防止一行洗版太長，**不是遮蔽機密**：
+    本專案所有來源的查詢字串只有關鍵字／價格／分類／分頁這類公開參數，
+    憑證一律走 header（見 ebay.py 的 Authorization Bearer/Basic）。
+    若未來新增一個把 token 放進 URL 的來源，要在那個呼叫點先遮蔽，
+    不能指望這裡的截斷（`notify.py:826` 的 Telegram bot token 就是直接嵌在
+    URL 裡的例子——那個模組完全不叫這個函式，但將來若有人想把它也接進來，
+    這裡的截斷不構成遮蔽，必須在呼叫點先處理過再傳進來）。
+
+    這個函式包在最外層的 `try/except Exception` 裡，而且**故意**是全捕、
+    不重新拋出——這違反本專案「失敗要分類、要大聲」的一般原則（見全域
+    工程原則 2/3/5），但這裡是刻意的例外，理由寫在這裡：這個函式的唯一
+    契約是「純觀察，絕不影響呼叫端」（CLAUDE.md 第八節「工具只計算，不碰
+    錢」的同一種精神——這裡是「log 只記錄，不碰請求結果」）。它被呼叫在
+    `CachedFetcher.get` 的 `except httpx.HTTPError` 分支裡；那個分支正在
+    建構一個 `FetchError(transient=True)` 準備讓上層重試——如果 `_log_request`
+    在那個當下拋出例外（例如 `urlsplit()` 對某些畸形 authority／IPv6 寫法
+    會拋 `ValueError`），它會**取代**那個 FetchError、讓例外種類從「可重試
+    的抓取失敗」變成「未分類的 log 函式內部錯誤」，直接打斷重試迴圈——
+    診斷用的旁路把主路徑弄壞了。目前不可達（本專案所有 URL 的 host 段
+    都來自寫死的常數），但「目前不可達」不是「結構上不可能」，這個函式
+    不該靠呼叫端的巧合守住這個契約。
+    """
+    try:
+        if os.environ.get("YGO_REQ_LOG", "1") == "0":
+            return
+        parts = urlsplit(url)
+        ms = (time.monotonic() - started) * 1000
+        q = f"?{parts.query[:80]}" if parts.query else ""
+        print(
+            f"[req] {datetime.now().isoformat(timespec='seconds')} "
+            f"{parts.netloc} {outcome} {ms:.0f}ms {parts.path}{q}",
+            flush=True,
+        )
+    except Exception:  # noqa: BLE001 - 見上方 docstring：這個函式絕不能影響呼叫端
+        pass
 
 
 def extra_ca_files(root: Path) -> list[Path]:
@@ -242,13 +300,18 @@ class CachedFetcher:
         last_error: FetchError | None = None
         for attempt in range(self.max_attempts):
             self._throttle()
+            t0 = time.monotonic()  # 節流之後才起算，耗時才是這次請求本身的
             try:
                 resp = self._client.get(url)
             except httpx.HTTPError as exc:
+                _log_request(url, type(exc).__name__, t0)
                 last_error = FetchError(
                     f"連線失敗: {type(exc).__name__}: {exc}", url=url, transient=True
                 )
             else:
+                # 先記真實狀態碼再分類——_check 可能把它判成 BlockedError，
+                # 但那仍是一次真的網路往返，不能因為被分類成失敗就從 log 消失
+                _log_request(url, resp.status_code, t0)
                 allowed = resp.status_code in allow_statuses
                 try:
                     self._check(resp, url, skip_status=allowed, min_bytes=min_bytes)
