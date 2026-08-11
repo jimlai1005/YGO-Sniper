@@ -20,7 +20,13 @@ from .fx import FxRates
 from .notify import TelegramNotifier
 from .parsers import is_candidate, parse_card
 from .queries import load_queries, resolve_category
-from .schedule_watch import RUN_FINISHED_KEY, RUN_STARTED_KEY, gap_alert
+from .schedule_watch import (
+    PENDING_ALERT_KEY,
+    RUN_FINISHED_KEY,
+    RUN_STARTED_KEY,
+    resolve_alert,
+    schedule_health,
+)
 from .scoring import evaluate, is_triggered, seller_histogram
 from .sources import CachedFetcher, build_sources
 from .sources.base import BlockedError, FetchError
@@ -745,28 +751,12 @@ class Pipeline:
         的逾時兜底，那是另一道防線。
 
         排程空窗偵測也記在這裡（開頭讀舊基準＋印告警、寫新基準；成功收尾時
-        再補一個完成戳記）。`--dry-run` 的語意是「只掃不寫庫」，所以整段用
-        `not dry_run` 擋——dry-run 既不該吃掉邊緣觸發，也不該把基準往前推。
-        偵測器本身包一層 `try/except`：它只是資訊性功能，壞掉不能拖垮這一輪
-        真正的掃描（見 schedule_watch.py 與 CLAUDE.md 五、靜默失敗）。
+        再補一個完成戳記，見 `_update_schedule_state`／`_finish_schedule_state`）。
+        `--dry-run` 的語意是「只掃不寫庫」、`watch_only` 是 `watch-scan` 的獨立
+        節奏（見那兩個方法的 docstring），兩者都不吃邊緣觸發、不動基準。
         """
         started = self.store.begin_scan(trigger=trigger, dry_run=dry_run)
-        if not dry_run and self.store is not None:
-            try:
-                now = datetime.now()
-                self._schedule_alert = gap_alert(
-                    self.store.get_meta(RUN_STARTED_KEY),
-                    self.store.get_meta(RUN_FINISHED_KEY),
-                    now,
-                )
-                if self._schedule_alert:
-                    print(self._schedule_alert)
-                self.store.set_meta(RUN_STARTED_KEY, now.isoformat())
-            except Exception as exc:  # noqa: BLE001 - 偵測器壞掉不能拖垮本輪掃描
-                print(
-                    f"[warn] 排程空窗偵測失敗（不影響本輪掃描）："
-                    f"{type(exc).__name__}: {exc}"
-                )
+        self._update_schedule_state(dry_run=dry_run, watch_only=watch_only)
         try:
             result = self._scan(
                 started, skip_comps=skip_comps, dry_run=dry_run,
@@ -774,6 +764,12 @@ class Pipeline:
             )
         except BaseException as exc:  # noqa: BLE001 - 落狀態後原樣往外拋，見 docstring
             self.store.finish_scan(started, error=f"{type(exc).__name__}: {exc}")
+            # 這裡刻意不呼叫 `_finish_schedule_state`：崩潰時 RUN_FINISHED_KEY
+            # 必須維持舊值，下一輪的 schedule_health 才會看到「有開始沒收尾」。
+            # 這一輪已經在 `_update_schedule_state` 裡把偵測到的告警寫進
+            # PENDING_ALERT_KEY 了，即使 `daily` 的 try/finally 不會走到
+            # `_run_notifications`（本輪崩潰），那則告警也不會跟著丟失——
+            # 下一輪成功收尾時會把它撿回來一起送（Fix 4）。
             raise
         self.store.finish_scan(
             started,
@@ -784,11 +780,66 @@ class Pipeline:
             },
         )
         # 只有走到這裡（沒有例外往外拋）才算「正常收尾」——crash 時上面的
-        # except 分支已經 raise 出去，這行不會執行，基準保持舊值，下一輪
-        # 的 gap_alert 就會看到「有開始沒結束」而報告收尾失敗，這是刻意的。
-        if not dry_run and self.store is not None:
-            self.store.set_meta(RUN_FINISHED_KEY, datetime.now().isoformat())
+        # except 分支已經 raise 出去，這行不會執行，基準保持舊值。
+        self._finish_schedule_state(dry_run=dry_run, watch_only=watch_only)
         return result
+
+    def _update_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
+        """排程空窗偵測的開頭那一半：讀舊基準、算這一輪要不要出聲、寫新基準。
+
+        `dry_run`：`--dry-run` 是「只掃不寫庫」，這裡也不能寫、也不能吃掉
+        邊緣觸發。
+
+        `watch_only`：`ygo-sniper watch-scan` 是賣家輪替監控的**人工逃生門**，
+        跑在自己的節奏上（由 `due_sellers` 的節流決定，不是 15 個 plist
+        時間點），而且它跳過關鍵字查詢／canary／comps 回補——排程監督真正
+        要盯的正是那些東西有沒有照表跑。讓 watch-scan 寫這裡的基準，會讓一次
+        跟排程網格無關的手動執行，蓋掉「真正該跑的那一輪其實漏了」的證據
+        （工程原則 1 的變體：基準必須跟被拿去比較的排程表同源，watch-scan
+        的節奏不是那個源）。所以 watch_only 一律跳過整段，基準只由完整掃描
+        （`ygo-sniper scan`／`daily`／dashboard 的 `/api/scan`）維護。
+
+        偵測器本身包一層 `try/except`：它只是資訊性功能，壞掉不能拖垮這一輪
+        真正的掃描（見 schedule_watch.py 與 CLAUDE.md 五、靜默失敗）。
+        """
+        if dry_run or watch_only:
+            return
+        try:
+            now = datetime.now()
+            detected = schedule_health(
+                self.store.get_meta(RUN_STARTED_KEY),
+                self.store.get_meta(RUN_FINISHED_KEY),
+                now,
+            )
+            self._schedule_alert, new_pending = resolve_alert(
+                self.store.get_meta(PENDING_ALERT_KEY), detected
+            )
+            if self._schedule_alert:
+                print(self._schedule_alert)
+            # 寫入順序無關緊要（三把鍵各自獨立），但 PENDING 先寫、STARTED
+            # 後寫，讓「這輪偵測到的東西已經進帳」與「這輪已經開始」在語意上
+            # 對齊：pending 記的是「偵測時看到的問題」，started 記的是「這輪
+            # 本身何時起跑」，兩者互不覆寫對方。
+            self.store.set_meta(PENDING_ALERT_KEY, new_pending)
+            self.store.set_meta(RUN_STARTED_KEY, now.isoformat())
+        except Exception as exc:  # noqa: BLE001 - 偵測器壞掉不能拖垮本輪掃描
+            print(
+                f"[warn] 排程空窗偵測失敗（不影響本輪掃描）："
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    def _finish_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
+        """排程空窗偵測的收尾那一半：只有真正走到這裡才代表「正常收尾」。
+
+        guard 理由與 `_update_schedule_state` 相同（dry-run 不寫庫、
+        watch-scan 不是排程網格的一部分）。呼叫點在 `scan()` 裡故意放在
+        例外處理**之外**——`_scan()` 拋例外時這個方法完全不會被呼叫，
+        `RUN_FINISHED_KEY` 因此維持舊值，下一輪 `schedule_health` 才報得出
+        「有開始沒收尾」。
+        """
+        if dry_run or watch_only:
+            return
+        self.store.set_meta(RUN_FINISHED_KEY, datetime.now().isoformat())
 
     def _scan(
         self,
