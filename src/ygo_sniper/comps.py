@@ -691,7 +691,12 @@ class CompsEngine:
         every 輪走完一整份：對方看到的是穩定小流量，每查詢的更新頻率不變，
         而且一片塞得進一顆 WAF token 的 240s 預算。
 
-        游標推進在 `commit_sold_shard`（呼叫端跑完才知道成敗）；
+        游標的推進者有兩個，不是一個：正常路徑由 `commit_sold_shard`
+        推進（呼叫端跑完才知道成敗）；`sold_shard` 自己的強制跳過分支
+        （見下方 crash-safety 說明）在同一個游標交出去 N 次都沒等到 commit
+        時也會直接寫 `SOLD_CURSOR_KEY`——這不是巧合或疏漏，是刻意的：
+        那個分支要處理的正是「呼叫端這次大概率永遠不會回來呼叫
+        `commit_sold_shard`」，等它推進就永遠等不到。
         `force=True` 回全量並在 commit 時把游標歸零（人工逃生門）。
 
         ⚠️ **`force` 目前沒有接到任何 CLI／排程路徑**（`pipeline.py` 與
@@ -705,8 +710,11 @@ class CompsEngine:
         `SOLD_ATTEMPT_KEY`（見該常數的完整說明）。上一輪審查才剛稱讚這個
         方法把「問要跑哪片」跟「跑完了沒有」拆乾淨、不再像舊制 `claim_sold_run`
         一樣「問一次就燒一次配額」；這裡等於是把那個副作用的一小塊撿回來——
-        差別在於這次寫的是「正要試游標 N」而不是「已經吃掉游標 N」，
-        真正的配額（`SOLD_CURSOR_KEY`）仍然只由 `commit_sold_shard` 推進。
+        差別在於這次寫的是「正要試游標 N」，不是「已經吃掉游標 N」。
+        絕大多數輪次裡，真正的配額（`SOLD_CURSOR_KEY`）還是只由
+        `commit_sold_shard` 推進；只有「同一個游標交出去 N 次都等不到
+        commit」這個例外情況，才由這個方法自己出手推進——見上面的
+        「游標的推進者有兩個」段落，不要只看這一句就以為排他。
         會做這個取捨，是因為 crash-safety 補丁的天然位置是「風險發生前的
         那一刻」，而這個改動被要求不能碰 `pipeline.py`（無法新增一個
         `begin_sold_shard()` 讓呼叫端額外呼叫一次）——`sold_shard` 是唯一
@@ -737,15 +745,25 @@ class CompsEngine:
         )
         if attempted_cursor == cursor and attempted_count >= SOLD_ATTEMPT_LIMIT:
             # 同一個游標連續交出去 SOLD_ATTEMPT_LIMIT 次，一次 commit 都沒等到
-            # ——不是重試慢，是每次都被殺在半路（這個 repo 另外加的 25 分鐘
-            # watchdog，逾時 SIGKILL 整棵行程樹）。強制跳過這片，直接推進，
-            # 不然會在同一段（實測分片 0 正是 Playwright/WAF 那條路）永遠卡死。
+            # ——不是重試慢，是這個游標本身有毛病：可能是被 watchdog（25 分鐘
+            # 逾時 SIGKILL 整棵行程樹）殺在半路，也可能是 fetch 完成後、
+            # commit 之前的路上崩潰了（例如 pipeline.refresh_comps 裡
+            # ingest_sold 丟例外——那段不在per-query 的 try 保護範圍內）。
+            # 兩種都是「這片會可靠地讓整輪跑不完」，處置一樣：強制跳過，
+            # 讓其餘查詢有機會繼續走，不然會在同一段（實測分片 0 正是
+            # Playwright/WAF 那條路）永遠卡死。
+            #
+            # ⚠️ 邊界情況（目前不會發生，但改動前先看這裡）：len(all_q)==1
+            # 時 nxt == cursor，這個分支會每輪都印警告卻推不動游標——現實
+            # config 展開後有 88 條，摸不到這個邊界，但如果哪天查詢清單被
+            # 砍到只剩 1 條，這裡要跟著補「只有一片時不算卡死」的例外。
             skipped = all_q[cursor : cursor + size]
             nxt = (cursor + len(skipped)) % len(all_q)
             print(
                 f"[comps] ⚠️ 游標 {cursor} 連續交出 {attempted_count} 次都沒等到"
-                f" commit——像是每次都被 SIGKILL 殺在半路，視為卡死，"
-                f"強制跳過這片、推進到 {nxt}。{_sold_observability_warning()}"
+                " commit——這片要嘛被殺在半路（watchdog SIGKILL），要嘛是"
+                "拿到資料後、commit 之前的路上崩潰（例如 ingest 階段），視為"
+                f"卡死，強制跳過這片、推進到 {nxt}。{_sold_observability_warning()}"
             )
             self.store.set_meta(SOLD_CURSOR_KEY, str(nxt))
             cursor = nxt
