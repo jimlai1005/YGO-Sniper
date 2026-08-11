@@ -265,11 +265,11 @@ def no_fx_network(monkeypatch):
 def pipeline(tmp_path, no_fx_network):
     """真的 `Pipeline`，db 在 tmp_path、不碰網路——與 test_card_snipe.py 同款。
 
-    `_fold_watchdog_ledger`（Fix A）讀的帳本路徑算成
+    `_read_watchdog_ledger`（Fix A）讀的帳本路徑算成
     `cfg.db_path.parent / "last_run_exit"`，不是 `cfg.root / "data" / ...`
     ——`db_path` 就是這裡覆寫成 `tmp_path` 的那個絕對路徑，所以帳本檔
     自動落在沙盒裡，不需要另外覆寫 `root`。見 pipeline.py
-    `_fold_watchdog_ledger` docstring 裡對這個選擇的完整說明
+    `_read_watchdog_ledger` docstring 裡對這個選擇的完整說明
     （簡言之：改用 `root` 的話，全 repo 沒覆寫過 `root` 的既有測試
     ——例如 `test_card_snipe.py` 呼叫 `pipeline.scan(...)`——就會在跑
     測試時去讀、甚至刪掉正式環境真正的 `data/last_run_exit`）。
@@ -463,10 +463,20 @@ def test_watchdog_message_generic_wording_for_non_watchdog_failure():
 
 
 # ---------------------------------------------------------------------------
-# Fix A：_fold_watchdog_ledger——不純的那一半，讀真的檔案、真的會刪檔案。
-# 用 tmp_path（透過 pipeline fixture 的 db_path.parent）而不是真的 data/。
+# Fix A：`_read_watchdog_ledger` / `_consume_watchdog_ledger`——不純的那
+# 一半，讀真的檔案、（在正確的時機）真的會刪檔案。用 tmp_path（透過
+# pipeline fixture 的 db_path.parent）而不是真的 data/。
+#
+# 2026-08-12 再修一次（先落帳再刪證據）：原本讀取與刪除是同一步
+# （`_fold_watchdog_ledger` 折出訊息後立刻 unlink），順序在
+# `set_meta(PENDING_ALERT_KEY, …)` **之前**——中間被殺掉的話，這份
+# watchdog 證據會憑空消失（雖然視窗只有微秒、且下一輪自己的新帳本會
+# 自癒，但順序本身不該顛倒：先確定證據已經落進 pending，才能刪掉來源）。
+# 拆成 `_read_watchdog_ledger`（只讀不刪）＋`_consume_watchdog_ledger`
+# （呼叫端在 `set_meta` 成功之後才呼叫）之後，順序在型別層級就對了。
 # ---------------------------------------------------------------------------
-def test_fold_watchdog_ledger_reads_and_consumes_the_file(pipeline):
+def test_read_watchdog_ledger_does_not_delete_the_file(pipeline):
+    """讀取本身絕不刪檔——刪除只能是呼叫端在 pending 落地後的明確動作。"""
     ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
     ledger_path.write_text(
         '{"exit": 124, "notify_attempted": false, "notify_http": "000", '
@@ -474,33 +484,52 @@ def test_fold_watchdog_ledger_reads_and_consumes_the_file(pipeline):
         encoding="utf-8",
     )
 
-    msg = pipeline._fold_watchdog_ledger()
+    msg, returned_path = pipeline._read_watchdog_ledger()
 
     assert msg is not None and "watchdog" in msg
-    assert not ledger_path.exists()  # 折出東西之後要「讀了就算數」
+    assert returned_path == ledger_path
+    assert ledger_path.exists()  # 讀取不消費
 
 
-def test_fold_watchdog_ledger_none_when_file_absent(pipeline):
+def test_read_watchdog_ledger_none_when_file_absent(pipeline):
     ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
     assert not ledger_path.exists()
-    assert pipeline._fold_watchdog_ledger() is None
+    assert pipeline._read_watchdog_ledger() == (None, None)
 
 
-def test_fold_watchdog_ledger_leaves_clean_file_untouched(pipeline):
-    """exit=0（成功）沒有東西可折——檔案不需要被消費，反正下一輪
-    run_daily.sh 自己就會覆寫掉。"""
+def test_read_watchdog_ledger_returns_no_path_when_nothing_to_fold(pipeline):
+    """exit=0（成功）沒有東西可折——回傳的路徑也要是 None，
+    呼叫端才知道不必也不該刪這個檔案。"""
     ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
     ledger_path.write_text('{"exit": 0, "notify_attempted": false}', encoding="utf-8")
 
-    assert pipeline._fold_watchdog_ledger() is None
-    assert ledger_path.exists()  # 沒折出東西，不必刪
+    assert pipeline._read_watchdog_ledger() == (None, None)
+    assert ledger_path.exists()
 
 
-def test_fold_watchdog_ledger_tolerates_corrupt_json(pipeline):
+def test_read_watchdog_ledger_tolerates_corrupt_json(pipeline):
     ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
     ledger_path.write_text("not valid json{{{", encoding="utf-8")
 
-    assert pipeline._fold_watchdog_ledger() is None  # 不崩潰
+    assert pipeline._read_watchdog_ledger() == (None, None)  # 不崩潰
+
+
+def test_consume_watchdog_ledger_deletes_the_file(pipeline):
+    ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
+    ledger_path.write_text("{}", encoding="utf-8")
+
+    pipeline._consume_watchdog_ledger(ledger_path)
+
+    assert not ledger_path.exists()
+
+
+def test_consume_watchdog_ledger_tolerates_missing_file(pipeline):
+    """刪不掉（例如已經被別的東西刪過）不算例外——下一輪頂多重複折一次，
+    比讓 `_update_schedule_state` 整段炸掉輕得多。"""
+    ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
+    assert not ledger_path.exists()
+
+    pipeline._consume_watchdog_ledger(ledger_path)  # 不崩潰
 
 
 def test_update_schedule_state_folds_watchdog_ledger_into_pending(pipeline):
@@ -522,6 +551,36 @@ def test_update_schedule_state_folds_watchdog_ledger_into_pending(pipeline):
     assert "watchdog" in pipeline._schedule_alert
     assert not ledger_path.exists()
     assert pipeline.store.get_meta(PENDING_ALERT_KEY) != ""
+
+
+def test_update_schedule_state_keeps_ledger_when_pending_write_fails(pipeline, monkeypatch):
+    """釘住順序本身：`set_meta(PENDING_ALERT_KEY, …)` 失敗時，帳本檔案
+    必須還在——證明刪除確實排在「pending 落地」之後，不是之前。
+
+    包一層 `try/except`（`_update_schedule_state` 本來就有，理由見它的
+    docstring：偵測器壞掉不能拖垮真正的掃描）意味著這次呼叫不會拋出，
+    但 `_schedule_alert` 也不會被設成新值——這是可接受的降級：寧可這一輪
+    沒看到告警文字，也不要在 pending 沒寫成功的情況下先把唯一的證據刪掉。
+    """
+    ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
+    ledger_path.write_text(
+        '{"exit": 124, "notify_attempted": false, "notify_http": "000", '
+        '"notify_curl_exit": 0}',
+        encoding="utf-8",
+    )
+
+    real_set_meta = pipeline.store.set_meta
+
+    def _boom(key, value):
+        if key == PENDING_ALERT_KEY:
+            raise RuntimeError("模擬 store 寫入失敗")
+        return real_set_meta(key, value)
+
+    monkeypatch.setattr(pipeline.store, "set_meta", _boom)
+
+    pipeline._update_schedule_state(dry_run=False, watch_only=False)  # 不應該往外拋
+
+    assert ledger_path.exists(), "pending 沒寫成功，帳本不該被刪——這正是這次要釘住的順序"
 
 
 def test_dry_run_does_not_consume_watchdog_ledger(pipeline):

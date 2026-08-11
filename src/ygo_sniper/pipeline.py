@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 from .alerts import HEALTH_SEVERITY, Alert, AlertEngine
 from .bidding import is_live_auction
@@ -818,7 +819,14 @@ class Pipeline:
             # 不是另開一條沒有重送機制的路（見 schedule_watch.py 模組開頭
             # Fix A 的事故背景：8.5 小時卡死那次唯一的線索就是這個帳本，
             # 而原本的 curl 通知本身可能也送不出去）。
-            watchdog_msg = self._fold_watchdog_ledger()
+            #
+            # 先讀不刪：`_read_watchdog_ledger` 只回傳訊息與檔案路徑，
+            # 真的刪檔（`_consume_watchdog_ledger`）要等下面 `set_meta`
+            # 把這句話寫進 PENDING_ALERT_KEY **之後**才做——順序反過來的話，
+            # 兩個陳述式之間被殺掉，會出現「證據已刪、但沒人記得這件事」
+            # 的窗口（哪怕只有微秒、哪怕會被下一輪自己的新帳本自癒，
+            # 「先落帳、才能刪證據」這個順序本身不該顛倒）。
+            watchdog_msg, ledger_path = self._read_watchdog_ledger()
             if watchdog_msg:
                 detected = f"{detected}；{watchdog_msg}" if detected else watchdog_msg
             self._schedule_alert, new_pending = resolve_alert(
@@ -832,18 +840,27 @@ class Pipeline:
             # 本身何時起跑」，兩者互不覆寫對方。
             self.store.set_meta(PENDING_ALERT_KEY, new_pending)
             self.store.set_meta(RUN_STARTED_KEY, now.isoformat())
+            # 帳本已經折進上面的 PENDING_ALERT_KEY，現在才能刪——見本方法
+            # 開頭的順序說明。`set_meta` 這一行沒寫成功就不會走到這裡
+            # （例外會被下面的 except 接住，帳本檔案原封不動留給下一輪重讀）。
+            if watchdog_msg and ledger_path is not None:
+                self._consume_watchdog_ledger(ledger_path)
         except Exception as exc:  # noqa: BLE001 - 偵測器壞掉不能拖垮本輪掃描
             print(
                 f"[warn] 排程空窗偵測失敗（不影響本輪掃描）："
                 f"{type(exc).__name__}: {exc}"
             )
 
-    def _fold_watchdog_ledger(self) -> str | None:
+    def _read_watchdog_ledger(self) -> tuple[str | None, Path | None]:
         """讀 `run_daily.sh` 寫的上一輪結束帳本（`data/last_run_exit`），
-        折成一句話；如果折出了東西就順手刪掉檔案（「讀了就算數」，
-        下一輪不會再重複折進來）。
+        折成一句話。**不刪檔案**——刪檔是呼叫端（`_update_schedule_state`）
+        在把這句話寫進 `PENDING_ALERT_KEY` 之後才做的事，見那裡的順序說明。
 
-        純／不純分工：檔案讀寫（不純）留在這裡，訊息怎麼寫（純，包含
+        回傳 `(訊息或 None, 折出訊息時的檔案路徑；沒折出東西就是 None)`——
+        呼叫端只需要在訊息非 None 時才有東西可刪，第二個值把「要不要刪」
+        與「刪哪個檔案」一起帶出來，呼叫端不用重新算一次路徑。
+
+        純／不純分工：檔案讀取（不純）留在這裡，訊息怎麼寫（純，包含
         「已經送達的失敗通知不重複講」的判斷）在 `schedule_watch.watchdog_message`。
 
         對檔案不存在／壞掉一律寬容：找不到帳本是**最常見**的正常狀態
@@ -871,18 +888,26 @@ class Pipeline:
         try:
             raw = path.read_text(encoding="utf-8")
         except OSError:
-            return None
+            return None, None
         try:
             ledger = json.loads(raw)
         except (TypeError, ValueError):
             ledger = None
         msg = watchdog_message(ledger)
-        if msg:
-            try:
-                path.unlink()
-            except OSError:
-                pass  # 刪不掉不影響這次要不要出聲；下一輪頂多重複折一次
-        return msg
+        return msg, (path if msg else None)
+
+    def _consume_watchdog_ledger(self, path: Path) -> None:
+        """刪掉已經折進 `PENDING_ALERT_KEY` 的 watchdog 帳本檔案——
+        「讀了就算數」，下一輪不會重複折同一份失敗。
+
+        只能在 pending 已經確定落地之後呼叫（見 `_update_schedule_state`
+        的呼叫順序）；刪不掉就算了，不算例外——下一輪頂多重複折一次，
+        比「刪掉了但 pending 沒寫進去」的後果輕得多。
+        """
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
     def _finish_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
         """排程空窗偵測的收尾那一半：只有真正走到這裡才代表「正常收尾」。
