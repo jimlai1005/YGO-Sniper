@@ -195,6 +195,18 @@ def _run_notifications(pipe, result: dict) -> int:
     # 順序刻意：先好貨、再壞消息。告警放最後，才不會把撿漏擠出視線。
     # 位置刻意：在 silent 判斷之外——見 docstring。
     _send_alerts(pipe, result.get("alerts") or [])
+
+    # 排程空窗／上輪未收尾告警（schedule_watch.py）。這不是來源健康事件
+    # ——不走 AlertEngine 的 dedup／mark_sent，那本帳量的是「同一個 source
+    # 連續壞了幾次」，排程空窗是邊緣觸發（比對後立刻更新基準，天然不重複），
+    # 兩本帳混在一起會讓來源告警的次數統計失真（CLAUDE.md 第五節「兩本帳
+    # 不能合併」）。用 getattr 防呆：只有 scan() 真的跑過才會設這個屬性。
+    schedule_alert = getattr(pipe, "_schedule_alert", None)
+    if schedule_alert:
+        if pipe.notifier.send_alert(schedule_alert):
+            console.print("[yellow]已推播排程監督告警[/yellow]")
+        else:
+            console.print("[red]排程監督告警送出失敗——下一輪跑起來會再比對一次[/red]")
     return n
 
 

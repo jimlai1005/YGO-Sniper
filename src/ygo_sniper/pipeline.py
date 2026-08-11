@@ -8,6 +8,7 @@ comps 是判斷的基礎，如果先掃在架標的再抓成交價，
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from .alerts import HEALTH_SEVERITY, Alert, AlertEngine
 from .bidding import is_live_auction
@@ -19,6 +20,7 @@ from .fx import FxRates
 from .notify import TelegramNotifier
 from .parsers import is_candidate, parse_card
 from .queries import load_queries, resolve_category
+from .schedule_watch import RUN_FINISHED_KEY, RUN_STARTED_KEY, gap_alert
 from .scoring import evaluate, is_triggered, seller_histogram
 from .sources import CachedFetcher, build_sources
 from .sources.base import BlockedError, FetchError
@@ -223,6 +225,10 @@ class Pipeline:
         #: （CLAUDE.md 第五節）。compared 很大 ＋ hits 0 ＝ 比對跑了但沒貨；
         #: compared 0 ＝ 比對根本沒跑。
         self._snipe_stats = {"compared": 0, "hits": 0}
+        #: 排程空窗告警（`scan()` 開頭填；`None` = 沒偵測到問題，也可能是
+        #: 這輪還沒跑過 scan()——初始化在這裡而不是只在 scan() 裡設，
+        #: 讓呼叫端用 `getattr` 都不必也能安全讀到 None，見 schedule_watch.py）。
+        self._schedule_alert: str | None = None
 
     # ------------------------------------------------------------------
     def valuator(self):
@@ -737,8 +743,30 @@ class Pipeline:
         例外一律先落 finished(error=…) 再往外拋——**掃爆了不可以讓狀態卡在
         running**（工程原則 3）。真正的崩潰（kill -9、斷電）走 `scan_status`
         的逾時兜底，那是另一道防線。
+
+        排程空窗偵測也記在這裡（開頭讀舊基準＋印告警、寫新基準；成功收尾時
+        再補一個完成戳記）。`--dry-run` 的語意是「只掃不寫庫」，所以整段用
+        `not dry_run` 擋——dry-run 既不該吃掉邊緣觸發，也不該把基準往前推。
+        偵測器本身包一層 `try/except`：它只是資訊性功能，壞掉不能拖垮這一輪
+        真正的掃描（見 schedule_watch.py 與 CLAUDE.md 五、靜默失敗）。
         """
         started = self.store.begin_scan(trigger=trigger, dry_run=dry_run)
+        if not dry_run and self.store is not None:
+            try:
+                now = datetime.now()
+                self._schedule_alert = gap_alert(
+                    self.store.get_meta(RUN_STARTED_KEY),
+                    self.store.get_meta(RUN_FINISHED_KEY),
+                    now,
+                )
+                if self._schedule_alert:
+                    print(self._schedule_alert)
+                self.store.set_meta(RUN_STARTED_KEY, now.isoformat())
+            except Exception as exc:  # noqa: BLE001 - 偵測器壞掉不能拖垮本輪掃描
+                print(
+                    f"[warn] 排程空窗偵測失敗（不影響本輪掃描）："
+                    f"{type(exc).__name__}: {exc}"
+                )
         try:
             result = self._scan(
                 started, skip_comps=skip_comps, dry_run=dry_run,
@@ -755,6 +783,11 @@ class Pipeline:
                 if k in result
             },
         )
+        # 只有走到這裡（沒有例外往外拋）才算「正常收尾」——crash 時上面的
+        # except 分支已經 raise 出去，這行不會執行，基準保持舊值，下一輪
+        # 的 gap_alert 就會看到「有開始沒結束」而報告收尾失敗，這是刻意的。
+        if not dry_run and self.store is not None:
+            self.store.set_meta(RUN_FINISHED_KEY, datetime.now().isoformat())
         return result
 
     def _scan(
