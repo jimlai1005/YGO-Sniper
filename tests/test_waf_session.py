@@ -22,7 +22,12 @@ import httpx
 import pytest
 
 from ygo_sniper.sources.base import BlockedError
-from ygo_sniper.sources.waf import MAX_REFRESHES_PER_RUN, TTL_BUDGET_SECONDS, WafSession
+from ygo_sniper.sources.waf import (
+    MAX_REFRESHES_PER_RUN,
+    TTL_BUDGET_SECONDS,
+    BrowserLaunchError,
+    WafSession,
+)
 
 URL = "https://buyee.jp/mercari/search?keyword=test&lang=ja"
 OTHER_URL = "https://buyee.jp/paypayfleamarket/search?keyword=test&lang=ja"
@@ -274,3 +279,67 @@ def test_one_token_serves_both_buyee_paths(make_session):
     session.get(OTHER_URL, use_cache=False)    # paypay
 
     assert acquire.calls == 1, "換一條 Buyee 路徑就重開瀏覽器：token 是通用的，不必重取"
+
+
+# ---------------------------------------------------------------------------
+# 9. chromium 本體啟動失敗 → 斷路器：一輪內燒一次就停，不陪它重試到上限
+# ---------------------------------------------------------------------------
+def test_launch_failure_trips_circuit_breaker(make_session):
+    """啟動失敗是本機問題（記憶體、殘骸行程），不是 WAF 側——重試不會變好。
+
+    第一次 _refresh 燒一次瀏覽器失敗；之後的 _refresh 直接短路，
+    連 _acquire 都不再呼叫，訊息要點出「稍早已經失敗過」不是又擋了一次。
+    """
+    acquire = FakeAcquire(
+        error=BrowserLaunchError("chromium 啟動失敗（TimeoutError: 180000ms）")
+    )
+    server = FakeServer(ok())
+    session, _clock = make_session(server, acquire)
+
+    with pytest.raises(BlockedError):
+        session._refresh(URL)
+    assert acquire.calls == 1
+
+    with pytest.raises(BlockedError, match="稍早") as exc:
+        session._refresh(OTHER_URL)
+    assert acquire.calls == 1, "斷路器跳開後不該再開一次瀏覽器"
+    assert isinstance(exc.value, BlockedError)
+
+
+def test_non_launch_blocked_does_not_trip_breaker(make_session):
+    """「拿不到 cookie」是 WAF 側的事（挑戰沒解開），跟瀏覽器起不起得來無關——
+    照舊逐次重試，不該被啟動斷路器誤傷。"""
+    acquire = FakeAcquire(
+        error=BlockedError("Playwright 開了 seed 頁但沒拿到 aws-waf-token cookie", url=URL)
+    )
+    server = FakeServer(ok())
+    session, _clock = make_session(server, acquire)
+
+    with pytest.raises(BlockedError):
+        session._refresh(URL)
+    with pytest.raises(BlockedError):
+        session._refresh(OTHER_URL)
+
+    assert acquire.calls == 2, "非啟動失敗的 BlockedError 不該觸發斷路器"
+
+
+def test_launch_failure_trips_breaker_across_get_calls(make_session):
+    """從公開介面 get() 觀察：斷路器要護住整輪掃描，不是只護 _refresh 內部。
+
+    buyee_mercari 與 buyee_paypay 共用同一顆 WafSession（docstring 保證），
+    第一條路徑啟動失敗後，第二條路徑不該再陪著開一次瀏覽器、更不該裸奔打網路。
+    """
+    acquire = FakeAcquire(
+        error=BrowserLaunchError("chromium 啟動失敗（TimeoutError: 180000ms）")
+    )
+    server = FakeServer(ok())
+    session, _clock = make_session(server, acquire)
+
+    with pytest.raises(BlockedError):
+        session.get(URL, use_cache=False)
+    assert acquire.calls == 1
+
+    with pytest.raises(BlockedError, match="稍早"):
+        session.get(OTHER_URL, use_cache=False)
+    assert acquire.calls == 1, "斷路器跳開後不該再開瀏覽器"
+    assert server.calls == 0, "沒有 token 就不該裸奔去打網路"

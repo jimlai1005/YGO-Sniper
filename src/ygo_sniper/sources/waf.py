@@ -30,10 +30,32 @@ TTL_BUDGET_SECONDS = 240
 #: 再開瀏覽器只是燒時間，直接大聲失敗讓告警層看見。
 MAX_REFRESHES_PER_RUN = 4
 
+#: chromium 啟動逾時。Playwright 預設 180s——08-10 實測失敗後同一輪還連續
+#: 燒了 3 次重取（daily-20260810.log:453-465），180s×4 逼近排程一整個 30
+#: 分鐘的時段。降為 60s：啟動失敗是本機問題（記憶體、殘骸行程），不是
+#: 對方變慢，60s 起不來的瀏覽器不會因為多等 120s 就起得來。
+LAUNCH_TIMEOUT_MS = 60_000
+
 _PLAYWRIGHT_HINT = (
     "未安裝 playwright，Buyee 系來源不可用；"
     "uv pip install -e '.[browser]' && .venv/bin/playwright install chromium"
 )
+
+
+class BrowserLaunchError(BlockedError):
+    """chromium 本體開不起來（≠ WAF 擋、≠ 挑戰沒解開）。
+
+    這跟「拿不到 aws-waf-token cookie」是兩種完全不同的失敗：後者是對方
+    (WAF) 的事，換一次 token 可能就通；前者是本機環境的事（記憶體、殘骸
+    行程），同一輪內重試只會把 60s 逾時再吃一次又一次。所以這個子類會讓
+    `WafSession` 跳斷路器——一輪內燒一次就夠，後續 `_refresh` 直接短路，
+    不再呼叫 `_acquire`（見 CLAUDE.md 第二節：改守衛前先查它意外擋住了
+    什麼——這裡刻意只擋「啟動失敗」，其他 BlockedError 子類不受影響，
+    仍然逐次重試）。
+    """
+
+    def __init__(self, message: str, *, url: str = "") -> None:
+        super().__init__(message, url=url)
 
 
 class WafSession:
@@ -54,6 +76,9 @@ class WafSession:
         self._seed_html: str | None = None
         # 可注入的時鐘（測試用假時鐘）；monotonic 不受系統校時影響，算年齡專用
         self._clock = time.monotonic
+        # 啟動斷路器：這個 process 的生命週期＝一輪掃描（見 sources/__init__.py
+        # 的建構點），跳過一次就整輪不再開瀏覽器，下一輪跑新 process 自然重置
+        self._launch_failed = False
 
     # ------------------------------------------------------------------
     def _acquire(self, seed_url: str) -> tuple[str, str]:
@@ -67,7 +92,12 @@ class WafSession:
             raise BlockedError(_PLAYWRIGHT_HINT, url=seed_url) from exc
 
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            try:
+                browser = pw.chromium.launch(headless=True, timeout=LAUNCH_TIMEOUT_MS)
+            except Exception as exc:  # noqa: BLE001 - 啟動失敗的型別來自 playwright 深處，統一收斂成 BrowserLaunchError
+                raise BrowserLaunchError(
+                    f"chromium 啟動失敗（{type(exc).__name__}: {exc}）", url=seed_url
+                ) from exc
             try:
                 context = browser.new_context(user_agent=self.cfg.fetch["user_agent"])
                 page = context.new_page()
@@ -102,6 +132,13 @@ class WafSession:
                 "本輪放棄 Buyee 系來源（token 可能整體失效：UA 不符或 IP 被封）",
                 url=seed_url,
             )
+        if self._launch_failed:
+            # 斷路器跳開：本輪稍早已經證明瀏覽器開不起來（本機問題），
+            # 再試一次只是又燒一次 LAUNCH_TIMEOUT_MS，不會有不同結果
+            raise BlockedError(
+                "本輪稍早 chromium 啟動失敗，跳過後續 token 重取（斷路器）",
+                url=seed_url,
+            )
         age = self._clock() - self._acquired_at if self._token is not None else 0.0
         self._refreshes += 1
         # 年齡進 log：這是 TTL_BUDGET_SECONDS=240 的校準依據（PLAN 風險 3）
@@ -109,6 +146,11 @@ class WafSession:
 
         try:
             token, html = self._acquire(seed_url)
+        except BrowserLaunchError:
+            # 啟動失敗（≠ WAF 擋）：跳斷路器，往上拋讓呼叫端知道這輪沒救；
+            # 之後的 _refresh 會被上面那個 self._launch_failed 檢查直接短路
+            self._launch_failed = True
+            raise
         except ImportError as exc:
             # _acquire 被替換（測試）或 playwright 深處炸 ImportError 時的最後防線：
             # 統一轉 BlockedError，告警層才接得住
