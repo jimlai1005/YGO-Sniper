@@ -53,9 +53,14 @@ make comps                    # 4. 累積行情，先跑幾天再看訊號
 make daily      # 那一鍵：更新行情 → 掃描 → 推播 Telegram
 .venv/bin/ygo-sniper notify-preview   # 只算不送：這一輪會推播什麼（調門檻用）
 make serve      # 開 dashboard → http://127.0.0.1:8321（用法見 docs/dashboard.md）
-make schedule   # 掛上 launchd，每天 09:30 自動跑
+make schedule   # 掛上 launchd：白天 09:30-17:30 每 2 小時，18:00-22:30 每 30 分
+                # （實測所有競標都在台灣時間 18-22 點結標），夜間不跑
 make logs       # 看今天的執行紀錄
 ```
+
+每一輪都包在 watchdog 裡（`scripts/run_with_timeout.py`）：醒著卡死超過 25 分鐘就
+連整棵行程樹一起殺掉，避免一個卡住的 Playwright 把後面幾輪全拖垮。筆電睡眠不算在
+這個預算裡——計時器在睡眠期間會停，所以合眼過夜不會被誤殺。詳見 `docs/run_daily.md`。
 
 **Telegram 只送兩種訊號**（清單請開 dashboard，推播只回答「現在要不要動手」）：
 
@@ -63,6 +68,14 @@ make logs       # 看今天的執行紀錄
 2. **高信心標的** —— P(值得買) > 70%，但**排除普卡**（便宜不等於撿漏；讀不出稀有度的**不算**普卡）、**排除價格還沒被競價發現的競標**（¥1 起標、0 次出價或還剩好幾天的標的，P 值是拿一個你成交不到的價格算的）。
 
 門檻全部在 `config/settings.yaml` 的 `notify.rules`。來源健康告警（parser 壞掉、被擋）不受上面兩條規則與靜默設定影響，永遠照送 —— 「今天沒好貨」與「爬蟲壞了」外顯一樣，但只有後者需要你去修。
+
+另外還有兩種**不是商品**的推播，收到時代表工具本身出事了，不是市場沒貨：
+
+- **🚨 被 watchdog 強制終止（exit=124）** —— 那一輪醒著卡死超過 25 分鐘被砍掉。多半是
+  Playwright 卡住。下一輪會照常跑，但連續出現就要去看 `data/logs/`。
+- **🚨 排程監督：漏跑 N 個時段** —— 該跑的時段沒跑（筆電睡著、鎖被卡住、launchd 掉單）。
+  它只在**下一輪真的跑起來**時才有機會講，而且送不出去會留到下一輪重送——所以看到
+  這則，代表確實有幾格沒掃到，不是它多嘴。
 
 ---
 
@@ -121,6 +134,17 @@ Buyee 改版是遲早的事。parser 刻意不依賴任何 CSS class（用商品
 
 調 parser 時記得 `make clean-cache`，否則會一直讀到舊的 HTML。
 
+**要判斷「是不是被對方節流了」**，log 裡每個真的出網的請求都有一行：
+
+```
+[req] 2026-08-12T09:30:12 buyee.jp 200 431ms /mercari/search?keyword=...
+```
+
+`grep '^\[req\]' data/logs/daily-*.log` 就能看間隔、狀態碼與耗時，不必憑印象猜。
+`YGO_REQ_LOG=0` 可關掉（預設開，一天多約 700-1100 行）。注意一個基準差異：
+Playwright 走的那條（buyee_mercari 解 WAF 挑戰）是**一次導航一行**，底下其實
+還有數十個 HTTP 請求——拿它跟純 httpx 來源的行數直接相比會低估。
+
 ## 掃到 0 筆訊號的時候
 
 先確認是哪一關卡住：
@@ -165,9 +189,11 @@ src/ygo_sniper/
   comps.py       行情統計
   scoring.py     訊號判定
   store.py       SQLite（CLI 與 web 共用）
+  schedule_watch.py  排程漏跑／上輪沒收尾的偵測（純函式，時間表與 plist 對齊）
   pipeline.py    每日流程
   cli.py         指令入口
 web/             dashboard（讀同一顆 db，沒有自己的業務邏輯）
+scripts/         run_daily.sh（launchd 入口）＋ run_with_timeout.py（watchdog）
 tests/           成本模型是重點測試對象
 ```
 
