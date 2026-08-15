@@ -249,6 +249,20 @@ JSON：這一輪的 exit code、結束時間、失敗通知有沒有送達。下
 戳記機制：實證清除時 `cleared_verified=1`，還原時轉進實證帳並歸零。
 另注意徽章只認**同一個商品 ID**——賣家撤掉「重新刊登」會產生新 key，不會累計。
 
+8. **狀態機的「無結論」分支必須要有回頭路，不能是死巷**——2026-08-15 事故：
+   `z649388810` 被首頁地平線判成 `window_exit_at`（只是被新品擠出第 1 頁，
+   無結論）之後，`disappeared_at` 的候選查詢
+   （`WHERE disappeared_at IS NULL AND window_exit_at IS NULL`）把它永久排除；
+   而唯一還在持續重掃它的管道——賣家頁監控——因為 `exit_scope=False`
+   （見 `store.record_listing_scan` docstring）天生不建地平線，也不可能反過來
+   讓它復活。兩條路都堵死，商品卡在「觀察中」，清除鍵永遠清不掉，外顯與
+   「還在架上」一模一樣。修法：賣家頁監控固定抓 1 頁（100-200 筆容量，實測
+   單一賣家在架最多 38 筆）其實是**完整列舉**，不是抽樣——加一條獨立於地平線
+   的判定：賣家批次健康、商品屬於這個賣家、不在這次完整列舉裡 → 直接
+   `disappeared_at`，不看 `window_exit_at`。與地平線判定平行存在、互不覆蓋
+   （`store.py` 的 `seller_scope_disappeared`，回歸測試見
+   `tests/test_venue_study.py`）
+
 ---
 
 ## 六、測試路徑必須等於生產路徑
@@ -306,7 +320,7 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 1812 passed，2026-08-12 實測）
+make test                      # pytest（目前 1816 passed，2026-08-15 實測）
                                #   ⚠️ 別自己再加 `-q`：pyproject 的 addopts 已有一個，
                                #   疊成 `-qq` 會**吃掉最後那行 `N passed`**，而 exit code
                                #   仍是 0——「測試沒跑」與「跑了但看不到綠字」外顯一樣。
