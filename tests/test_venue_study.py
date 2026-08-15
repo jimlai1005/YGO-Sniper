@@ -35,13 +35,17 @@ def store(tmp_path):
     return Store(tmp_path / "t.db")
 
 
-def obs_row(key, *, site="buyee_paypay", price=1000.0, rarity="ultra", grader="PSA", grade=9.0):
+def obs_row(
+    key, *, site="buyee_paypay", price=1000.0, rarity="ultra", grader="PSA",
+    grade=9.0, seller_id=None,
+):
     return {
         "key": key, "source": site, "site": site, "title": f"卡 {key}",
         "url": f"https://example.test/{key}", "price_native": price * 5,
         "currency": "JPY", "price_twd": price, "landed_twd": price + 300,
         "rarity": rarity, "grader": grader, "grade": grade,
         "card_name": None, "era_evidence": "初期", "price_kind": "fixed",
+        "seller_id": seller_id,
     }
 
 
@@ -49,6 +53,18 @@ def batch(*keys, site="buyee_paypay", healthy=True, **kw):
     return {
         "source": site, "site": site, "healthy": healthy,
         "rows": [obs_row(k, site=site, **kw) for k in keys],
+    }
+
+
+def seller_batch(*keys, site="buyee_paypay", seller_id="s1", healthy=True, seen_keys=None, **kw):
+    """賣家頁完整列舉批次。`seen_keys` 預設等於 `keys`（過濾前後一致）；
+    要模擬「候選過濾器濾掉了某個仍在架的商品」就傳一個比 `keys` 更寬的集合。
+    """
+    return {
+        "source": site, "site": site, "healthy": healthy, "exit_scope": False,
+        "seller_id": seller_id,
+        "seller_seen_keys": list(keys) if seen_keys is None else list(seen_keys),
+        "rows": [obs_row(k, site=site, seller_id=seller_id, **kw) for k in keys],
     }
 
 
@@ -154,6 +170,62 @@ def test_horizon_uses_max_across_queries_of_same_site(store):
         [batch("new1"), batch("old")], now="2026-08-02T02:00:00+00:00"
     )
     assert rep["disappeared"] == 0 and rep["window_exit"] == 0
+
+
+def test_seller_scope_marks_disappeared_even_after_window_exit(store):
+    """這是這次要修的死角：z649388810 的重現案例。
+
+    商品先被地平線判成 window_exit_at（首頁擠出去，無結論），之後永遠不會
+    再被地平線邏輯評估。但同一個賣家被完整列舉重掃、商品不在結果裡——
+    這是獨立證據，應該直接判 disappeared_at，不管 window_exit_at 是什麼。
+    """
+    store.record_listing_scan([batch("old", seller_id="s1")], now="2026-08-02T00:00:00+00:00")
+    # "new1" 建立更新的地平線，"old" 比地平線舊 → 只會 censored 成 window_exit_at
+    store.record_listing_scan([batch("new1")], now="2026-08-02T01:00:00+00:00")
+    row = {r["key"]: r for r in store.listing_obs()}["old"]
+    assert row["window_exit_at"] is not None and row["disappeared_at"] is None
+
+    rep = store.record_listing_scan(
+        [seller_batch(seller_id="s1")],  # 賣家完整列舉，"old" 不在裡面
+        now="2026-08-05T00:00:00+00:00",
+    )
+    assert rep["seller_scope_disappeared"] == 1
+    row = {r["key"]: r for r in store.listing_obs()}["old"]
+    assert row["disappeared_at"] == "2026-08-05T00:00:00+00:00"
+    assert row["window_exit_at"] is None  # 判定改由這條規則接管，狀態互斥
+
+
+def test_seller_scope_uses_raw_listings_not_candidate_filtered_rows(store):
+    """`seller_seen_keys` 要用過濾前的原始清單——候選過濾器把一筆商品濾掉，
+    不代表它真的下架了，不可以被這條規則牽連著判離場。"""
+    store.record_listing_scan([batch("a", seller_id="s1")], now="2026-08-02T00:00:00+00:00")
+    rep = store.record_listing_scan(
+        [seller_batch(seller_id="s1", seen_keys=["a"])],  # rows 空，但原始清單有 "a"
+        now="2026-08-03T00:00:00+00:00",
+    )
+    assert rep["seller_scope_disappeared"] == 0
+    assert {r["key"]: r for r in store.listing_obs()}["a"]["disappeared_at"] is None
+
+
+def test_seller_scope_ignores_unhealthy_batch(store):
+    store.record_listing_scan([batch("a", seller_id="s1")], now="2026-08-02T00:00:00+00:00")
+    rep = store.record_listing_scan(
+        [seller_batch(seller_id="s1", healthy=False)], now="2026-08-03T00:00:00+00:00"
+    )
+    assert rep["batches_skipped"] == 1
+    assert rep["seller_scope_disappeared"] == 0
+    assert {r["key"]: r for r in store.listing_obs()}["a"]["disappeared_at"] is None
+
+
+def test_seller_scope_does_not_touch_other_sellers(store):
+    store.record_listing_scan(
+        [batch("a", seller_id="s1"), batch("b", seller_id="s2")],
+        now="2026-08-02T00:00:00+00:00",
+    )
+    store.record_listing_scan([seller_batch(seller_id="s1")], now="2026-08-03T00:00:00+00:00")
+    rows = {r["key"]: r for r in store.listing_obs()}
+    assert rows["a"]["disappeared_at"] == "2026-08-03T00:00:00+00:00"
+    assert rows["b"]["disappeared_at"] is None
 
 
 def test_summary_and_prune(store):

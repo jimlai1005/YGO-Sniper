@@ -595,7 +595,10 @@ class Pipeline:
 
         回傳 (要落帳的觀測批次, 報告)。批次一律 `exit_scope=False`——賣家頁
         只看得到一個賣家的貨，拿它當地平線會把整個站的其他標的判成消失
-        （見 `store.record_listing_scan` 的 exit_scope 註記）。
+        （見 `store.record_listing_scan` 的 exit_scope 註記）。批次另外帶
+        `seller_id`／`seller_seen_keys`：賣家頁 1 頁的容量遠大於實測在架量，
+        是完整列舉，`record_listing_scan` 拿它做獨立於地平線的第二條離場
+        判定（補 window_exit_at 卡死、賣家重掃卻永遠不會被重新評估的死角）。
 
         **任何失敗都不准拖垮整輪掃描**（與 refresh_comps／refill 同一立場）：
         每個賣家各自走 `run_source_search` 的隔離邊界，claim／落帳失敗也只印警告。
@@ -667,6 +670,13 @@ class Pipeline:
                 "healthy": healthy,
                 "exit_scope": False,
                 "rows": rows,
+                # 賣家頁 1 頁的容量遠大於實測在架量（WatchParams.pages 的依據），
+                # 所以這是完整列舉，可以當「這個賣家的商品是否還在」的獨立離場
+                # 證據（store.record_listing_scan 的 seller_seen 判定）。用過濾
+                # 前的原始清單，比 `rows`（過了年代候選判準）更保守：候選過濾器
+                # 的誤判不該連帶讓還在架的商品被判離場。
+                "seller_id": sid,
+                "seller_seen_keys": [lst.key for lst in res.listings],
             })
             result_note = (
                 f"{res.health.value}：在架 {len(res.listings)} 筆、候選 {len(rows)} 筆"

@@ -1209,13 +1209,31 @@ class Store:
         一個站有多個查詢時取**各批次地平線的最大值**（最保守：地平線越新，
         被判定成「真的消失」的越少）。
 
+        ── 離場判定：賣家頁完整列舉（獨立於地平線的第二條證據）──────────
+        賣家頁監控（`seller_watch`）固定抓 1 頁，容量 100-200 筆，實測單一
+        賣家在架最多 38 筆（`seller_watch.py` 的 `WatchParams.pages` 依據）
+        ——它不是抽樣，是**完整列舉**。這跟站台首頁「只看得到第一頁、會被
+        新品擠掉」的地平線判定是不同性質的證據，不受 `exit_scope=False` 的
+        限制：那條防的是「拿一個賣家的清單代表全站」，不是「一個賣家的
+        清單能不能代表他自己」。所以批次帶 `seller_id` 時，這位賣家名下
+        `disappeared_at IS NULL` 的商品，只要這次沒出現在他的完整列舉結果
+        （`seller_seen_keys`，取自過濾前的原始清單，比 `rows` 更保守）裡，
+        直接判 `disappeared_at`——**不看 `window_exit_at`**，因為那個欄位
+        的語意只是「首頁地平線判不出結論」，跟這一支獨立證據無關；一筆
+        商品一旦被首頁擠出視窗，地平線判定永遠不會再評估它
+        （`WHERE disappeared_at IS NULL AND window_exit_at IS NULL` 會把它
+        永久排除），這條規則補的正是這個死角。
+
         回傳計數報告；`revived` 是被判 disappeared 之後又出現的筆數，
         也就是這條規則自己打自己臉的次數——請把它當成 proxy 可信度的量測值。
+        `seller_scope_disappeared` 是 `disappeared` 裡由這條獨立規則貢獻的
+        子集，供日後想分開稽核兩種證據的可信度時使用。
         """
         stamp = now or _now_iso()
         report = {
             "seen": 0, "new": 0, "updated": 0, "revived": 0,
             "disappeared": 0, "window_exit": 0, "batches_skipped": 0,
+            "seller_scope_disappeared": 0,
         }
         healthy = []
         for b in batches:
@@ -1289,6 +1307,35 @@ class Store:
                             (stamp, r["key"]),
                         )
                         report["window_exit"] += 1
+
+            # 第二條離場證據：賣家頁完整列舉（見上方 docstring）。獨立於地平線，
+            # 所以獨立成一個迴圈，不會跟上面的判定互相覆蓋。
+            seller_seen: dict[tuple[str, str], set[str]] = {}
+            for b in healthy:
+                sid = b.get("seller_id")
+                keys = b.get("seller_seen_keys")
+                if not sid or keys is None:
+                    continue
+                site = str(b.get("site") or "")
+                seller_seen.setdefault((site, str(sid)), set()).update(
+                    str(k) for k in keys
+                )
+            for (site, sid), seen_keys in seller_seen.items():
+                open_rows = c.execute(
+                    "SELECT key FROM listing_obs "
+                    "WHERE site = ? AND seller_id = ? AND disappeared_at IS NULL",
+                    (site, sid),
+                ).fetchall()
+                for r in open_rows:
+                    if r["key"] in seen_keys:
+                        continue
+                    c.execute(
+                        "UPDATE listing_obs SET disappeared_at = ?, window_exit_at = NULL "
+                        "WHERE key = ?",
+                        (stamp, r["key"]),
+                    )
+                    report["disappeared"] += 1
+                    report["seller_scope_disappeared"] += 1
 
             # 賣家帳本：與觀測寫入同一次交易（要嘛一起落、要嘛一起 rollback）。
             for (site, sid), (fb_score, fb_pct) in touched_sellers.items():
