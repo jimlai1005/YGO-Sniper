@@ -1331,7 +1331,11 @@ class Pipeline:
 
         # 只算不發：evaluate() 落觀測帳並回傳「現在該發」的訊息，
         # 真的送出與冷卻落帳由 CLI 的 daily 流程負責（alerts.py 模組註解）。
-        alerts: list[Alert] = self.alerts.evaluate(search_results)
+        # band 帶給 evaluate：高價帶輪的告警帳要與低價帶分開（2026-08-22
+        # 修正回合 W2）——兩本帳語意不同，永遠不要合併（CLAUDE.md 第五節）。
+        alerts: list[Alert] = self.alerts.evaluate(
+            search_results, band="high" if high_band else "std"
+        )
 
         result = {
             "started_at": started,
@@ -1411,13 +1415,18 @@ class Pipeline:
         return result
 
     # ------------------------------------------------------------------
-    def notification_outcome(self, now=None):
+    def notification_outcome(self, now=None, *, band: str | None = None):
         """這一輪兩條規則各命中什麼。**只判定，不送、不落帳**（preview 也用它）。
 
         估價模型建不起來時**不整批罷工**：規則 1（競標急件）用的是掃描當下就
         存進 payload 的上限，本來就不需要模型；只有規則 2 會被跳過，而且
         `Outcome.valuation_ok=False` 會讓 CLI 明講「這一輪算不出 P 值」——
         降級要看得見，不能長得像「今天沒好貨」（工程原則 3）。
+
+        `band`：`None`（預設）＝ 全帶（`notify-preview` 用這個）；
+        `'std'`／`'high'` 只評估該帶的候選——`daily`／`daily-high` 各自傳入，
+        防止兩輪互相消耗對方的 per-run 上限（2026-08-22 修正回合 W3；
+        見 `store.notification_candidates` docstring）。
         """
         from .notify_rules import NotifyRules, evaluate
 
@@ -1427,7 +1436,7 @@ class Pipeline:
             print(f"[warn] 估價模型建立失敗，本輪規則 2（P 值）跳過：{exc}")
             valuator = None
         return evaluate(
-            self.store.notification_candidates(),
+            self.store.notification_candidates(band=band),
             rules=NotifyRules.from_config(self.cfg),
             valuator=valuator,
             now=now,
@@ -1464,9 +1473,12 @@ class Pipeline:
                   f"{type(exc).__name__}: {exc}")
             return None
 
-    def notify(self):
-        """判定 → 送出 → **只對送成功的落帳**。回傳 `notify_rules.Outcome`。"""
-        outcome = self.notification_outcome()
+    def notify(self, *, band: str | None = None):
+        """判定 → 送出 → **只對送成功的落帳**。回傳 `notify_rules.Outcome`。
+
+        `band` 透傳給 `notification_outcome`（見其 docstring）。
+        """
+        outcome = self.notification_outcome(band=band)
         sent = self.notifier.send_rule_matches(outcome)
         self.store.mark_rule_notified(sent)
         return outcome

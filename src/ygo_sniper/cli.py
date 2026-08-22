@@ -59,7 +59,7 @@ def daily(
         _print_scan(result)
         _mine_snipes_daily(pipe)
         if not no_notify:
-            _run_notifications(pipe, result)
+            _run_notifications(pipe, result, band="std")
     finally:
         pipe.close()
 
@@ -76,7 +76,7 @@ def daily_high(no_notify: bool = typer.Option(False, help="只掃不推播")):
         result = pipe.scan(high_band=True)
         _print_scan(result)
         if not no_notify:
-            _run_notifications(pipe, result)
+            _run_notifications(pipe, result, band="high")
     finally:
         pipe.close()
 
@@ -171,8 +171,14 @@ def _mine_snipes_daily(pipe) -> None:
         pipe.store.set_meta(_SNIPE_MINE_META_KEY, today)
 
 
-def _run_notifications(pipe, result: dict) -> int:
+def _run_notifications(pipe, result: dict, *, band: str | None = None) -> int:
     """推播決策的唯一落點。回傳實際送出的訊號筆數。
+
+    `band`：`None`（預設，維持既有全帶行為）／`'std'`／`'high'`——透傳給
+    `Pipeline.notify`／`notification_outcome`，讓 `daily`（std）與
+    `daily-high` 只評估自己那一帶的候選，互不消耗對方的 per-run 上限
+    （2026-08-22 修正回合 W3）。band=None 時**不傳關鍵字參數**下去
+    （而不是傳 `band=None`）——保留舊呼叫形狀，相容既有測試替身。
 
     每小時跑 24 次，其中絕大多數必然沒有新貨。如果每輪都送一則「掃完了、0 筆」，
     推播很快就會被訓練成雜訊，然後真的有貨的那一次你會直接滑過去
@@ -190,10 +196,10 @@ def _run_notifications(pipe, result: dict) -> int:
     silent 判斷**之外**無條件執行。
     """
     if not bool(pipe.cfg.notify.get("enabled", True)):
-        _report_notify_disabled(pipe, result)
+        _report_notify_disabled(pipe, result, band=band)
         return 0
 
-    outcome = pipe.notify()
+    outcome = pipe.notify(band=band) if band is not None else pipe.notify()
     n = len(outcome.sent)
     silent = bool(pipe.cfg.notify.get("silent_when_empty", True))
 
@@ -219,7 +225,7 @@ def _run_notifications(pipe, result: dict) -> int:
     return n
 
 
-def _report_notify_disabled(pipe, result: dict) -> None:
+def _report_notify_disabled(pipe, result: dict, *, band: str | None = None) -> None:
     """推播關掉時的唯一輸出。**不呼叫 notifier 的任何方法。**
 
     為什麼不是「照送、讓 send() 自己擋下來」：那條路上每則告警都會拿到
@@ -231,14 +237,17 @@ def _report_notify_disabled(pipe, result: dict) -> None:
 
     命中數走的是與真的推播**同一支判定**（`Pipeline.notification_outcome`）：
     停用期間印一個用別的算法算出來的數字，等於讓使用者看不到規則的真實狀態。
+    `band` 透傳給 `notification_outcome`（見 `_run_notifications` docstring），
+    同一個立場——band=None 才傳 `band=None` 下去，維持舊呼叫形狀相容測試替身。
     """
-    outcome = pipe.notification_outcome()
+    outcome = pipe.notification_outcome(band=band) if band is not None else pipe.notification_outcome()
     alerts = result.get("alerts") or []
     console.print(
         f"\n[yellow]Telegram 已停用（notify.enabled=false），本輪"
         f" 競標急件 {len(outcome.urgent)} 筆 ／ 高信心 {len(outcome.high_p)} 筆"
         f" ／ 監控賣家新上架 {len(outcome.seller_new)} 筆"
         f" ／ 估不了 {len(outcome.seller_unpriced)} 筆"
+        f" ／ 高價帶折價 {len(outcome.high_band)} 筆"
         f" 只落庫不推播[/yellow]"
     )
     if alerts:

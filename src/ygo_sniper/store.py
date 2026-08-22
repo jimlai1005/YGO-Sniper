@@ -624,8 +624,19 @@ class Store:
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
+        """`journal_mode=WAL`＋`busy_timeout=30000`：低價帶（`daily`）與高價帶
+        （`daily-high`）兩條獨立排程並行寫同一顆 sqlite（2026-08-22 修正回合
+        W4）。WAL 讓讀者不擋寫者、寫者不擋讀者；busy_timeout 讓兩個寫者真的
+        撞鎖時等待重試而不是立刻 `database is locked` 大聲失敗——鎖仍然可能
+        撞上（兩帶錯開 15 分鐘＋watchdog 上限使重疊窗有限），撞上時
+        `run_high.sh`／`run_daily.sh` 的既有失敗通知機制照常出聲，這裡只是
+        把「短暫重疊」降級成「稍等一下」，不是保證永遠不衝突（plan Task 11
+        已知未做：不做跨行程鎖統一）。
+        """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         try:
             yield conn
             conn.commit()
@@ -729,19 +740,28 @@ class Store:
     #: 是定價標的的議價流程，競標急件與高信心標的都不對著它們說話。
     NOTIFY_CANDIDATE_STATES = (TriageState.NEW.value, TriageState.WATCHING.value)
 
-    def notification_candidates(self, limit: int = 500) -> list[dict[str, Any]]:
+    def notification_candidates(
+        self, limit: int = 500, *, band: str | None = None
+    ) -> list[dict[str, Any]]:
         """規則推播的候選池：使用者還沒下決定的那些列（不看 notified_at）。
 
         **刻意不是 `pending_notification`**：競標急件是「這一筆現在進入 24 小時
         結標窗」，那件事發生在標的被發現的好幾天之後——用「從未通知過」當
         候選條件的話，這種訊息永遠送不出去。
+
+        `band`：`None`（預設）＝ 全帶（`notify-preview` 等手動指令用這個，除錯
+        要看得到全貌）；`'std'`／`'high'` 只回該帶的列——`daily`／`daily-high`
+        各自呼叫，防止高價帶輪替 std 的競標急件送出、消耗對方的 per-run 上限
+        （2026-08-22 修正回合 W3）。
         """
         marks = ", ".join("?" for _ in self.NOTIFY_CANDIDATE_STATES)
+        band_clause = " AND band = ?" if band is not None else ""
+        params: tuple = (*self.NOTIFY_CANDIDATE_STATES, *((band,) if band is not None else ()), limit)
         with self._conn() as c:
             rows = c.execute(
-                f"""SELECT * FROM signals WHERE state IN ({marks})
+                f"""SELECT * FROM signals WHERE state IN ({marks}){band_clause}
                     ORDER BY score DESC LIMIT ?""",
-                (*self.NOTIFY_CANDIDATE_STATES, limit),
+                params,
             ).fetchall()
         return [dict(r) for r in rows]
 
