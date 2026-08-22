@@ -2,11 +2,18 @@
 旗與 `signals.band` 欄位。見
 `docs/superpowers/plans/2026-08-22-high-band-scan.md` Task 3。
 
-四類要驗（各自對應 plan Task 3 的四條紅燈測試）：
+五類要驗（各自對應 plan Task 3／Task 10 的紅燈測試）：
 
-1. 同源——高價帶輪的 `min_price` 與低價帶輪的 `max_price` 是同一個
-   `_price_ceiling_jpy` 呼叫的回傳值，高價帶上限是 watchlist 設定的
-   `max_price_jpy`。
+0. 守衛（2026-08-22 修正回合 W1）——`_price_ceiling_jpy` 算不出下限
+   （回 None 或 ≤0）時，該來源**拒絕掃描**、回 PARSER_BROKEN 級大聲失敗，
+   不准塌成「無下限、只有 ≤¥50,000 上限」（那會讓大量低價標的被寫成
+   `band='high'` 並被規則 1/2/3 永久排除）。與 `load_high_band_queries`
+   對上限缺失的既有立場（拒跑＋大聲）對齊。
+1. 同源＋無縫無重疊（2026-08-22 修正回合 S3 更新）——高價帶輪的
+   `min_price` ＝ 低價帶輪的 `max_price`（同一個 `_price_ceiling_jpy`
+   呼叫）**+ 1**：Buyee 的 `price_min`／`price_max` 都是閉區間，不 +1
+   的話恰好等於上限的商品會同時落在兩帶內，band 隨掃描順序翻面。
+   高價帶上限是 watchlist 設定的 `max_price_jpy`。
 2. 隔離——`high_band=True` 不跑 comps refresh／canary／賣家輪替監控／
    需求驅動回補，那些是低價帶完整輪的事。
 3. band 欄位——高價帶輪落庫 `band='high'`；一般輪 `band='std'`；舊庫
@@ -25,12 +32,13 @@ import dataclasses
 import sqlite3
 from pathlib import Path
 
+import pytest
 from conftest import FakeFx, make_listing
 
 import ygo_sniper.pipeline as pipeline_mod
 from ygo_sniper.domain import Site
 from ygo_sniper.pipeline import Pipeline
-from ygo_sniper.sources.health import SearchResult
+from ygo_sniper.sources.health import ParseHealth, SearchResult
 from ygo_sniper.store import Store
 
 _TITLE = "遊戯王 初期 ウルトラ PSA9 青眼の白龍"
@@ -88,9 +96,34 @@ _HIGH_BAND_BLOCK = {
 
 
 # ---------------------------------------------------------------------------
-# 1. 同源：高價帶下限 == 低價帶上限（同一個 _price_ceiling_jpy 呼叫）
+# 0. 守衛：ceiling 算不出來 → 拒絕掃描，不發任何請求（修正回合 W1）
 # ---------------------------------------------------------------------------
-def test_high_band_min_price_equals_low_band_max_price(monkeypatch, tmp_path, cfg):
+@pytest.mark.parametrize("bad_ceiling", [None, 0.0], ids=["none", "zero"])
+def test_high_band_refuses_to_scan_when_ceiling_unavailable(
+    monkeypatch, tmp_path, cfg, bad_ceiling,
+):
+    src = _RecordingSource()
+    watchlist = _watchlist(cfg, high_band=_HIGH_BAND_BLOCK)
+    pipe = _make_pipeline(monkeypatch, tmp_path, cfg, {"hb_src": src}, watchlist)
+    monkeypatch.setattr(Pipeline, "_price_ceiling_jpy", lambda self, site: bad_ceiling)
+    try:
+        result = pipe.scan(skip_comps=True, dry_run=True, high_band=True)
+    finally:
+        pipe.close()
+
+    assert src.calls == [], (
+        f"下限算不出來（ceiling={bad_ceiling!r}）時不准發任何請求：{src.calls}"
+    )
+    assert result["search_results"], "應該有一筆大聲失敗的 SearchResult，不是空手而回"
+    res = result["search_results"][0]
+    assert res.health == ParseHealth.PARSER_BROKEN
+    assert "下限" in res.detail, res.detail
+
+
+# ---------------------------------------------------------------------------
+# 1. 同源＋無縫無重疊：高價帶下限 == 低價帶上限 + 1（修正回合 S3）
+# ---------------------------------------------------------------------------
+def test_high_band_min_price_is_low_band_max_price_plus_one(monkeypatch, tmp_path, cfg):
     src = _RecordingSource()
     watchlist = _watchlist(
         cfg,
@@ -108,7 +141,9 @@ def test_high_band_min_price_equals_low_band_max_price(monkeypatch, tmp_path, cf
     assert len(src.calls) == 2, src.calls
     low_call, high_call = src.calls
     assert low_call == {"min_price": None, "max_price": 8624.0}
-    assert high_call == {"min_price": 8624.0, "max_price": 50000.0}
+    # Buyee 的 price_min/price_max 都是閉區間：+1 才不會讓恰好等於上限的
+    # 商品同時落在兩帶（band 隨掃描順序翻面）。
+    assert high_call == {"min_price": 8625.0, "max_price": 50000.0}
 
 
 # ---------------------------------------------------------------------------

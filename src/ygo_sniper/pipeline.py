@@ -443,15 +443,35 @@ class Pipeline:
         那次假警報的同一種錯：拿商業結果當健康指標）。
 
         `high_band_max` 不為 None 時，這一趟改成高價帶查詢：下限沿用
-        `_price_ceiling_jpy(src.site)`——**與低價帶上限同一個函式呼叫**，
-        高低兩帶的邊界永遠無縫相接、不重疊（高價帶掃描 plan 的同源條款）；
-        上限就是這個參數本身。此時 `price_ceiling` 不生效——一趟查詢不能
-        同時是「無上限」與「高價帶」。
+        `_price_ceiling_jpy(src.site)` **+ 1**——與低價帶上限同一個函式呼叫，
+        高低兩帶的邊界永遠無縫相接、不重疊（高價帶掃描 plan 的同源條款；
+        +1 是因為 Buyee 的 `price_min`／`price_max` 都是閉區間，不 +1 的話
+        恰好等於上限的商品會同時落在兩帶，band 隨掃描順序翻面，見修正回合
+        S3）。上限就是這個參數本身。此時 `price_ceiling` 不生效——一趟查詢
+        不能同時是「無上限」與「高價帶」。
+
+        高價帶輪的下限算不出來（`_price_ceiling_jpy` 回 `None` 或 ≤0——路由
+        設定缺失、fx 讀不到）時，**拒絕以無下限掃描**：那會塌成「只有
+        ≤¥50,000 上限」，大量低價標的被寫成 `band='high'` 並被推播規則
+        1/2/3 永久排除，而且沒有任何痕跡（CLAUDE.md 第一節「誤殺是靜默
+        的」）。與 `load_high_band_queries` 對上限缺失的既有立場（拒跑＋
+        大聲）對齊，回 `PARSER_BROKEN` 且**不發任何網路請求**（修正回合
+        W1）。
         """
         pages = pages if pages is not None else self.cfg.max_pages_for(source_name)
         try:
             if high_band_max is not None:
-                min_price = self._price_ceiling_jpy(src.site)
+                ceiling = self._price_ceiling_jpy(src.site)
+                if ceiling is None or ceiling <= 0:
+                    return SearchResult(
+                        source=source_name, site=src.site.value, query=keyword,
+                        health=ParseHealth.PARSER_BROKEN,
+                        detail=(
+                            f"高價帶下限算不出來（_price_ceiling_jpy={ceiling!r}，"
+                            "routes/fx 缺失），拒絕以無下限掃描"
+                        ),
+                    )
+                min_price = ceiling + 1
                 max_price = high_band_max
             else:
                 min_price = None
