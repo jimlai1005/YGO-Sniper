@@ -21,6 +21,28 @@ dashboard 回答「有什麼」，推播只回答一件事：「現在有沒有�
       監控名單賣家的新標的，但**連模型都給不出可信估值**。不宣稱它便宜，
       只說「有一件我們估不了的東西」＋為什麼估不了。低音量（每輪有自己的上限）。
 
+  規則 5 高價帶折價（`high_band_discount`，2026-08-22 新增）
+      只評估 `signals.band == "high"` 的標的（高價帶掃描，見 `pipeline._scan(
+      high_band=True)`）——那一帶單價高、雜訊代價大，只有「相對市場行情深
+      折價＋證據夠強」才值得打斷你。判準只讀 signal 上既有的欄位（估價層級、
+      `comps_median`、`discount_pct`），不另起一套比價（CLAUDE.md 第三節）：
+        1. 估價等級 L1/L2（`estimate.has_card_specific_evidence`）——同卡
+           成交池撐著，不是整個稀有度的池子。
+        2. 到手成本／comps_median ≤ `high_band_max_price_ratio`（預設
+           0.70，使用者 2026-08-22 定案），比率從既有的 `discount_pct`
+           欄位反推（`ratio = 1 - discount_pct`），不重新做除法——那個欄位
+           在 scoring 端本來就是同一條算式（`domain.Signal.discount_pct`）。
+      任一條件不滿足 → 完全靜默（dashboard 仍看得到，這是通知閘門不是
+      過濾）。
+
+  band 閘門（規則 1/2/3 vs 規則 4/5）
+      `band` 是 signal 上的欄位（`'std'`／`'high'`，Task 3 落庫）。
+      **band='high' 的 signal 只有規則 4／5 有資格評估，規則 1/2/3 一律
+      跳過**——不是「剛好不適用」（例如 Mercari 定價商品天然不會有出價，
+      規則 1 用不到），是**顯式**排除：未來高價帶若掛上會競標的來源
+      （Yahoo），不能靠巧合擋住規則 1。`band` 缺失或 `'std'` 時完全走
+      現行路徑，行為零改動。
+
 ---------------------------------------------------------------------------
 ## 規則 3 的兩種折價來源（2026-08-04 改）
 
@@ -119,6 +141,9 @@ RULE_SELLER_UNPRICED = "seller_unpriced"
 #: NULL ＝ 每輪重複推播，而且壞掉的樣子與「真的還沒送過」一模一樣。守門的是
 #: `tests/test_card_snipe_notify.py::test_store_and_notify_rules_agree_on_the_rule_name`。
 RULE_CARD_SNIPE = "card_snipe"
+#: 規則 5 高價帶折價。**只評估 `band == "high"` 的 signal**——見模組頂註
+#: 「規則 5 高價帶折價」與「band 閘門」。改字串同樣會清空該規則的去重帳。
+RULE_HIGH_BAND = "high_band_discount"
 
 RULE_LABEL = {
     RULE_AUCTION_URGENT: "規則 1 競標急件",
@@ -126,7 +151,12 @@ RULE_LABEL = {
     RULE_SELLER_NEW: "規則 3 監控賣家新上架",
     RULE_SELLER_UNPRICED: "規則 3b 監控賣家·估不了",
     RULE_CARD_SNIPE: "規則 4 指定卡狙擊",
+    RULE_HIGH_BAND: "規則 5 高價帶折價",
 }
+
+#: 規則 5 訊息上的價格帶徽章（比照規則 3 把 `judgement_source` 走上訊息的
+#: 作法：使用者要在手機上一眼認出「這是高價帶帶來的貨」）。
+HIGH_BAND_BADGE = "🏷️ 高價帶"
 
 #: 規則 3 的判定來源。**這一欄要走到訊息上**：同儕相對與模型估值不是同一種宣稱。
 SOURCE_PEER = "peer"
@@ -162,6 +192,12 @@ DEFAULT_SELLER_MIN_PEERS = 1
 #: 模型公允價是點估計（實測中位誤差 ×1.9）。實測（2026-08-04，本庫 60 筆
 #: 監控賣家新上架）：≥15% 有 4 筆、≥20% 3 筆、**≥25% 2 筆**、≥30% 1 筆。
 DEFAULT_SELLER_MODEL_MIN_DISCOUNT = 0.25
+
+#: 規則 5 的折價門檻（到手成本 / comps_median，0.70 ＝ ≤7 折才推）。
+#: 使用者 2026-08-22 定案——高價帶單價高，雜訊代價大，門檻刻意比規則 3
+#: 的同儕折價（15%＝0.85）嚴很多：規則 5 沒有同儕相對這條強證據可用，
+#: 只能靠「便宜夠多」自己撐住信心。
+DEFAULT_HIGH_BAND_MAX_PRICE_RATIO = 0.70
 
 #: 規則 3b（估不了）一輪最多送幾則。**這裡的 0 ＝ 一則都不送**（與
 #: `max_items_per_run` 的 0＝不限**相反**）：3b 是「沒有判斷、只是叫你看一眼」的
@@ -253,6 +289,10 @@ class NotifyRules:
     seller_unpriced_enabled: bool = True
     #: 規則 3b 一輪的上限。**0 ＝ 一則都不送**（見常數註）。
     seller_unpriced_max_per_run: int = DEFAULT_SELLER_UNPRICED_MAX_PER_RUN
+    #: 規則 5：band='high' 的 signal 要不要評估折價推播。
+    high_band_enabled: bool = True
+    #: 規則 5：到手成本 / comps_median 的上限比例（0.70 ＝ ≤7 折才推）。
+    high_band_max_price_ratio: float = DEFAULT_HIGH_BAND_MAX_PRICE_RATIO
     #: 模型 fallback 的證據閘門——`bidding.EvidenceGate` 的**通知檔**（notify
     #: profile），不是另訂的標準：語意閘門（分數已知、L1/L2）與出價檔一樣硬，
     #: 只放寬「校準政策」那兩道（破口桶不拒收、校準殘差門檻 30）。依據：通知與
@@ -275,6 +315,7 @@ class NotifyRules:
         high_p = dict(rules.get(RULE_HIGH_P) or {})
         seller = dict(rules.get(RULE_SELLER_NEW) or {})
         unpriced = dict(rules.get(RULE_SELLER_UNPRICED) or {})
+        high_band = dict(rules.get(RULE_HIGH_BAND) or {})
         return cls(
             seller_new_enabled=bool(seller.get("enabled", True)),
             seller_model_fallback_enabled=bool(seller.get("model_fallback_enabled", True)),
@@ -314,6 +355,11 @@ class NotifyRules:
             max_items_per_run=_cap_setting(notify, "max_items_per_run"),
             auction_urgent_enabled=bool(urgent.get("enabled", True)),
             high_p_enabled=bool(high_p.get("enabled", True)),
+            high_band_enabled=bool(high_band.get("enabled", True)),
+            high_band_max_price_ratio=_float_setting(
+                high_band, f"rules.{RULE_HIGH_BAND}.max_price_ratio",
+                DEFAULT_HIGH_BAND_MAX_PRICE_RATIO, lo=0.0, hi=1.0,
+            ),
         )
 
 
@@ -445,6 +491,17 @@ class Match:
     card_name: str | None = None
     grade: float | None = None
     era_evidence: tuple[str, ...] = ()
+    #: --- 規則 5 用（高價帶折價）------------------------------------------
+    #: 行情中位（`row['comps_median']`）與這一批成交的筆數（`row['comps_n']`）。
+    comps_median_twd: float | None = None
+    comps_n: int | None = None
+    #: 到手成本 / comps_median（≤1 才有機會過門檻）。
+    price_ratio: float | None = None
+    #: 訊息文案：「判定來源：同卡成交 × N 筆中位」。**這一欄必須走到訊息上**
+    #: （比照規則 3 把 `judgement_source` 走上訊息的作法）。
+    high_band_source_note: str | None = None
+    #: 訊息上的價格帶徽章（見 `HIGH_BAND_BADGE`）。
+    price_band_label: str | None = None
 
     @property
     def title(self) -> str:
@@ -477,6 +534,8 @@ class Outcome:
     seller_unpriced: list[Match] = field(default_factory=list)
     #: 規則 4：指定卡狙擊命中（exact＋partial；near 在脈絡層就不進來）。
     card_snipe: list[Match] = field(default_factory=list)
+    #: 規則 5：高價帶折價命中（band='high' 且過估價等級與折價門檻）。
+    high_band: list[Match] = field(default_factory=list)
     skipped: list[Skip] = field(default_factory=list)
     #: 通過去重、真的要送的（已依總量上限截斷）
     to_send: list[Match] = field(default_factory=list)
@@ -497,9 +556,10 @@ class Outcome:
     def matched(self) -> int:
         """**有判斷**的命中數。規則 3b 不算在內——它沒有宣稱任何東西便宜，
         把它加進來會讓「今天有幾個訊號」這個數字失去意義。
-        規則 4 算在內：它宣稱「你登錄的那張卡出現了」，那是最強的一種判斷。"""
+        規則 4 算在內：它宣稱「你登錄的那張卡出現了」，那是最強的一種判斷。
+        規則 5 也算在內：它宣稱「這筆比同卡行情便宜超過門檻」，同樣是判斷。"""
         return (len(self.urgent) + len(self.high_p) + len(self.seller_new)
-                + len(self.card_snipe))
+                + len(self.card_snipe) + len(self.high_band))
 
     def skips_for(self, reason_contains: str) -> list[Skip]:
         return [s for s in self.skipped if reason_contains in s.reason]
@@ -529,6 +589,10 @@ def evaluate(
     now = now or datetime.now(UTC)
     notified = notified or {}
     out = Outcome(
+        # ⚠️ 刻意**不**把 high_band_enabled 折進這裡：這一欄的既有語意是
+        # 「規則 2 這一輪算不算得出來」（見 Outcome.valuation_ok docstring），
+        # 折進規則 5 會讓完全沒有高價帶資料的一般輪也被標成「算不出 P 值」，
+        # 那是 band='std' 情境下的行為改變（紅線：band 缺失時零改動）。
         valuation_ok=valuator is not None or not rules.high_p_enabled,
         seller_ctx_ok=seller_ctx is not None or not rules.seller_new_enabled,
     )
@@ -538,27 +602,37 @@ def evaluate(
         payload = _payload(row)
         listing_d = payload.get("listing") or {}
         bid_d = payload.get("bid") if isinstance(payload.get("bid"), dict) else None
+        # band 閘門（見模組頂註）：band='high' 只給規則 4／5 評估，1/2/3 顯式
+        # 跳過——不是「剛好不適用」，是結構性排除，未來換來源也不會靠巧合擋住。
+        is_high_band = str(row.get("band") or "std") == "high"
 
-        if rules.auction_urgent_enabled:
+        if rules.auction_urgent_enabled and not is_high_band:
             m, skip = _match_urgent(row, key, listing_d, bid_d, rules, now)
             if m is not None:
                 out.urgent.append(m)
             elif skip is not None:
                 out.skipped.append(skip)
 
-        if rules.high_p_enabled and valuator is not None:
+        if rules.high_p_enabled and valuator is not None and not is_high_band:
             m, skip = _match_high_p(row, key, payload, listing_d, rules, valuator, now)
             if m is not None:
                 out.high_p.append(m)
             elif skip is not None:
                 out.skipped.append(skip)
 
-        if rules.seller_new_enabled and seller_ctx is not None:
+        if rules.seller_new_enabled and seller_ctx is not None and not is_high_band:
             m, skip = _match_seller_new(row, key, listing_d, rules, seller_ctx, valuator)
             if m is not None and m.rule == RULE_SELLER_UNPRICED:
                 out.seller_unpriced.append(m)
             elif m is not None:
                 out.seller_new.append(m)
+            elif skip is not None:
+                out.skipped.append(skip)
+
+        if rules.high_band_enabled and valuator is not None and is_high_band:
+            m, skip = _match_high_band(row, key, rules, valuator)
+            if m is not None:
+                out.high_band.append(m)
             elif skip is not None:
                 out.skipped.append(skip)
 
@@ -1047,6 +1121,73 @@ def _missing_fields(fields: dict[str, Any]) -> str:
     return "、".join(missing)
 
 
+# --- 規則 5 ---------------------------------------------------------------
+def _match_high_band(
+    row: dict[str, Any],
+    key: str,
+    rules: NotifyRules,
+    valuator: Any,
+) -> tuple[Match | None, Skip | None]:
+    """高價帶折價（band='high' 專屬）。只讀 signal 上既有的估價欄位，不另起
+    一套比價（CLAUDE.md 第三節）——兩道閘門都要過：
+
+      1. 估價等級 L1/L2（`estimate.has_card_specific_evidence`，與規則 2
+         同一支 `estimate_signal_row` 拿到的同一顆 `estimate`）——同卡成交池
+         撐著，不是整個稀有度的池子。
+      2. 到手成本 / comps_median ≤ `high_band_max_price_ratio`。比率從
+         signal 既有的 `discount_pct` 欄位反推（`ratio = 1 - discount_pct`），
+         不重新拿 landed_twd／comps_median 相除——那兩個數字在 scoring 端
+         本來就是同一條算式（`domain.Signal.discount_pct`），這裡只是換一種
+         讀法，不是另一套判準。
+
+    任一條件不滿足 → 完全靜默（不記 skipped：這不是「排除」，是沒過門檻，
+    與規則 2／3 沒過折價門檻的既有慣例一致）。
+    """
+    from .valuation import estimate_signal_row
+
+    title = str(row.get("title") or "")
+    try:
+        estimate = estimate_signal_row(valuator, row)
+    except Exception as exc:  # noqa: BLE001 - 單筆估價失敗不拖垮整輪
+        return None, Skip(key, title, RULE_HIGH_BAND, f"估價失敗，不送：{exc}")
+
+    if not estimate.has_card_specific_evidence:
+        return None, None  # L3/L0：只有整個稀有度的池子撐著，不夠格
+
+    comps_median = row.get("comps_median")
+    discount_pct = row.get("discount_pct")
+    if comps_median is None or discount_pct is None:
+        return None, None  # 沒有同卡成交可比，沒有比價基準
+
+    ratio = 1.0 - float(discount_pct)
+    if ratio > rules.high_band_max_price_ratio:
+        return None, None  # 沒過門檻不是「被排除」，不必列進 skipped 洗版
+
+    comps_n = int(row.get("comps_n") or 0)
+    missing = _missing_fields(
+        {
+            "標題": title,
+            "連結": row.get("url"),
+            "到手成本": row.get("landed_twd"),
+            "行情中位": comps_median,
+        }
+    )
+    if missing:
+        return None, Skip(key, title, RULE_HIGH_BAND, f"欄位缺值不送：{missing}")
+
+    return Match(
+        key=key,
+        rule=RULE_HIGH_BAND,
+        row=row,
+        estimate=estimate,
+        comps_median_twd=float(comps_median),
+        comps_n=comps_n,
+        price_ratio=ratio,
+        high_band_source_note=f"判定來源：同卡成交 × {comps_n} 筆中位",
+        price_band_label=HIGH_BAND_BADGE,
+    ), None
+
+
 # --- 去重與總量上限 --------------------------------------------------------
 def _apply_dedupe_and_cap(
     out: Outcome,
@@ -1097,6 +1238,12 @@ def _apply_dedupe_and_cap(
       👀 partial 另有自己的每輪小上限（`card_snipe.PARTIAL_MAX_PER_RUN`），
       超量的進 `skipped`、**不落已通知帳**（下輪重新排隊），也**不進 overflow**
       ——overflow 講的是全域上限砍掉的，兩個機制不能混在同一則統計裡。
+
+    - 規則 5 高價帶折價：`dedupe_days` 天內同一標的只送一次（與規則 2 同一個
+      形狀——折價門檻不是「發生過一次就不會再發生」的事實，賣家改價、行情
+      漂移都可能讓同一筆重新算出不同的折價，用終身一次會漏掉這些）。
+      band='high' 的 signal 不會出現在 `out.urgent`（規則 1 對它顯式跳過，
+      見 band 閘門），所以不需要跟規則 1 互斥的那一段邏輯。
     """
     cutoff = now - timedelta(days=rules.dedupe_days)
     urgent_keys = {m.key for m in out.urgent}
@@ -1123,6 +1270,13 @@ def _apply_dedupe_and_cap(
 
     for m in out.seller_new:
         if (m.key, RULE_SELLER_NEW) in notified:
+            out.deduped += 1
+            continue
+        sendable.append(m)
+
+    for m in out.high_band:
+        last = notified.get((m.key, RULE_HIGH_BAND))
+        if last is not None and _parse_ts(last) is not None and _parse_ts(last) > cutoff:
             out.deduped += 1
             continue
         sendable.append(m)
@@ -1197,12 +1351,15 @@ def _parse_ts(value: str) -> datetime | None:
 
 __all__ = [
     "DEFAULT_EXCLUDE_RARITIES",
+    "DEFAULT_HIGH_BAND_MAX_PRICE_RATIO",
     "DEFAULT_P_WORTH_MIN",
     "DEFAULT_SELLER_MIN_DISCOUNT",
     "DEFAULT_SELLER_MODEL_MIN_DISCOUNT",
     "DEFAULT_SELLER_UNPRICED_MAX_PER_RUN",
+    "HIGH_BAND_BADGE",
     "RULE_AUCTION_URGENT",
     "RULE_CARD_SNIPE",
+    "RULE_HIGH_BAND",
     "RULE_HIGH_P",
     "RULE_SELLER_NEW",
     "RULE_SELLER_UNPRICED",
