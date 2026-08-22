@@ -390,3 +390,90 @@ make test 2>&1 | tail -3
   `RULE_HIGH_BAND` 字串 T4 單一定義。
 - 已知未做（刻意）：Yahoo/PayPay 高價帶（等 Mercari 淨增量數據）、dashboard band
   篩選 UI、高價帶專屬 canary（低價帶 canary 已覆蓋管道健康）。
+
+---
+
+# 修正回合（2026-08-22 reviewer 審核後，主線程裁決）
+
+Reviewer（fresh context，opus）交回 2 Critical／5 Warning／3 Suggestion，主線程親讀執行路徑
+複驗兩條 Critical 均成立。以下 Task 8-11 是裁決後的修正案。**紅線修訂**：原全域紅線 2(b)
+「訊號上既有的估價欄位＝已同源」對 `comps_median`／`discount_pct` **不成立**（它們來自
+`comps.stats_for`，含 `set_code|` 前綴退化匹配，會混機構混分數）——規則 5 改以
+venue-aware 的 valuation Estimate 為唯一數字來源（閘門與分母同一物件），見 Task 9。
+
+### Task 8（@inline）：C1——離場判定分帶（高價帶標的不被低價帶誤殺）
+
+**問題**：`store.record_listing_scan` 的地平線判定對 `WHERE site=? AND disappeared_at
+IS NULL AND window_exit_at IS NULL` 的**全站**開放列做判定；高價帶商品因伺服器端
+price_max 永遠不在低價帶結果中 → 下一輪低價帶 100% 誤判 `disappeared_at`／`window_exit_at`。
+Reviewer 實跑重現過（18:15 high 入庫 → 18:30 std 輪 → 被標離場，再跑 high 輪 revived_count=1），
+會污染 dashboard「疑似已售出」、`revive-rate`、`expiry-stats`、seller_alpha 三本帳。
+
+**修法（對稱分帶，不留死巷）**：
+1. `listing_obs` 加 `band TEXT DEFAULT 'std'`（additive migration，與 signals.band 同款）。
+2. `record_listing_scan` 的批次帶 band；`_upsert_listing_obs` 寫 band（後見覆蓋前見，
+   與 signals 同規則——價格跨帶漂移時，最後看到它的帶接手它的離場判定）。
+3. 地平線判定的 open_rows 查詢加 `AND band = ?`（本輪的 band）。
+4. 高價帶批次的 `exit_scope` **改回 True**——地平線已分帶，高價帶商品由高價帶自己的
+   地平線判離場，不再是無人判定的死巷（第五節第 8 條）。
+5. 賣家頁完整列舉那條判定（seller_scope_disappeared）**不分帶、不動**：賣家頁列舉
+   不帶價格過濾，天生看得到全部價位，它的「不在完整列舉裡」證據對兩帶都成立。
+
+**紅燈測試**：(a) 重現 reviewer 情境——高價帶列在低價帶輪後必須仍是開放狀態（兩個
+欄位都 NULL）；(b) 高價帶自己的輪能對高價帶列判 `window_exit_at`／`disappeared_at`
+（地平線邏輯在帶內正常運作）；(c) std 列在 std 輪的既有判定行為零變化（既有測試全綠）。
+
+**驗收**：`make test` 全綠；`sqlite3 data/sniper.db "PRAGMA table_info(listing_obs);" | grep band`。
+
+### Task 9（@inline）：C2＋W5——規則 5 判準同源化（閘門與分母同一個 Estimate）
+
+**問題**：`_match_high_band` 的 L1/L2 閘門讀 venue-aware 的 `estimate_signal_row`，但 7 折
+比率讀 `row["discount_pct"]`／`comps_median`（`comps.stats_for` 的池：不分平台、不分
+sale_kind，且 `comps.py:591-595` 對無精確簽章的卡退化成 `set_code|` 前綴匹配——混進
+該卡號**所有機構所有分數**的成交）。閘門沒有認證被相除的那個數字；文案的「× N 筆」
+也來自混池。這是第三節同一類錯的第九次。
+
+**修法**：
+1. 規則 5 的比率改為 `landed_twd / estimate 的公允價`——與閘門**同一個 Estimate 物件**
+   （venue-aware、同卡池）。公允價用哪個欄位（點估計 value／中位）由 builder 讀
+   `valuation.py` 的 Estimate 定義選定並在回報交代；文案的 N 改用該 Estimate 的
+   同卡池大小欄位。`comps_median`／`discount_pct` 不再進規則 5 的任何判定或文案。
+2. （W5）折價異常深不擋但要標註：ratio < 0.5 時文案追加
+   「⚠️ 折價異常深，中位可能被離群樣本撐起——下手前自己開成交頁看一眼」。
+   誤殺偏向不過濾：通知錯了使用者一眼可辨，靜默漏掉才是不可挽回的。
+3. 既有 13＋5 條規則 5 測試同步改（餵 estimate 而非 row 欄位）；追加 (a) ratio 由
+   estimate 算的斷言（餵不一致的 comps_median 驗證它不被讀）；(b) ratio<0.5 標註出現。
+
+**驗收**：`.venv/bin/pytest tests/ -k "notify" -v` 全綠；`make test` 全綠。
+
+### Task 10（@inline）：W1＋S3——高價帶掃描守衛
+
+1. （W1）高價帶輪 `_price_ceiling_jpy` 回 None 或 ≤0 時**拒絕掃描該來源**並回
+   PARSER_BROKEN 級的大聲 SearchResult（detail 寫明「高價帶下限算不出來，拒絕以
+   無下限掃描」）——不准塌成「≤¥50,000 全帶」。與 `load_high_band_queries` 對上限
+   缺失的立場對齊。紅燈測試：monkeypatch ceiling 回 None，斷言不發請求且結果大聲。
+2. （S3）Buyee 的 price_min/price_max 都是閉區間 → 高價帶下限改 `ceiling + 1`，
+   消除帶邊界 1 円重疊（band 翻面抖動）。同源測試改斷言 `min == max + 1`；
+   plan 首段「無縫無重疊」的宣稱因此成真。
+
+**驗收**：`.venv/bin/pytest tests/test_high_band_scan.py -v` 全綠；`make test` 全綠。
+
+### Task 11（@inline）：W2＋W3＋W4＋S1——隔離收尾
+
+1. （W3）推播候選分帶：`daily`（std 輪）只評估 `band='std'` 的 signals，`daily-high`
+   只評估 `band='high'`。`notification_outcome`（或其候選查詢）加 band 參數；
+   `notify-preview` 等手動指令預設 None＝全帶（除錯要看得到全貌）。紅燈測試：
+   std 競標急件不會被高價帶輪送出、per-run 上限不被對方帶消耗。
+2. （W2）健康告警帳本分帶：高價帶輪的 alerts 指紋帶 band 標記（如 `{source}@high:{kind}`），
+   std 指紋**不變**（既有帳本列不失效）。紅燈測試：高價帶單輪成功不會清掉 std 的
+   `occurrences` 計數、反向亦然。
+3. （W4）兩帶並行寫同一顆 sqlite：store 連線開 `PRAGMA journal_mode=WAL` 與
+   `busy_timeout=30000`。測試：連線後 PRAGMA 查詢斷言。（WAL 檔屬正常產物，
+   .gitignore 若未涵蓋 `*.db-wal`/`*.db-shm` 一併補。）
+4. （S1）`_report_notify_disabled` 補規則 5 計數。
+
+**驗收**：`make test` 全綠；`git status --short` 範圍佐證。
+
+**已知未做（刻意，記錄在案）**：S2（`_HIGH_ALL_SLOTS` 私有名跨模組 import）屬
+cosmetic，不動；W4 只做 WAL＋timeout，不做跨行程鎖統一——兩帶錯開 15 分鐘＋
+watchdog 25 分鐘上限使重疊窗有限，真撞鎖是大聲失敗（run_high.sh 會通知）。
