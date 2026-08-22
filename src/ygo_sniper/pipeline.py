@@ -155,6 +155,7 @@ def run_source_search(
     *,
     pages: int,
     max_price: float | None = None,
+    min_price: float | None = None,
     category: str | None = None,
     sort: str | None = None,
     seller: str | None = None,
@@ -167,7 +168,17 @@ def run_source_search(
     SearchResult，其他管道照常產出——這是本專案的核心約束。
     FetchError/BlockedError 轉對應健康碼；其他例外一律 PARSER_BROKEN
     （對呼叫端而言「來源程式炸了」與「解析壞了」同一種需要告警的病）。
+
+    `min_price` 是唯一的例外：傳給不支援的來源**直接拋 ValueError**，不落進
+    上面那套「隔離成健康碼」的機制。理由見高價帶掃描 plan 的全域紅線第 3 條——
+    `category` 曾經在不支援的來源上被 `_optional_kwargs` 安靜丟掉一整年
+    （症狀與「今天貨就長這樣」外顯一模一樣），這次不重蹈覆轍：沒有
+    `supports_min_price = True` 就不准假裝這條參數有生效。
     """
+    if min_price is not None and not getattr(src, "supports_min_price", False):
+        raise ValueError(
+            f"{source_name} 不支援 min_price——參數會被靜默丟棄，拒絕執行"
+        )
     site_value = src.site.value
     try:
         if seller is not None:
@@ -176,6 +187,13 @@ def run_source_search(
             # 落進下面的隔離邊界，而不是安靜地退化成關鍵字搜尋。
             return src.search_seller(seller, pages=pages)
         extra = _optional_kwargs(source_name, src, category=category, sort=sort)
+        # min_price 不進 _optional_kwargs、也不無條件傳遞：上面的守衛只保證
+        # 「min_price 不是 None 時」support 一定為真，但其他來源（Yahoo/PayPay/
+        # eBay/Ruten）的 search_detailed 簽名根本沒有這個參數——min_price=None
+        # 時若照樣傳下去，會讓每一條既有管道 TypeError，被隔離邊界吞成假的
+        # PARSER_BROKEN。只在真的要求 min_price 時才加這個 kwarg。
+        if min_price is not None:
+            extra["min_price"] = min_price
         if hasattr(src, "search_detailed"):
             return src.search_detailed(
                 keyword, max_price=max_price, pages=pages, **extra

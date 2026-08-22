@@ -101,6 +101,11 @@ class BuyeeSource:
         self.supports_category = True
         # Mercari 與 PayPay 都實測 status=sold_out 有效（RECON §3/§4）
         self.supports_sold = True
+        # 高價帶掃描（2026-08-22）：Buyee Mercari 的 `price_min` 已對照組實測
+        # 生效且閉區間（見 plan docs/superpowers/plans/2026-08-22-high-band-scan.md）。
+        # 宣告成屬性讓 `run_source_search` 能判斷「這個來源真的吃得下 min_price」，
+        # 而不是無條件傳下去讓不支援的來源安靜漏接（category 那次事故的重演）。
+        self.supports_min_price = True
         # 新上架優先（見 _SITE_SPEC 的排序值註解）。實測與 status=sold_out 併用
         # 不衝突（sold 搜尋 98/98 仍帶 SOLD 標記），所以 comps 那條也一併吃到。
         self.sort_newest = bool((cfg.sources.get(self.name) or {}).get("sort_newest", True))
@@ -112,6 +117,7 @@ class BuyeeSource:
         *,
         page: int = 1,
         max_price: float | None = None,
+        min_price: float | None = None,
         sold: bool = False,
         category: str | None = None,
     ) -> str:
@@ -119,10 +125,16 @@ class BuyeeSource:
 
         max_price 是效率關鍵：由 costs.max_item_price_jpy() 算出來的破口價，
         直接讓平台幫我們過濾掉不可能中的標的，省下大量抓取與解析。
+
+        min_price（高價帶掃描，2026-08-22）：與 max_price 同一寫法、同一位置——
+        `price_min` 已對照組實測生效且閉區間（plan
+        docs/superpowers/plans/2026-08-22-high-band-scan.md）。
         """
         params: dict[str, str | int] = {"lang": "ja", "page": page}
         if max_price:
             params["price_max"] = int(max_price)
+        if min_price:
+            params["price_min"] = int(min_price)
         if category:
             # Buyee 的分類 ID 是純數字（`categories.buyee_mercari.yugioh_ocg: 1152`）。
             # 值以字串在管線裡流動（見 queries.py），這裡原樣送出——Buyee 收字串。
@@ -147,6 +159,7 @@ class BuyeeSource:
         keyword: str,
         *,
         max_price: float | None = None,
+        min_price: float | None = None,
         sold: bool = False,
         pages: int | None = None,
         category: str | None = None,
@@ -157,7 +170,8 @@ class BuyeeSource:
         這裡靜默回空清單的話，被擋三週你只會看到三週的「comps 沒新資料」。
         """
         result = self.search_detailed(
-            keyword, max_price=max_price, sold=sold, pages=pages, category=category
+            keyword, max_price=max_price, min_price=min_price, sold=sold,
+            pages=pages, category=category,
         )
         if not result.listings:
             if result.health is ParseHealth.BLOCKED:
@@ -171,6 +185,7 @@ class BuyeeSource:
         keyword: str,
         *,
         max_price: float | None = None,
+        min_price: float | None = None,
         sold: bool = False,
         pages: int | None = None,
         category: str | None = None,
@@ -178,7 +193,8 @@ class BuyeeSource:
         """與 yahoo.py 同介面：清單＋健康判定一起回，pipeline 據此告警。"""
         pages = pages or int(self.cfg.fetch["max_pages_per_query"])
         first_url = self.build_url(
-            keyword, page=1, max_price=max_price, sold=sold, category=category
+            keyword, page=1, max_price=max_price, min_price=min_price,
+            sold=sold, category=category,
         )
         result = SearchResult(
             source=self.name, site=self.site.value, query=keyword, url=first_url
@@ -187,7 +203,8 @@ class BuyeeSource:
 
         for page in range(1, pages + 1):
             url = self.build_url(
-                keyword, page=page, max_price=max_price, sold=sold, category=category
+                keyword, page=page, max_price=max_price, min_price=min_price,
+                sold=sold, category=category,
             )
             try:
                 html = self.fetcher.get(url)
