@@ -525,9 +525,12 @@ def format_high_band(match, dashboard_url: str) -> str:
     """規則 5：高價帶折價。回答「這筆比同卡行情便宜多少、判定憑的是什麼」。
 
     `price_band_label`（🏷️ 高價帶徽章）與 `high_band_source_note`
-    （「判定來源：同卡成交 × N 筆中位」）**必須走到訊息上**——這是這條規則
-    唯一的證據強度說明，漏掉就等於把 L1/L2 判定降級成看不出來歷的數字
-    （CLAUDE.md 第七節：樣本數不等於證據強度，判定來源要讓使用者自己看見）。
+    （「判定來源：同卡成交 × N 筆估值」，ratio < 0.5 會多帶一行深折價警語）
+    **必須走到訊息上**——這是這條規則唯一的證據強度說明，漏掉就等於把
+    L1/L2 判定降級成看不出來歷的數字（CLAUDE.md 第七節：樣本數不等於證據
+    強度，判定來源要讓使用者自己看見）。`fair_twd`／`price_ratio` 與閘門
+    讀的是同一個 `Estimate` 物件（修正回合 Task 9），不是 `comps.stats_for`
+    的混池。
     """
     row = match.row
     title = textwrap.shorten(str(row.get("title") or ""), width=64, placeholder="…")
@@ -536,7 +539,7 @@ def format_high_band(match, dashboard_url: str) -> str:
         f"到手 <b>NT${row['landed_twd']:,.0f}</b>"
         f"（{row.get('price_native', 0):,.0f} {row.get('currency', '')} via "
         f"{_esc(str(row.get('route') or ''))}）",
-        f"行情中位 NT${match.comps_median_twd:,.0f}（比率 {match.price_ratio:.0%}）",
+        f"估值公允價 NT${match.fair_twd:,.0f}（比率 {match.price_ratio:.0%}）",
         _esc(str(match.high_band_source_note or "")),
         f'<a href="{row["url"]}">看標的</a> ｜ <a href="{dashboard_url}">開 dashboard</a>',
     ]

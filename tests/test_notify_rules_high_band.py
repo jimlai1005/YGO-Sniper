@@ -5,8 +5,14 @@ band='high' 的 signal 只有規則 4（狙擊）與規則 5 有資格評估；�
 `tests/test_notify_rules.py` 全部零改動、全綠就是那條紅線的證據，不在這裡
 重複斷言。
 
-判準只讀 signal 上既有的估價欄位（估價等級、`comps_median`、
-`discount_pct`），見 `notify_rules._match_high_band` 的 docstring。
+修正回合 Task 9（2026-08-22）：閘門與分母改成同一個 `Estimate` 物件
+（`estimate.fair_twd`／`estimate.n_effective`），`comps_median`／
+`discount_pct` 不再進規則 5 的任何判定或文案（那個池子來自
+`comps.stats_for`，不分平台、不分 sale_kind，且會混機構混分數——見
+`notify_rules._match_high_band` 的 docstring）。`hb_row` 仍然把
+`comps_median`／`discount_pct` 寫進 row（真實 signals 列也有這兩欄，
+給其他讀者用），但規則 5 的判準與文案刻意不讀它們，且有專門的紅燈測試
+證明改寫 `comps_median` 不影響命中與文案數字。
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from ygo_sniper.card_snipe import build_notify_context
 from ygo_sniper.notify_rules import (
     DEFAULT_HIGH_BAND_MAX_PRICE_RATIO,
     HIGH_BAND_BADGE,
+    HIGH_BAND_DEEP_DISCOUNT_WARNING,
     RULE_CARD_SNIPE,
     RULE_HIGH_BAND,
     NotifyRules,
@@ -43,14 +50,23 @@ RULES = NotifyRules()
 # ---------------------------------------------------------------------------
 # 估價模型打樁（同 tests/test_notify_rules.py 的作法：測的是規則，不是模型）
 # ---------------------------------------------------------------------------
+#: 預設公允價——與 `hb_row` 的 `ratio` 相乘反推 `landed_twd`，讓 `price_ratio`
+#: 精確等於呼叫端指定的 `ratio`（Task 9：ratio 現在讀 `landed_twd / estimate.fair_twd`，
+#: 不再讀 `comps_median`／`discount_pct`）。
+FAIR_TWD = 9000.0
+
+
 class FakeEstimate:
-    def __init__(self, level: str = "L1"):
+    def __init__(
+        self, level: str = "L1", fair_twd: float | None = FAIR_TWD,
+        n_effective: int = 3,
+    ):
         self.level = level
         self.level_label = "卡名×稀有度×分數" if level in ("L1", "L2") else "稀有度×分數"
-        self.fair_twd = 9000.0
+        self.fair_twd = fair_twd
         self.lo_twd = 3000.0
         self.hi_twd = 12000.0
-        self.n_effective = 3
+        self.n_effective = n_effective
         self.p_worth_buying = 0.9
 
     @property
@@ -67,7 +83,9 @@ class FakeValuator:
 
 
 VALUATOR = FakeValuator()
-_LEVEL_BY_KEY: dict[str, str] = {}
+#: 每個 signal key 可覆寫的 `FakeEstimate` 建構參數（`level`／`fair_twd`／
+#: `n_effective`），沒覆寫就用預設值（L1、9000.0、3）。
+_ESTIMATE_OVERRIDES_BY_KEY: dict[str, dict] = {}
 
 
 @pytest.fixture(autouse=True)
@@ -75,7 +93,7 @@ def _stub_valuation(monkeypatch):
     from ygo_sniper import valuation as val_mod
 
     def _est(_valuator, r):
-        return FakeEstimate(_LEVEL_BY_KEY.get(r["key"], "L1"))
+        return FakeEstimate(**_ESTIMATE_OVERRIDES_BY_KEY.get(r["key"], {}))
 
     def _attrs(_valuator, r):
         payload = json.loads(r.get("payload") or "{}")
@@ -84,7 +102,7 @@ def _stub_valuation(monkeypatch):
     monkeypatch.setattr(val_mod, "estimate_signal_row", _est)
     monkeypatch.setattr(val_mod, "card_attrs_from_row", _attrs)
     yield
-    _LEVEL_BY_KEY.clear()
+    _ESTIMATE_OVERRIDES_BY_KEY.clear()
 
 
 def run(rows, *, rules: NotifyRules = RULES, notified=None, valuator=VALUATOR,
@@ -107,12 +125,19 @@ def hb_row(
     ratio: float = 0.65,
     rarity: str | None = "ultra",
 ) -> dict:
-    """一筆高價帶 signal。`landed_twd` 由 `ratio × comps_median` 反推，
-    `discount_pct` 用與 `domain.Signal.discount_pct` 相同的算式
-    `(median - price) / median` 算出——測試餵的欄位跟 scoring 端真的會
-    寫進去的值同一條公式，不是湊出來的數字。
+    """一筆高價帶 signal。`landed_twd` 由 `ratio × FAIR_TWD` 反推——
+    Task 9 之後規則 5 的比率讀 `landed_twd / estimate.fair_twd`，不再讀
+    `comps_median`／`discount_pct`，所以 `landed_twd` 必須用 `FAIR_TWD`
+    （`FakeEstimate` 的預設公允價）反推，`ratio` 才會精確等於呼叫端指定的值。
+
+    `comps_median`／`comps_n`／`discount_pct` 仍然寫進 row（真實 signals 列
+    本來就有這幾欄），但**刻意**保留可以跟 `FAIR_TWD` 不一致——規則 5 不該讀
+    它們，`test_ratio_is_computed_from_estimate_not_comps_median` 就是拿一個
+    刻意不一致的 `comps_median` 來證明這件事。`discount_pct` 算式沿用
+    `domain.Signal.discount_pct` 的定義（`(median - price) / median`），
+    只是它現在對規則 5 而言是死欄位。
     """
-    price = round(ratio * comps_median, 2) if comps_median else 0.0
+    price = round(ratio * FAIR_TWD, 2)
     discount_pct = (comps_median - price) / comps_median if comps_median else None
     payload = {
         "listing": {"site": "buyee_mercari", "seller_id": "s1"},
@@ -146,8 +171,8 @@ def test_a_high_band_hits_with_l1_and_deep_discount():
     assert [m.rule for m in out.high_band] == [RULE_HIGH_BAND]
     m = out.high_band[0]
     assert m.price_ratio == pytest.approx(0.65)
-    assert m.comps_median_twd == pytest.approx(10000.0)
-    assert m.comps_n == 3
+    assert m.fair_twd == pytest.approx(FAIR_TWD)
+    assert m.sample_n == 3
 
 
 def test_b_high_band_not_sent_when_ratio_above_threshold():
@@ -159,14 +184,48 @@ def test_b_high_band_not_sent_when_ratio_above_threshold():
 def test_c_high_band_not_sent_without_card_specific_level():
     """估價等級 L3（不是這張卡自己的成交）→ 不管折價多深都不推。"""
     r = hb_row(ratio=0.30)  # 折價極深
-    _LEVEL_BY_KEY[r["key"]] = "L3"
+    _ESTIMATE_OVERRIDES_BY_KEY[r["key"]] = {"level": "L3"}
     assert run([r]).high_band == []
 
 
-def test_high_band_not_sent_without_comps_median():
-    """沒有同卡成交可比（`comps_median` 缺值）→ 沒有比價基準，不推。"""
-    r = hb_row(comps_median=None)
+def test_high_band_not_sent_without_fair_twd():
+    """估價過了層級閘門但給不出公允價（`estimate.fair_twd is None`）
+    → 沒有比價基準，不推。取代舊版「`comps_median` 缺值不推」——
+    Task 9 之後 `comps_median` 已經不是規則 5 的比價基準，`fair_twd` 才是。"""
+    r = hb_row(ratio=0.65)
+    _ESTIMATE_OVERRIDES_BY_KEY[r["key"]] = {"fair_twd": None}
     assert run([r]).high_band == []
+
+
+# ---------------------------------------------------------------------------
+# 修正回合 Task 9：閘門與分母同源——ratio 只讀 estimate，comps_median 是死欄位
+# ---------------------------------------------------------------------------
+def test_ratio_is_computed_from_estimate_not_comps_median():
+    """comps_median 刻意寫成跟 estimate.fair_twd 差好幾個數量級——
+    若規則 5 還在讀 comps_median／discount_pct，這一筆的 ratio 會被算成
+    離譜的正數（遠超過門檻）而不推；讀 estimate 才會正確算出 0.65 並命中。
+    這是修復前會紅、修復後會綠的錨定測試（C2 的紅燈證據）。"""
+    r = hb_row(ratio=0.65, comps_median=1.0)
+    out = run([r])
+    assert [m.rule for m in out.high_band] == [RULE_HIGH_BAND]
+    m = out.high_band[0]
+    assert m.price_ratio == pytest.approx(0.65)
+    assert m.fair_twd == pytest.approx(FAIR_TWD)
+
+
+# ---------------------------------------------------------------------------
+# 修正回合 Task 9（W5）：ratio < 0.5 不擋，但文案追加深折價警語
+# ---------------------------------------------------------------------------
+def test_high_band_deep_discount_warning_appears_below_half():
+    r = hb_row(ratio=0.4)
+    m = run([r]).high_band[0]
+    assert HIGH_BAND_DEEP_DISCOUNT_WARNING in m.high_band_source_note
+
+
+def test_high_band_no_deep_discount_warning_between_half_and_threshold():
+    r = hb_row(ratio=0.6)
+    m = run([r]).high_band[0]
+    assert HIGH_BAND_DEEP_DISCOUNT_WARNING not in m.high_band_source_note
 
 
 def test_high_band_ratio_threshold_is_configurable():
@@ -187,9 +246,10 @@ def test_high_band_default_ratio_matches_documented_value():
 # 訊息文案：判定來源＋價格帶徽章（驗收條件 4）
 # ---------------------------------------------------------------------------
 def test_high_band_match_carries_source_note_and_badge():
-    r = hb_row(ratio=0.65, comps_n=7)
+    r = hb_row(ratio=0.65)
+    _ESTIMATE_OVERRIDES_BY_KEY[r["key"]] = {"n_effective": 7}
     m = run([r]).high_band[0]
-    assert m.high_band_source_note == "判定來源：同卡成交 × 7 筆中位"
+    assert m.high_band_source_note == "判定來源：同卡成交 × 7 筆估值"
     assert m.price_band_label == HIGH_BAND_BADGE
     assert "高價帶" in m.price_band_label
 
@@ -417,10 +477,11 @@ def test_format_high_band_message_carries_source_note_and_badge():
     """送出文字含「判定來源：同卡成交 ×」與「高價帶」字樣（驗收條件 2）。"""
     from ygo_sniper.notify import format_high_band
 
-    r = hb_row(ratio=0.65, comps_n=7)
+    r = hb_row(ratio=0.65)
+    _ESTIMATE_OVERRIDES_BY_KEY[r["key"]] = {"n_effective": 7}
     m = run([r]).high_band[0]
     text = format_high_band(m, "http://127.0.0.1:8321")
-    assert "判定來源：同卡成交 × 7 筆中位" in text
+    assert "判定來源：同卡成交 × 7 筆估值" in text
     assert "高價帶" in text
     assert "封印されしエクゾディア" in text
     assert m.row["url"] in text

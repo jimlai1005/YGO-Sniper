@@ -21,19 +21,27 @@ dashboard 回答「有什麼」，推播只回答一件事：「現在有沒有�
       監控名單賣家的新標的，但**連模型都給不出可信估值**。不宣稱它便宜，
       只說「有一件我們估不了的東西」＋為什麼估不了。低音量（每輪有自己的上限）。
 
-  規則 5 高價帶折價（`high_band_discount`，2026-08-22 新增）
+  規則 5 高價帶折價（`high_band_discount`，2026-08-22 新增，2026-08-22 修正回合
+  Task 9 同源化）
       只評估 `signals.band == "high"` 的標的（高價帶掃描，見 `pipeline._scan(
       high_band=True)`）——那一帶單價高、雜訊代價大，只有「相對市場行情深
-      折價＋證據夠強」才值得打斷你。判準只讀 signal 上既有的欄位（估價層級、
-      `comps_median`、`discount_pct`），不另起一套比價（CLAUDE.md 第三節）：
+      折價＋證據夠強」才值得打斷你。**閘門與分母現在是同一個 `Estimate` 物件**
+      （`comps.stats_for` 的 `comps_median`／`discount_pct` 不再進這條規則的
+      任何判定或文案——那個池子不分平台、不分 sale_kind，且對無精確簽章的卡
+      會退化成 `set_code|` 前綴匹配，混進該卡號所有機構所有分數的成交；
+      閘門讀的是 venue-aware 的同卡池，分母若還讀混池就等於沒認證，見
+      CLAUDE.md 第三節、修正回合 Task 9）：
         1. 估價等級 L1/L2（`estimate.has_card_specific_evidence`）——同卡
            成交池撐著，不是整個稀有度的池子。
-        2. 到手成本／comps_median ≤ `high_band_max_price_ratio`（預設
-           0.70，使用者 2026-08-22 定案），比率從既有的 `discount_pct`
-           欄位反推（`ratio = 1 - discount_pct`），不重新做除法——那個欄位
-           在 scoring 端本來就是同一條算式（`domain.Signal.discount_pct`）。
+        2. `landed_twd / estimate.fair_twd ≤ high_band_max_price_ratio`
+           （預設 0.70，使用者 2026-08-22 定案）——分子分母都是 TWD 到手口徑
+           （`estimate_signal_row` 用 signal 自己的 `site` 當目標平台估出
+           `fair_twd`，與 `landed_twd` 同源同基準）。文案的「× N 筆」讀
+           `estimate.n_effective`——L1/L2 時它就是同卡池大小（CLAUDE.md
+           第七節）。
       任一條件不滿足 → 完全靜默（dashboard 仍看得到，這是通知閘門不是
-      過濾）。
+      過濾）。ratio < 0.5（折價異常深）不擋，但文案追加警語——誤殺是靜默的，
+      通知錯了使用者自己一眼可辨（CLAUDE.md 第一節）。
 
   band 閘門（規則 1/2/3 vs 規則 4/5）
       `band` 是 signal 上的欄位（`'std'`／`'high'`，Task 3 落庫）。
@@ -193,11 +201,19 @@ DEFAULT_SELLER_MIN_PEERS = 1
 #: 監控賣家新上架）：≥15% 有 4 筆、≥20% 3 筆、**≥25% 2 筆**、≥30% 1 筆。
 DEFAULT_SELLER_MODEL_MIN_DISCOUNT = 0.25
 
-#: 規則 5 的折價門檻（到手成本 / comps_median，0.70 ＝ ≤7 折才推）。
+#: 規則 5 的折價門檻（`landed_twd / estimate.fair_twd`，0.70 ＝ ≤7 折才推）。
 #: 使用者 2026-08-22 定案——高價帶單價高，雜訊代價大，門檻刻意比規則 3
 #: 的同儕折價（15%＝0.85）嚴很多：規則 5 沒有同儕相對這條強證據可用，
 #: 只能靠「便宜夠多」自己撐住信心。
 DEFAULT_HIGH_BAND_MAX_PRICE_RATIO = 0.70
+
+#: 規則 5 的「折價異常深」警語門檻（修正回合 W5，2026-08-22）。ratio < 0.5
+#: **不擋**——寧可誤放讓使用者自己看一眼，也不要靜默漏掉真的深折價
+#: （CLAUDE.md 第一節：誤殺是靜默的，雜訊是看得見的）。只在文案追加警語。
+HIGH_BAND_DEEP_DISCOUNT_RATIO = 0.5
+HIGH_BAND_DEEP_DISCOUNT_WARNING = (
+    "⚠️ 折價異常深，中位可能被離群樣本撐起——下手前自己開成交頁看一眼"
+)
 
 #: 規則 3b（估不了）一輪最多送幾則。**這裡的 0 ＝ 一則都不送**（與
 #: `max_items_per_run` 的 0＝不限**相反**）：3b 是「沒有判斷、只是叫你看一眼」的
@@ -492,10 +508,13 @@ class Match:
     grade: float | None = None
     era_evidence: tuple[str, ...] = ()
     #: --- 規則 5 用（高價帶折價）------------------------------------------
-    #: 行情中位（`row['comps_median']`）與這一批成交的筆數（`row['comps_n']`）。
-    comps_median_twd: float | None = None
-    comps_n: int | None = None
-    #: 到手成本 / comps_median（≤1 才有機會過門檻）。
+    #: 公允價與同卡池大小——**與閘門同一個 `Estimate` 物件**
+    #: （`estimate.fair_twd` / `estimate.n_effective`），不是 `comps.stats_for`
+    #: 的混池（修正回合 Task 9：C2＋W5，見模組頂註規則 5 段落）。
+    fair_twd: float | None = None
+    sample_n: int | None = None
+    #: 到手成本（`landed_twd`）/ 公允價（`fair_twd`）——同一顆 Estimate、同 TWD
+    #: 基準（≤1 才有機會過門檻）。
     price_ratio: float | None = None
     #: 訊息文案：「判定來源：同卡成交 × N 筆中位」。**這一欄必須走到訊息上**
     #: （比照規則 3 把 `judgement_source` 走上訊息的作法）。
@@ -1128,20 +1147,24 @@ def _match_high_band(
     rules: NotifyRules,
     valuator: Any,
 ) -> tuple[Match | None, Skip | None]:
-    """高價帶折價（band='high' 專屬）。只讀 signal 上既有的估價欄位，不另起
-    一套比價（CLAUDE.md 第三節）——兩道閘門都要過：
+    """高價帶折價（band='high' 專屬）。**閘門與分母是同一個 `Estimate` 物件**
+    （修正回合 Task 9 同源化，CLAUDE.md 第三節）——`comps.stats_for` 的
+    `comps_median`／`discount_pct` 不進這條規則的任何判定或文案：那個池子
+    不分平台、不分 sale_kind，且對無精確簽章的卡會退化成 `set_code|` 前綴
+    匹配，混進該卡號所有機構所有分數的成交——閘門認證的是 venue-aware 的
+    同卡池，分母若還讀混池就等於沒認證。兩道閘門都要過：
 
       1. 估價等級 L1/L2（`estimate.has_card_specific_evidence`，與規則 2
          同一支 `estimate_signal_row` 拿到的同一顆 `estimate`）——同卡成交池
          撐著，不是整個稀有度的池子。
-      2. 到手成本 / comps_median ≤ `high_band_max_price_ratio`。比率從
-         signal 既有的 `discount_pct` 欄位反推（`ratio = 1 - discount_pct`），
-         不重新拿 landed_twd／comps_median 相除——那兩個數字在 scoring 端
-         本來就是同一條算式（`domain.Signal.discount_pct`），這裡只是換一種
-         讀法，不是另一套判準。
+      2. `landed_twd / estimate.fair_twd ≤ high_band_max_price_ratio`。
+         兩者都是 TWD 到手口徑、同一顆 `estimate`（`estimate_signal_row`
+         用 signal 自己的 `site` 當目標平台，見該函式 docstring）——同源
+         同基準，不混池。
 
     任一條件不滿足 → 完全靜默（不記 skipped：這不是「排除」，是沒過門檻，
-    與規則 2／3 沒過折價門檻的既有慣例一致）。
+    與規則 2／3 沒過折價門檻的既有慣例一致）。ratio < 0.5（折價異常深）
+    不擋，但文案追加警語（W5：誤殺是靜默的，通知錯了使用者自己一眼可辨）。
     """
     from .valuation import estimate_signal_row
 
@@ -1154,36 +1177,35 @@ def _match_high_band(
     if not estimate.has_card_specific_evidence:
         return None, None  # L3/L0：只有整個稀有度的池子撐著，不夠格
 
-    comps_median = row.get("comps_median")
-    discount_pct = row.get("discount_pct")
-    if comps_median is None or discount_pct is None:
-        return None, None  # 沒有同卡成交可比，沒有比價基準
+    fair_twd = estimate.fair_twd
+    landed_twd = row.get("landed_twd")
+    if fair_twd is None or float(fair_twd) <= 0:
+        return None, None  # 模型過了層級閘門但給不出公允價，沒有比價基準
+    if landed_twd is None or float(landed_twd) <= 0:
+        return None, None  # 沒有到手成本，沒有比價基準
 
-    ratio = 1.0 - float(discount_pct)
+    ratio = float(landed_twd) / float(fair_twd)
     if ratio > rules.high_band_max_price_ratio:
         return None, None  # 沒過門檻不是「被排除」，不必列進 skipped 洗版
 
-    comps_n = int(row.get("comps_n") or 0)
-    missing = _missing_fields(
-        {
-            "標題": title,
-            "連結": row.get("url"),
-            "到手成本": row.get("landed_twd"),
-            "行情中位": comps_median,
-        }
-    )
+    missing = _missing_fields({"標題": title, "連結": row.get("url")})
     if missing:
         return None, Skip(key, title, RULE_HIGH_BAND, f"欄位缺值不送：{missing}")
+
+    sample_n = int(estimate.n_effective)
+    source_note = f"判定來源：同卡成交 × {sample_n} 筆估值"
+    if ratio < HIGH_BAND_DEEP_DISCOUNT_RATIO:
+        source_note = f"{source_note}\n{HIGH_BAND_DEEP_DISCOUNT_WARNING}"
 
     return Match(
         key=key,
         rule=RULE_HIGH_BAND,
         row=row,
         estimate=estimate,
-        comps_median_twd=float(comps_median),
-        comps_n=comps_n,
+        fair_twd=float(fair_twd),
+        sample_n=sample_n,
         price_ratio=ratio,
-        high_band_source_note=f"判定來源：同卡成交 × {comps_n} 筆中位",
+        high_band_source_note=source_note,
         price_band_label=HIGH_BAND_BADGE,
     ), None
 
@@ -1357,6 +1379,8 @@ __all__ = [
     "DEFAULT_SELLER_MODEL_MIN_DISCOUNT",
     "DEFAULT_SELLER_UNPRICED_MAX_PER_RUN",
     "HIGH_BAND_BADGE",
+    "HIGH_BAND_DEEP_DISCOUNT_RATIO",
+    "HIGH_BAND_DEEP_DISCOUNT_WARNING",
     "RULE_AUCTION_URGENT",
     "RULE_CARD_SNIPE",
     "RULE_HIGH_BAND",
