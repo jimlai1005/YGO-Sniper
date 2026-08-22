@@ -189,6 +189,33 @@ queries:
     sources: [ebay]
 
 # ---------------------------------------------------------------------------
+# 高價帶掃描（2026-08-22）。事故驅動：m11400671293（PSA9 初期エクゾディア
+# ¥22,222，約市價 6 折）被 price_max=8,624 在伺服器端擋掉，本地零痕跡。
+# 這一帶的下限**不寫在這裡**——它動態等於低價帶的上限（_price_ceiling_jpy，
+# 同一個函式同一次呼叫的值），匯率漂移時兩帶永遠無縫相接、不重疊。
+# 只在 `ygo-sniper daily-high`／`scan-high` 跑（獨立排程，時段與低價帶錯開）；
+# 推播另有嚴格閘門（≤7 折＋L1/L2 證據），見 notify_rules 規則 5。
+# 關鍵字沿用低價帶 Mercari 實測覆蓋最好的四條；上線後照 recall 方法論
+# 量淨增量再修剪，不憑印象加減。
+high_band:
+  max_price_jpy: 50000
+  queries:
+    - name: "高價帶 PSA 初期（分類）"
+      keyword: "PSA 初期"
+      category: yugioh
+      sources: [buyee_mercari]
+    - name: "高價帶 PSA 初期（無分類保險）"
+      keyword: "遊戯王 PSA 初期"
+      sources: [buyee_mercari]
+    - name: "高價帶 PSA 1999"
+      keyword: "PSA 1999"
+      sources: [buyee_mercari]
+    - name: "高價帶 ARS 初期（分類）"
+      keyword: "ARS 初期"
+      category: yugioh
+      sources: [buyee_mercari]
+
+# ---------------------------------------------------------------------------
 # 行情累積專用的「已售出」查詢（comps）。**與上面的 queries 是兩件事**：
 # queries 掃在架標的（要新、要快、每小時跑）；這裡累積成交價（要廣、要涵蓋
 # 整個屬性空間、一天跑一兩次就好）。
