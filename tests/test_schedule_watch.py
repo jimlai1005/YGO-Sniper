@@ -508,6 +508,52 @@ def test_failed_push_keeps_pending_for_retry(pipeline, monkeypatch):
     assert pipeline.store.get_meta(PENDING_ALERT_KEY) != ""  # 但沒清帳
 
 
+def test_high_band_alert_delivery_clears_high_key_not_low_key(pipeline, monkeypatch):
+    """主線程追加必修（Task 6 builder 發現）：`daily-high` 送達的告警要清
+    `PENDING_ALERT_KEY_HIGH`，不能誤清低價帶的 `PENDING_ALERT_KEY`——否則
+    高價帶自己的 pending 永遠不會被消耗，「先前 N 次未送達」無限疊加。"""
+    import ygo_sniper.cli as cli_mod
+
+    # 低價帶先留一筆看似無關的 pending，確保它在高價帶送達後原封不動。
+    pipeline.store.set_meta(PENDING_ALERT_KEY, "低價帶自己的舊 pending")
+
+    pipeline.store.set_meta(RUN_STARTED_KEY_HIGH, _ANCIENT_START)
+    pipeline.store.set_meta(RUN_FINISHED_KEY_HIGH, _ANCIENT_FINISH)
+    pipeline._update_schedule_state(dry_run=False, watch_only=False, high_band=True)
+    assert pipeline._schedule_alert is not None and "漏跑" in pipeline._schedule_alert
+    pipeline._finish_schedule_state(dry_run=False, watch_only=False, high_band=True)
+
+    fake = _FakeNotifier(ok=True)
+    monkeypatch.setattr(pipeline, "notifier", fake)
+    cli_mod._send_schedule_alert(pipeline)
+
+    assert fake.sent == [pipeline._schedule_alert]
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY_HIGH) == ""  # 高價帶帳清了
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY) == "低價帶自己的舊 pending"  # 低價帶帳沒被動到
+
+
+def test_low_band_alert_delivery_clears_low_key_not_high_key(pipeline, monkeypatch):
+    """反向情境：`daily`／`scan`（`high_band=False`，既有行為）送達告警時，
+    只清 `PENDING_ALERT_KEY`，不動高價帶自己的 `PENDING_ALERT_KEY_HIGH`。"""
+    import ygo_sniper.cli as cli_mod
+
+    pipeline.store.set_meta(PENDING_ALERT_KEY_HIGH, "高價帶自己的舊 pending")
+
+    pipeline.store.set_meta(RUN_STARTED_KEY, _ANCIENT_START)
+    pipeline.store.set_meta(RUN_FINISHED_KEY, _ANCIENT_FINISH)
+    pipeline._update_schedule_state(dry_run=False, watch_only=False, high_band=False)
+    assert pipeline._schedule_alert is not None and "漏跑" in pipeline._schedule_alert
+    pipeline._finish_schedule_state(dry_run=False, watch_only=False, high_band=False)
+
+    fake = _FakeNotifier(ok=True)
+    monkeypatch.setattr(pipeline, "notifier", fake)
+    cli_mod._send_schedule_alert(pipeline)
+
+    assert fake.sent == [pipeline._schedule_alert]
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY) == ""  # 低價帶帳清了
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY_HIGH) == "高價帶自己的舊 pending"  # 高價帶帳沒被動到
+
+
 # ---------------------------------------------------------------------------
 # Fix A：watchdog_message——純函式，把 run_daily.sh 寫的帳本 dict 翻成一句話。
 #

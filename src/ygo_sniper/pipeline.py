@@ -259,6 +259,12 @@ class Pipeline:
         #: 這輪還沒跑過 scan()——初始化在這裡而不是只在 scan() 裡設，
         #: 讓呼叫端用 `getattr` 都不必也能安全讀到 None，見 schedule_watch.py）。
         self._schedule_alert: str | None = None
+        #: `_schedule_alert` 是哪一本帳偵測出來的（`PENDING_ALERT_KEY` 或
+        #: `PENDING_ALERT_KEY_HIGH`）——送達後 `cli._send_schedule_alert`
+        #: 靠這個決定清哪把鍵，不能靠猜（兩本帳不能合併，CLAUDE.md 第五節）。
+        #: 預設低價帶鍵，維持 `daily`／`scan`（`high_band=False`）呼叫路徑的
+        #: 既有行為——這兩者從來不會設成別的值。
+        self._schedule_alert_pending_key: str = PENDING_ALERT_KEY
 
     # ------------------------------------------------------------------
     def valuator(self):
@@ -886,6 +892,11 @@ class Pipeline:
         finished_key = RUN_FINISHED_KEY_HIGH if high_band else RUN_FINISHED_KEY
         pending_key = PENDING_ALERT_KEY_HIGH if high_band else PENDING_ALERT_KEY
         slots = _HIGH_ALL_SLOTS if high_band else None
+        # 設在 try 之外：即使下面偵測本身出例外，這一輪是哪一帶跑的仍然
+        # 確定——`_send_schedule_alert` 要清哪把鍵不該因為偵測器壞掉而
+        # 退回猜測（本方法整段包 try/except 是給偵測邏輯本身用的，不是
+        # 給「這輪屬於哪一帶」這個事實用的，那件事在方法一開頭就已知）。
+        self._schedule_alert_pending_key = pending_key
         try:
             now = datetime.now()
             detected = schedule_health(

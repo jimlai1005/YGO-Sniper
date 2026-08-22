@@ -295,12 +295,22 @@ def _send_schedule_alert(pipe: Pipeline) -> None:
 
     用 `getattr` 防呆：只有 `scan()` 真的跑過（且不是 dry-run／watch-scan）
     才會設 `_schedule_alert` 這個屬性。
+
+    **清帳一定要清「偵測出這則告警的那本帳」**：高價帶輪（`daily-high`）
+    的告警是 `_update_schedule_state(high_band=True)` 用
+    `PENDING_ALERT_KEY_HIGH` 偵測出來的，送達後若清成低價帶的
+    `PENDING_ALERT_KEY`，會清掉不相干的那把鍵——高價帶自己的 pending
+    永遠不會被消耗，於是「先前 N 次未送達」無限疊加（兩本帳不能合併，
+    CLAUDE.md 第五節）。`pipe._schedule_alert_pending_key` 由
+    `_update_schedule_state` 在算 `pending_key` 的同一刻寫下，跟
+    `_schedule_alert` 本身同源，不用另外猜這一輪是哪一帶。
     """
     schedule_alert = getattr(pipe, "_schedule_alert", None)
     if not schedule_alert:
         return
+    pending_key = getattr(pipe, "_schedule_alert_pending_key", PENDING_ALERT_KEY)
     if pipe.notifier.send_alert(schedule_alert):
-        pipe.store.set_meta(PENDING_ALERT_KEY, "")
+        pipe.store.set_meta(pending_key, "")
         console.print("[yellow]已推播排程監督告警[/yellow]")
     else:
         console.print("[red]排程監督告警送出失敗——留在 pending 帳裡，下一輪會一併重送[/red]")
