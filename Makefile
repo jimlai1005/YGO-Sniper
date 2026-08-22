@@ -1,4 +1,4 @@
-.PHONY: setup test lint daily scan comps serve schedule unschedule logs clean
+.PHONY: setup test lint daily scan comps serve schedule unschedule schedule-dashboard unschedule-dashboard logs clean
 
 PY := .venv/bin/python
 SNIPER := .venv/bin/ygo-sniper
@@ -51,6 +51,18 @@ schedule:
 unschedule:
 	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.plist
 	rm -f ~/Library/LaunchAgents/com.jim.ygosniper.plist
+
+# dashboard 常駐（開機/登入自動起，掛了自動重啟），跟上面的 daily 排程分開裝卸
+schedule-dashboard:
+	chmod +x scripts/run_dashboard.sh
+	cp scripts/com.jim.ygosniper.dashboard.plist ~/Library/LaunchAgents/
+	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.dashboard.plist 2>/dev/null || true
+	launchctl load ~/Library/LaunchAgents/com.jim.ygosniper.dashboard.plist
+	@echo "✅ dashboard 已常駐 → http://127.0.0.1:8321 。用 launchctl list | grep ygosniper.dashboard 確認"
+
+unschedule-dashboard:
+	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.dashboard.plist
+	rm -f ~/Library/LaunchAgents/com.jim.ygosniper.dashboard.plist
 
 logs:
 	@tail -n 60 data/logs/daily-$$(date +%Y%m%d).log 2>/dev/null || echo "今天還沒有 log"
