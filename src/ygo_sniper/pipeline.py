@@ -411,6 +411,7 @@ class Pipeline:
         *,
         pages: int | None = None,
         price_ceiling: bool = True,
+        high_band_max: float | None = None,
         sort: str | None = None,
         category: str | None = None,
     ) -> SearchResult:
@@ -430,10 +431,21 @@ class Pipeline:
         canary 問的是「這條管道還活著嗎」——把商業過濾套上去，回傳筆數就會
         跟著平台當下的價格分布跳動，答案只會更不穩定（這正是 parsed_count
         那次假警報的同一種錯：拿商業結果當健康指標）。
+
+        `high_band_max` 不為 None 時，這一趟改成高價帶查詢：下限沿用
+        `_price_ceiling_jpy(src.site)`——**與低價帶上限同一個函式呼叫**，
+        高低兩帶的邊界永遠無縫相接、不重疊（高價帶掃描 plan 的同源條款）；
+        上限就是這個參數本身。此時 `price_ceiling` 不生效——一趟查詢不能
+        同時是「無上限」與「高價帶」。
         """
         pages = pages if pages is not None else self.cfg.max_pages_for(source_name)
         try:
-            max_price = self._price_ceiling_jpy(src.site) if price_ceiling else None
+            if high_band_max is not None:
+                min_price = self._price_ceiling_jpy(src.site)
+                max_price = high_band_max
+            else:
+                min_price = None
+                max_price = self._price_ceiling_jpy(src.site) if price_ceiling else None
         except Exception as exc:  # noqa: BLE001 - 隔離邊界：算上限失敗不該炸掉整輪掃描
             return SearchResult(
                 source=source_name, site=src.site.value, query=keyword,
@@ -442,11 +454,18 @@ class Pipeline:
             )
         return run_source_search(
             source_name, src, keyword,
-            pages=pages, max_price=max_price, category=category, sort=sort,
+            pages=pages, max_price=max_price, min_price=min_price,
+            category=category, sort=sort,
         )
 
     def _scan_source_passes(
-        self, source_name: str, src, keyword: str, *, category: str | None = None
+        self,
+        source_name: str,
+        src,
+        keyword: str,
+        *,
+        category: str | None = None,
+        high_band_max: float | None = None,
     ) -> list[SearchResult]:
         """一個 (source, query) 的**全部抓取趟數**。
 
@@ -456,7 +475,12 @@ class Pipeline:
         「一切正常」（`_merge_summary` 取最嚴重的那個）。
         """
         def single() -> list[SearchResult]:
-            return [self._scan_source(source_name, src, keyword, category=category)]
+            return [
+                self._scan_source(
+                    source_name, src, keyword,
+                    category=category, high_band_max=high_band_max,
+                )
+            ]
 
         passes = getattr(src, "scan_passes", None)
         if not callable(passes):
@@ -485,6 +509,7 @@ class Pipeline:
         first = self._scan_source(
             source_name, src, keyword,
             pages=plan[0].pages, sort=plan[0].mode, category=category,
+            high_band_max=high_band_max,
         )
         results = [first]
         if len(plan) == 1:
@@ -502,7 +527,8 @@ class Pipeline:
         )
         results.extend(
             self._scan_source(
-                source_name, src, keyword, pages=p.pages, sort=p.mode, category=category
+                source_name, src, keyword, pages=p.pages, sort=p.mode, category=category,
+                high_band_max=high_band_max,
             )
             for p in plan[1:]
         )
@@ -769,6 +795,7 @@ class Pipeline:
         trigger: str = "cli",
         watch_only: bool = False,
         watch_force: bool = False,
+        high_band: bool = False,
     ) -> dict:
         """一輪掃描。**掃描狀態的開始／結束一律在這裡落**，CLI 與 dashboard 共用。
 
@@ -784,6 +811,12 @@ class Pipeline:
         再補一個完成戳記，見 `_update_schedule_state`／`_finish_schedule_state`）。
         `--dry-run` 的語意是「只掃不寫庫」、`watch_only` 是 `watch-scan` 的獨立
         節奏（見那兩個方法的 docstring），兩者都不吃邊緣觸發、不動基準。
+
+        `high_band` 是高價帶掃描（¥8,624～50,000，只掛 buyee_mercari，見高價帶
+        掃描 plan）的旗子，語意見 `_scan` docstring。**排程空窗偵測目前仍記在
+        低價帶的基準鍵上**——高價帶還沒有自己的 CLI 入口與 launchd 排程
+        （分別是該 plan 的 Task 5／Task 6），這兩個方法要不要為它另開一組基準鍵
+        是 Task 6 的範圍，這裡先不動，避免搶先猜錯 Task 6 的鍵名設計。
         """
         started = self.store.begin_scan(trigger=trigger, dry_run=dry_run)
         self._update_schedule_state(dry_run=dry_run, watch_only=watch_only)
@@ -791,6 +824,7 @@ class Pipeline:
             result = self._scan(
                 started, skip_comps=skip_comps, dry_run=dry_run,
                 watch_only=watch_only, watch_force=watch_force,
+                high_band=high_band,
             )
         except BaseException as exc:  # noqa: BLE001 - 落狀態後原樣往外拋，見 docstring
             self.store.finish_scan(started, error=f"{type(exc).__name__}: {exc}")
@@ -969,6 +1003,7 @@ class Pipeline:
         dry_run: bool = False,
         watch_only: bool = False,
         watch_force: bool = False,
+        high_band: bool = False,
     ) -> dict:
         """`watch_only=True`：只跑賣家輪替監控那一段（`ygo-sniper watch-scan`）。
 
@@ -979,8 +1014,28 @@ class Pipeline:
         行情回補——回補的需求端雖然也吃監控賣家的定價上架（見 _refill_comps），
         但它會打真實網路請求並寫節流帳與 comps，那是 `daily`/`scan` 完整輪的事；
         `watch-scan` 是手動輔助指令，維持零回補請求的預算不因本次來源擴充而變。
+
+        `high_band=True`：高價帶掃描（¥8,624～50,000，只掛 buyee_mercari，見
+        高價帶掃描 plan）。同樣是同一支 `_scan` 的一面旗——候選判定／估價／
+        落庫走同一份程式碼，band 專屬行為全部鎖在旗子後面：
+        - 查詢改用 `load_high_band_queries`（watchlist 的 `high_band:` 區塊）；
+          區塊未設定時印警告，`base_queries` 為空，其餘步驟自然變成空跑一輪。
+        - 每條查詢的下限＝`_price_ceiling_jpy(src.site)`（與低價帶上限**同一個
+          函式**，同源條款），上限＝`high_band.max_price_jpy`。
+        - `skip_comps` 語意等同 `watch_only`：不 refresh，只 `load_from_store`
+          （7 折判定要用行情，但這一輪不該再花請求預算去更新它）。
+        - 不跑賣家輪替監控、不跑 canary、不跑需求驅動回補——那些是低價帶
+          完整輪的事，高價帶輪要維持獨立的、與低價帶互不干擾的請求預算。
+        - 狙擊比對照跑：`_collect_candidates` 內建掛鉤，對任何管道發現的
+          listing 一視同仁，高價帶正是 ¥8,624 以上狙擊卡唯一的發現管道。
+        - 在架觀測批次帶 `exit_scope=False`：高價帶只看得到「¥8,624 以上」
+          這個子集，若讓它建地平線，同一關鍵字的低價帶標的（价格帶外，
+          天生不會出現在這一批）會被誤讀成消失——與賣家頁監控
+          `exit_scope=False` 是同一個道理（`store.record_listing_scan`
+          docstring）。批次本身仍然照常落帳（`healthy`／`rows` 不變），
+          只是不貢獻、也不受地平線判定。
         """
-        skip_comps = skip_comps or watch_only
+        skip_comps = skip_comps or watch_only or high_band
         comps_added = 0 if skip_comps else self.refresh_comps()
         if skip_comps:
             self.comps.load_from_store()
@@ -997,16 +1052,29 @@ class Pipeline:
         #: healthy 旗標**——離場判定要用它決定「這一批的缺席算不算證據」。
         obs_batches: list[dict] = []
 
-        # 狙擊卡自己的關鍵字查詢：等一根已知的針，就得主動去找它，不能只靠
-        # watchlist 那些廣撒查詢碰巧掃到。來源沿用既有查詢的聯集（不猜來源名）；
-        # base 是空的（watch_only）就不跑——那一輪根本沒有關鍵字管道。
-        base_queries = load_queries(wl) if not watch_only else []
-        if base_queries:
-            from .card_snipe import scan_queries
+        # 高價帶查詢集與上限：`load_high_band_queries` 未設定時回 (None, [])，
+        # `high_cap` 維持 None、`base_queries` 為空——後面每一段都天然變成
+        # 空跑（不影響 skip_comps／賣家監控／canary 的旗子判斷，那些已經
+        # 直接看 `high_band` 這個布林，不看查詢集是否為空）。
+        high_cap: float | None = None
+        if high_band:
+            from .queries import load_high_band_queries
 
-            base_queries = base_queries + scan_queries(
-                self._snipe_matchers(), base_queries
-            )
+            high_cap, base_queries = load_high_band_queries(wl)
+            if high_cap is None:
+                print("[scan] 高價帶未設定（watchlist 缺 high_band 區塊或 "
+                      "max_price_jpy 無效），本輪空手而回")
+        else:
+            # 狙擊卡自己的關鍵字查詢：等一根已知的針，就得主動去找它，不能只靠
+            # watchlist 那些廣撒查詢碰巧掃到。來源沿用既有查詢的聯集（不猜來源
+            # 名）；base 是空的（watch_only）就不跑——那一輪根本沒有關鍵字管道。
+            base_queries = load_queries(wl) if not watch_only else []
+            if base_queries:
+                from .card_snipe import scan_queries
+
+                base_queries = base_queries + scan_queries(
+                    self._snipe_matchers(), base_queries
+                )
         for query in base_queries:
             for source_name in query.sources:
                 src = self.sources.get(source_name)
@@ -1022,7 +1090,8 @@ class Pipeline:
                 # 多趟抓取（Yahoo：新着＋即將結標）。兩趟合併去重之後才進評分——
                 # 同一個標的兩趟都出現時，它是一筆，不是兩筆。
                 results = self._scan_source_passes(
-                    source_name, src, query.keyword, category=category
+                    source_name, src, query.keyword, category=category,
+                    high_band_max=high_cap if high_band else None,
                 )
                 listings = dedupe_listings(results)
                 for i, res in enumerate(results):
@@ -1042,6 +1111,10 @@ class Pipeline:
                     "source": source_name,
                     "site": src.site.value,
                     "healthy": healthy,
+                    # 高價帶只看得到價格帶內的子集，不能貢獻地平線（docstring
+                    # 「高價帶」段）；標準路徑維持預設 True，寫成顯式值只是
+                    # 讓兩條路徑在同一行都看得到彼此的差異，行為零改變。
+                    "exit_scope": not high_band,
                     "rows": self._collect_candidates(listings, source_name, candidates),
                 })
 
@@ -1049,18 +1122,28 @@ class Pipeline:
         # 產出的候選與觀測列直接併進同一條管線，下面的估價／評分／落庫一視同仁。
         # 先收在自己的清單再併進主清單：refill 要分得出「監控賣家的定價上架」
         # 這個需求來源（見下方 _refill_comps 的呼叫），靠的就是這條分界。
+        # high_band 不跑：那是低價帶完整輪的事，高價帶輪要維持獨立的請求預算
+        # （見 _scan docstring「高價帶」段）。
         watch_candidates: list = []
-        watch_batches, watch_report = self._scan_watched_sellers(
-            watch_candidates, force=watch_force
-        )
+        if high_band:
+            watch_batches, watch_report = [], {
+                "enabled": False, "batch": None,
+                "reason": "高價帶掃描不跑賣家輪替監控", "sellers": [],
+                "skipped": [], "requests": 0, "found": 0, "candidates": 0,
+            }
+        else:
+            watch_batches, watch_report = self._scan_watched_sellers(
+                watch_candidates, force=watch_force
+            )
         candidates.extend(watch_candidates)
         obs_batches.extend(watch_batches)
         scanned += watch_report.get("found", 0)
 
         # 掃描結束才跑 canary：正常 query 已經產出的來源健康是免費的證據，
         # canary 只補「全部 query 都 0 筆，到底是沒貨還是瞎了」這個缺口。
-        # watch_only 不跑：它問的是「關鍵字管道還活著嗎」，而這一輪根本沒跑關鍵字。
-        for res in ([] if watch_only else self._run_canaries(source_summary)):
+        # watch_only／high_band 不跑：前者問的是「關鍵字管道還活著嗎」而這一輪
+        # 根本沒跑關鍵字；後者是低價帶完整輪的健康檢查，高價帶輪不重複打。
+        for res in ([] if (watch_only or high_band) else self._run_canaries(source_summary)):
             search_results.append(res)
             self._merge_summary(source_summary, res)
 
@@ -1126,8 +1209,11 @@ class Pipeline:
         obs_pruned = 0
         restored: dict = {"restored": 0, "keys": []}
         if not dry_run:
+            # 後見覆蓋前見：`band` 記的是「最後一次看到它的那一輪屬於哪個帶」，
+            # 邊界隨匯率漂移時，這是唯一穩定的語意（高價帶掃描 plan Task 3）。
+            band = "high" if high_band else "std"
             for sig in signals:
-                if self.store.upsert_signal(sig):
+                if self.store.upsert_signal(sig, band=band):
                     new_count += 1
             self.store.snapshot(
                 [(s.listing.key, s.best_route.landed_twd) for s in signals]

@@ -62,7 +62,13 @@ CREATE TABLE IF NOT EXISTS signals (
     -- 是**帳本**：實證下架後又重新上架的次數——這才是議價訊號，「已復活」
     -- 徽章綁它。restored_count 是舊誤判帳（清除功能自己的誤殺率），語意不動。
     cleared_verified        INTEGER NOT NULL DEFAULT 0,
-    verified_restored_count INTEGER NOT NULL DEFAULT 0
+    verified_restored_count INTEGER NOT NULL DEFAULT 0,
+    -- 高價帶掃描（2026-08-22）。'std' = 一般掃描、'high' = 高價帶（¥8,624～
+    -- 50,000，只掛 buyee_mercari）。後見覆蓋前見：每次 upsert 寫最後一次
+    -- 看到它的那一輪所屬的帶——邊界隨匯率漂移，這是唯一穩定的語意。
+    -- notify_rules 用它決定一個 signal 有資格評估哪些規則（見高價帶掃描
+    -- plan Task 4）；band 缺失或 'std' 時行為與這個欄位出現之前完全相同。
+    band                    TEXT DEFAULT 'std'
 );
 CREATE INDEX IF NOT EXISTS idx_signals_state ON signals(state);
 CREATE INDEX IF NOT EXISTS idx_signals_score ON signals(score DESC);
@@ -459,6 +465,10 @@ _SIGNALS_MIGRATE_COLUMNS: dict[str, str] = {
     # SQLite 的 ADD COLUMN 會用 DEFAULT 回填既有列，舊列直接是 0 不是 NULL。
     "cleared_verified": "INTEGER NOT NULL DEFAULT 0",
     "verified_restored_count": "INTEGER NOT NULL DEFAULT 0",
+    # 高價帶掃描（2026-08-22，見 _SCHEMA 的欄位註解）。DEFAULT 'std'：ADD COLUMN
+    # 會用它回填既有列，舊列直接是 'std' 不是 NULL——與新寫入端同一個語意
+    # （「一般掃描」只有一種表示法），notify_rules 的 band 閘門才不必額外處理 NULL。
+    "band": "TEXT DEFAULT 'std'",
 }
 
 
@@ -613,8 +623,14 @@ class Store:
             conn.close()
 
     # ------------------------------------------------------------------
-    def upsert_signal(self, sig: Signal) -> bool:
-        """回傳 True 代表這是新標的（值得推播）。"""
+    def upsert_signal(self, sig: Signal, *, band: str = "std") -> bool:
+        """回傳 True 代表這是新標的（值得推播）。
+
+        `band`：'std'（一般掃描）或 'high'（高價帶掃描，見高價帶掃描 plan
+        Task 3）。**每次 upsert 都覆寫**——後見覆蓋前見，語意見 `_SCHEMA`
+        的 `band` 欄位註解；呼叫端（`Pipeline._scan`）依 `high_band` 旗決定
+        傳哪個值，這裡不猜。
+        """
         key = sig.listing.key
         now = _now_iso()
         with self._conn() as c:
@@ -645,6 +661,7 @@ class Store:
                 "reason": sig.reason,
                 "payload": json.dumps(sig.to_dict(), default=str, ensure_ascii=False),
                 "last_seen": now,
+                "band": band,
             }
 
             if existing:
