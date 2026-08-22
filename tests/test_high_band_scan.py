@@ -11,9 +11,12 @@
    需求驅動回補，那些是低價帶完整輪的事。
 3. band 欄位——高價帶輪落庫 `band='high'`；一般輪 `band='std'`；舊庫
    （沒有 band 欄位）遷移後既有列補 `'std'`（additive migration，重跑安全）。
-4. 地平線——高價帶批次帶 `exit_scope=False`：它只看得到價格帶內的子集，
-   不能拿它建地平線，否則帶外、這一輪天生缺席的標的會被誤判成離場
-   （比照 `tests/test_venue_study.py` 既有離場測試的寫法）。
+4. 地平線分帶——**2026-08-22 reviewer Critical 1 修法後**：高價帶批次帶
+   `exit_scope=True`、`band='high'`；`store.record_listing_scan` 的地平線
+   判定分組鍵是 (site, band)，所以高價帶批次能為自己的 band 建地平線，
+   同時不會誤判帶外（band='std'）、這一輪天生缺席的低價帶標的離場。
+   （store 層的完整紅燈測試在 `tests/test_venue_study.py`，含高價帶輪
+   自己能正常判 disappeared/window_exit 的情境，見高價帶掃描 plan Task 8。）
 """
 
 from __future__ import annotations
@@ -222,10 +225,16 @@ def test_migration_adds_band_column_defaulting_existing_rows_to_std(tmp_path):
 # ---------------------------------------------------------------------------
 # 4. 地平線：高價帶批次不建地平線，不誤判帶外標的離場
 # ---------------------------------------------------------------------------
-def test_high_band_batch_does_not_create_exit_horizon(monkeypatch, tmp_path, cfg):
-    """低價帶標的（價格帶外，高價帶批次天生看不到）在高價帶輪缺席，
-    不能被誤判成離場——高價帶批次必須 `exit_scope=False`（比照
-    `test_venue_study.py` 的地平線測試，見 `store.record_listing_scan` docstring）。
+def test_high_band_round_does_not_exit_horizon_low_band_listings(monkeypatch, tmp_path, cfg):
+    """**2026-08-22 reviewer Critical 1 修法後改寫**（原測試名
+    `test_high_band_batch_does_not_create_exit_horizon`，斷言的是舊行為：
+    高價帶批次 `exit_scope=False`，靠「完全不建地平線」來保護低價帶標的。
+    reviewer 抓到那條路是死巷——高價帶批次自己的商品因此永遠沒有管道被判
+    離場（CLAUDE.md 第五節第 8 條）。修法是分帶（`store.record_listing_scan`
+    docstring「地平線分帶」段）：高價帶批次現在 `exit_scope=True`，但地平線
+    判定的分組鍵是 (site, band)，所以低價帶標的（band='std'，價格帶外，
+    高價帶批次天生看不到）在高價帶輪缺席，仍然不會被誤判離場——保護的
+    機制從「不建地平線」換成「地平線只在同一個 band 裡比對」。
     """
     low_listing = make_listing(
         price=5000, site=Site.BUYEE_MERCARI, external_id="low1",
@@ -263,8 +272,15 @@ def test_high_band_batch_does_not_create_exit_horizon(monkeypatch, tmp_path, cfg
     assert captured, "record_listing_scan 沒被呼叫，測試沒有驗到東西"
     high_round_batches = captured[-1]
     assert high_round_batches, "高價帶輪應該至少有一個批次"
-    assert all(b.get("exit_scope") is False for b in high_round_batches)
+    # exit_scope 改回 True（plan Task 8 第 4 點）：高價帶批次現在能且應該
+    # 為自己的 band 建地平線，不再靠關掉判定來保護低價帶標的。
+    assert all(b.get("exit_scope") is True for b in high_round_batches)
+    assert all(b.get("band") == "high" for b in high_round_batches)
 
     obs = {r["key"]: r for r in pipe.store.listing_obs()}
+    # 保護低價帶標的的機制換成了「地平線只在同一個 band 裡比對」——
+    # low1 是 band='std'，高價帶批次的地平線（band='high'）不涉及它。
+    assert obs[low_listing.key]["band"] == "std"
     assert obs[low_listing.key]["disappeared_at"] is None
     assert obs[low_listing.key]["window_exit_at"] is None
+    assert obs[high_listing.key]["band"] == "high"

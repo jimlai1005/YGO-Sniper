@@ -159,7 +159,14 @@ CREATE TABLE IF NOT EXISTS listing_obs (
     seen_count     INTEGER DEFAULT 1,
     disappeared_at TEXT,
     window_exit_at TEXT,
-    revived_count  INTEGER DEFAULT 0
+    revived_count  INTEGER DEFAULT 0,
+    -- 高價帶掃描（2026-08-22，reviewer Critical 1 修法，plan Task 8）。'std' =
+    -- 一般掃描、'high' = 高價帶。地平線判定的分組鍵加了 band：高價帶批次因
+    -- 伺服器端 price_max 天生看不到低價帶商品，若地平線不分帶，下一輪低價帶
+    -- 就會把高價帶商品判離場（同一個「觀測 scope 與判定 scope 不一致」的
+    -- 第九次事故形狀，CLAUDE.md 第五節第 8 條）。後見覆蓋前見，語意與
+    -- signals.band 同款：最後看到它的那一輪決定它現在屬於哪個帶。
+    band           TEXT DEFAULT 'std'
 );
 CREATE INDEX IF NOT EXISTS idx_listing_obs_site ON listing_obs(site, last_seen);
 CREATE INDEX IF NOT EXISTS idx_listing_obs_gone ON listing_obs(disappeared_at);
@@ -430,7 +437,7 @@ _COMPS_WRITE_COLUMNS: tuple[str, ...] = (
 _LISTING_OBS_CONTENT_COLUMNS: tuple[str, ...] = (
     "source", "site", "title", "url", "price_native", "currency", "price_twd",
     "landed_twd", "rarity", "grader", "grade", "card_name", "era_evidence", "price_kind",
-    "seller_id",
+    "seller_id", "band",
 )
 
 #: **重掃時不得被 NULL 蓋掉的欄位**（2026-08-04 事故）。
@@ -449,6 +456,9 @@ _LISTING_OBS_STICKY_COLUMNS: frozenset[str] = frozenset({"seller_id"})
 #: migration：PRAGMA 看過再 ADD COLUMN，O(1)、不重寫既有列、重跑安全）。
 _LISTING_OBS_MIGRATE_COLUMNS: dict[str, str] = {
     "seller_id": "TEXT",
+    # 高價帶掃描分帶離場判定（2026-08-22，plan Task 8）。DEFAULT 'std'：ADD
+    # COLUMN 回填既有列，語意與新寫入端一致（見 _SCHEMA 的欄位註解）。
+    "band": "TEXT DEFAULT 'std'",
 }
 
 #: 舊 db 的 signals 沒有 bucket（卡片分類，見 `domain.CardBucket`）。同一套
@@ -1226,6 +1236,21 @@ class Store:
         一個站有多個查詢時取**各批次地平線的最大值**（最保守：地平線越新，
         被判定成「真的消失」的越少）。
 
+        ── 地平線分帶（band）───────────────────────────────────────────
+        地平線的分組鍵是 **(site, band)**，不是單純 site（2026-08-22，
+        reviewer Critical 1 修法，高價帶掃描 plan Task 8）。高價帶批次
+        （`ygo-sniper daily-high`）因伺服器端 `price_max` 天生看不到低價帶
+        商品，若地平線不分帶，下一輪低價帶批次的 open_rows 查詢會把高價帶
+        商品也納入考慮，而它「本輪缺席」只是因為它根本不在低價帶的搜尋
+        範圍內——會被誤判 `window_exit_at`／`disappeared_at`（實跑重現過：
+        18:15 高價帶入庫 → 18:30 低價帶輪 → 被標離場）。批次不帶 `band`
+        鍵時 fallback 成 `'std'`（既有批次、既有測試零改動）。
+        `exit_scope` 與 `band` 是兩件事：前者問「這一批看得到整個站的第 1
+        頁嗎」，後者問「這一批看得到的是哪個價格子集」——高價帶批次現在
+        `exit_scope=True`：它看得到高價帶自己完整的第 1 頁，能夠、也應該
+        為**自己的 band**建地平線，不然高價帶商品永遠沒有管道被判離場
+        （CLAUDE.md 第五節第 8 條：狀態機的「無結論」分支不能是死巷）。
+
         ── 離場判定：賣家頁完整列舉（獨立於地平線的第二條證據）──────────
         賣家頁監控（`seller_watch`）固定抓 1 頁，容量 100-200 筆，實測單一
         賣家在架最多 38 筆（`seller_watch.py` 的 `WatchParams.pages` 依據）
@@ -1261,8 +1286,10 @@ class Store:
         if not healthy:
             return report
 
-        seen_by_site: dict[str, set[str]] = {}
-        horizons: dict[str, str] = {}
+        #: 地平線判定的分組鍵是 (site, band)，不是單純 site（docstring「地平線
+        #: 分帶」段）——批次沒帶 `band` 鍵時 fallback 成 `'std'`。
+        seen_by_scope: dict[tuple[str, str], set[str]] = {}
+        horizons: dict[tuple[str, str], str] = {}
         handled: set[str] = set()
         #: 這一輪觀測到的賣家 → feedback（可能是 None）。同一交易內聚合更新
         #: sellers 表；feedback 只有部分來源給（eBay/paypay 的 row 會帶）。
@@ -1271,6 +1298,8 @@ class Store:
         with self._conn() as c:
             for batch in healthy:
                 site = str(batch.get("site") or "")
+                band = str(batch.get("band") or "std")
+                scope = (site, band)
                 batch_first: list[str] = []
                 for row in batch.get("rows") or []:
                     key = str(row.get("key") or "")
@@ -1283,7 +1312,7 @@ class Store:
                             row.get("seller_feedback_score", prev[0]),
                             row.get("seller_feedback_pct", prev[1]),
                         )
-                    seen_by_site.setdefault(site, set()).add(key)
+                    seen_by_scope.setdefault(scope, set()).add(key)
                     if key in handled:
                         # 同一輪被兩個查詢撈到 → 只算一次觀測，但地平線仍要納入
                         first = c.execute(
@@ -1292,22 +1321,26 @@ class Store:
                         batch_first.append((first["first_seen"] if first else stamp) or stamp)
                         continue
                     handled.add(key)
+                    # band 進 content columns：後見覆蓋前見，最後看到它的那一輪
+                    # 決定它現在屬於哪個帶（docstring「地平線分帶」段）。
+                    row["band"] = band
                     batch_first.append(self._upsert_listing_obs(c, key, row, stamp, report))
                 if batch_first and batch.get("exit_scope", True):
                     h = min(batch_first)
-                    if h > horizons.get(site, ""):
-                        horizons[site] = h
+                    if h > horizons.get(scope, ""):
+                        horizons[scope] = h
 
             report["seen"] = len(handled)
 
-            for site, seen in seen_by_site.items():
-                horizon = horizons.get(site)
+            for (site, band), seen in seen_by_scope.items():
+                horizon = horizons.get((site, band))
                 if horizon is None:
                     continue
                 open_rows = c.execute(
                     "SELECT key, first_seen FROM listing_obs "
-                    "WHERE site = ? AND disappeared_at IS NULL AND window_exit_at IS NULL",
-                    (site,),
+                    "WHERE site = ? AND band = ? "
+                    "AND disappeared_at IS NULL AND window_exit_at IS NULL",
+                    (site, band),
                 ).fetchall()
                 for r in open_rows:
                     if r["key"] in seen:

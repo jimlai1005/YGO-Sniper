@@ -1071,12 +1071,16 @@ class Pipeline:
           完整輪的事，高價帶輪要維持獨立的、與低價帶互不干擾的請求預算。
         - 狙擊比對照跑：`_collect_candidates` 內建掛鉤，對任何管道發現的
           listing 一視同仁，高價帶正是 ¥8,624 以上狙擊卡唯一的發現管道。
-        - 在架觀測批次帶 `exit_scope=False`：高價帶只看得到「¥8,624 以上」
-          這個子集，若讓它建地平線，同一關鍵字的低價帶標的（价格帶外，
-          天生不會出現在這一批）會被誤讀成消失——與賣家頁監控
-          `exit_scope=False` 是同一個道理（`store.record_listing_scan`
-          docstring）。批次本身仍然照常落帳（`healthy`／`rows` 不變），
-          只是不貢獻、也不受地平線判定。
+        - 在架觀測批次帶自己的 `band`（'high'／'std'，`_scan` 統一補在
+          record_listing_scan 呼叫前），`exit_scope` 維持預設 True：地平線
+          判定的分組鍵是 (site, band)（見 `store.record_listing_scan`
+          docstring「地平線分帶」段），高價帶批次看得到自己那個子集完整的
+          第 1 頁，能且應該為自己的 band 建地平線。**這是 2026-08-22
+          reviewer Critical 1 修法後的行為**：舊版本讓高價帶批次
+          `exit_scope=False`（不建地平線），結果高價帶商品沒有任何管道能
+          被判離場——是同一個「觀測 scope 與判定 scope 不一致」的錯誤換了
+          個入口重演（CLAUDE.md 第五節第 8 條死巷條款），現在改成分帶而不是
+          關掉判定。
         """
         skip_comps = skip_comps or watch_only or high_band
         comps_added = 0 if skip_comps else self.refresh_comps()
@@ -1154,10 +1158,15 @@ class Pipeline:
                     "source": source_name,
                     "site": src.site.value,
                     "healthy": healthy,
-                    # 高價帶只看得到價格帶內的子集，不能貢獻地平線（docstring
-                    # 「高價帶」段）；標準路徑維持預設 True，寫成顯式值只是
-                    # 讓兩條路徑在同一行都看得到彼此的差異，行為零改變。
-                    "exit_scope": not high_band,
+                    # 高價帶批次也能建地平線（reviewer Critical 1 修法，plan
+                    # Task 8）：地平線判定的分組鍵已經改成 (site, band)（見
+                    # `store.record_listing_scan` docstring「地平線分帶」段），
+                    # 高價帶批次看得到自己那個 band 完整的第 1 頁，能且應該
+                    # 為自己的 band 建地平線——不然高價帶商品沒有任何管道能被
+                    # 判離場（CLAUDE.md 第五節第 8 條死巷條款）。band 本身
+                    # 由 `_scan` 統一補在 obs_batches 上（見下方 record_listing_scan
+                    # 呼叫前那段），這裡維持預設 True 即可。
+                    "exit_scope": True,
                     "rows": self._collect_candidates(listings, source_name, candidates),
                 })
 
@@ -1261,6 +1270,12 @@ class Pipeline:
             self.store.snapshot(
                 [(s.listing.key, s.best_route.landed_twd) for s in signals]
             )
+            # 觀測批次也要帶 band——`record_listing_scan` 的地平線判定分組鍵是
+            # (site, band)，不分帶的話高價帶商品會被低價帶批次的地平線誤判離場
+            # （reviewer Critical 1，plan Task 8）。整趟 `_scan` 呼叫只有一個
+            # band（旗子在函式入口就定了），所以每個批次一律套同一個值。
+            for batch in obs_batches:
+                batch["band"] = band
             # 在架觀測帳：signals 每輪 upsert 覆寫，回答不了「在架多久、何時消失」。
             # 這張表是那個問題的唯一資料來源，所以每輪都要落，不管有沒有訊號。
             obs_report = self.store.record_listing_scan(obs_batches)

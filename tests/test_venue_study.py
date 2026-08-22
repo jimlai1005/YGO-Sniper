@@ -49,11 +49,18 @@ def obs_row(
     }
 
 
-def batch(*keys, site="buyee_paypay", healthy=True, **kw):
-    return {
+def batch(*keys, site="buyee_paypay", healthy=True, band=None, **kw):
+    """`band=None` 省略 batch 層的 `band` 鍵——比照生產端既有批次（未升級到
+    高價帶分帶前寫的批次）不帶這個鍵，落庫端要 fallback 成 `'std'`
+    （見 `store.record_listing_scan` 對 band 缺失時的預設）。
+    """
+    b: dict = {
         "source": site, "site": site, "healthy": healthy,
         "rows": [obs_row(k, site=site, **kw) for k in keys],
     }
+    if band is not None:
+        b["band"] = band
+    return b
 
 
 def seller_batch(*keys, site="buyee_paypay", seller_id="s1", healthy=True, seen_keys=None, **kw):
@@ -170,6 +177,68 @@ def test_horizon_uses_max_across_queries_of_same_site(store):
         [batch("new1"), batch("old")], now="2026-08-02T02:00:00+00:00"
     )
     assert rep["disappeared"] == 0 and rep["window_exit"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 高價帶掃描分帶離場判定（2026-08-22，plan Task 8，reviewer Critical 1 修法）。
+#
+# 事故：高價帶批次落地的商品因伺服器端 price_max 永遠不在低價帶結果裡；
+# 舊行為（地平線判定只看 site，不看 band）會讓下一輪低價帶輪把它判成
+# window_exit_at／disappeared_at——reviewer 實跑重現過（18:15 high 入庫 →
+# 18:30 std 輪 → 被標離場）。修法：`listing_obs.band` 進地平線的分組鍵，
+# 高價帶批次的 `exit_scope` 也改回 True（CLAUDE.md 第五節第 8 條死巷條款：
+# 不能讓高價帶商品沒有任何管道可以判離場）。
+# ---------------------------------------------------------------------------
+def test_high_band_listing_untouched_by_next_low_band_round(store):
+    """C1 重現：高價帶列入庫後，下一輪**看不到它**的低價帶批次，不能把它
+    判成離場——兩個離場欄位必須維持 NULL（band 分組把它擋在低價帶的
+    open_rows 查詢之外）。"""
+    store.record_listing_scan(
+        [batch("high1", band="high")], now="2026-08-22T18:15:00+00:00"
+    )
+    store.record_listing_scan(
+        [batch("std1", band="std")], now="2026-08-22T18:30:00+00:00"
+    )
+    row = {r["key"]: r for r in store.listing_obs()}["high1"]
+    assert row["disappeared_at"] is None
+    assert row["window_exit_at"] is None
+    assert row["band"] == "high"
+
+
+def test_high_band_round_marks_its_own_horizon_disappeared(store):
+    """高價帶自己的輪能對帶內缺席列正常判 `disappeared_at`——分帶不是關掉
+    地平線，是把地平線的分母縮小成同一個 band（Task 8 第 4 點：高價帶批次
+    的 exit_scope 改回 True，不再是無人判定的死巷）。比照
+    `test_absent_newer_listing_is_marked_disappeared` 的時序安排：缺席的
+    那筆 first_seen 比地平線新，才是「頁面還蓋得到它、它卻不在」的形狀。"""
+    store.record_listing_scan(
+        [batch("h_a", band="high")], now="2026-08-22T10:00:00+00:00"
+    )
+    store.record_listing_scan(
+        [batch("h_a", "h_b", band="high")], now="2026-08-22T11:00:00+00:00"
+    )
+    rep = store.record_listing_scan(
+        [batch("h_a", band="high")], now="2026-08-22T12:00:00+00:00"
+    )
+    assert rep["disappeared"] == 1
+    rows = {r["key"]: r for r in store.listing_obs()}
+    assert rows["h_b"]["disappeared_at"] == "2026-08-22T12:00:00+00:00"
+    assert rows["h_a"]["disappeared_at"] is None
+
+
+def test_high_band_round_marks_its_own_horizon_window_exit(store):
+    """高價帶自己的輪對比地平線更舊的缺席列判 `window_exit_at`（右設限，
+    無結論）——同一套地平線邏輯只是分母縮小成 band，不是換了一套判準。"""
+    store.record_listing_scan(
+        [batch("h_old", band="high")], now="2026-08-22T10:00:00+00:00"
+    )
+    rep = store.record_listing_scan(
+        [batch("h_new1", band="high")], now="2026-08-22T11:00:00+00:00"
+    )
+    assert rep["window_exit"] == 1
+    row = {r["key"]: r for r in store.listing_obs()}["h_old"]
+    assert row["window_exit_at"] == "2026-08-22T11:00:00+00:00"
+    assert row["disappeared_at"] is None
 
 
 def test_seller_scope_marks_disappeared_even_after_window_exit(store):
