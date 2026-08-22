@@ -1,4 +1,4 @@
-.PHONY: setup test lint daily scan comps serve schedule unschedule schedule-dashboard unschedule-dashboard logs clean
+.PHONY: setup test lint daily scan comps serve schedule unschedule schedule-high unschedule-high schedule-dashboard unschedule-dashboard logs clean
 
 PY := .venv/bin/python
 SNIPER := .venv/bin/ygo-sniper
@@ -51,6 +51,19 @@ schedule:
 unschedule:
 	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.plist
 	rm -f ~/Library/LaunchAgents/com.jim.ygosniper.plist
+
+# 高價帶（¥8,624～50,000）獨立排程，跟上面的低價帶 daily 排程分開裝卸、
+# 允許並行（各自的鎖／log／排程監督帳本都是獨立檔名，見 scripts/run_high.sh）
+schedule-high:
+	chmod +x scripts/run_high.sh
+	cp scripts/com.jim.ygosniper.high.plist ~/Library/LaunchAgents/
+	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.high.plist 2>/dev/null || true
+	launchctl load ~/Library/LaunchAgents/com.jim.ygosniper.high.plist
+	@echo "✅ 高價帶已排程（白天偶數整點＋晚間 :15）。用 launchctl list | grep ygosniper.high 確認"
+
+unschedule-high:
+	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.high.plist
+	rm -f ~/Library/LaunchAgents/com.jim.ygosniper.high.plist
 
 # dashboard 常駐（開機/登入自動起，掛了自動重啟），跟上面的 daily 排程分開裝卸
 schedule-dashboard:

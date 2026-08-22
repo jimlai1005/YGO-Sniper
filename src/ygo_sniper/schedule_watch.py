@@ -55,54 +55,96 @@ RUN_FINISHED_KEY = "schedule_run_finished_at"
 #: 這是本模組唯一會被呼叫端「清除」的鍵，其他兩把鍵永遠只被覆寫，不被清空。
 PENDING_ALERT_KEY = "schedule_alert_pending"
 
+#: 高價帶（`ygo-sniper daily-high`）自己的三把鍵——與上面低價帶的鍵**刻意
+#: 不共用**（2026-08-22，高價帶排程 plan Task 6）：兩條掃描各自跑在自己的
+#: launchd 網格上，若共用一把 RUN_STARTED_KEY，任一帶跑一輪就會推進另一帶
+#: 的基準，讓另一帶的漏跑偵測失聰——這正是 CLAUDE.md 第三節第八事故
+#: （排程空窗判準混源）的同一種錯誤，只是換了「哪兩條輪次共用一本帳」。
+RUN_STARTED_KEY_HIGH = "schedule_run_started_at_high"
+RUN_FINISHED_KEY_HIGH = "schedule_run_finished_at_high"
+PENDING_ALERT_KEY_HIGH = "schedule_alert_pending_high"
+
 #: 排程表（與 scripts/com.jim.ygosniper.plist 的 StartCalendarInterval 對齊；
 #: 改 plist 時段時這裡要一起改——`tests/test_schedule_watch.py` 的
 #: `test_windows_match_plist` 會在兩邊不同步時當場失敗，不是只能靠這行註解提醒）。
 #: (窗起分鐘, 窗迄分鐘, 間隔分鐘)；22:30 之後到隔日 09:30 是刻意的夜間空窗。
 _WINDOWS = [(9 * 60 + 30, 17 * 60 + 30, 120), (18 * 60, 22 * 60 + 30, 30)]
 
+#: 高價帶自己的排程表（與 scripts/com.jim.ygosniper.high.plist 對齊；
+#: `tests/test_schedule_watch.py::test_high_windows_match_high_plist` 釘死）。
+#: 白天偶數整點 10:00/12:00/14:00/16:00、晚間 :15 的 18:15/20:15/22:15——
+#: 與 `_WINDOWS` 的所有觸發分鐘零重疊（低價帶佔 :30 與 :00/:30，這裡只落
+#: 在 :00 與 :15）。同一組 (起, 迄, 間隔) 表示法就能表達這個不規則時刻表，
+#: 不需要另開一種「顯式時刻清單」的資料結構。**不影響 `_WINDOWS` 本身。**
+_HIGH_WINDOWS = [(10 * 60, 16 * 60, 120), (18 * 60 + 15, 22 * 60 + 15, 120)]
+
+
+def _expand_windows(windows: list[tuple[int, int, int]]) -> list[int]:
+    """把 (起, 迄, 間隔) 的窗口清單展開成排序去重的分鐘數清單。
+
+    低價帶與高價帶共用同一份展開邏輯——兩條網格的形狀不同，但「怎麼從
+    窗口定義變成一串絕對時間點」必須是同一套規則，否則兩邊的排程監督
+    互相比不出「誰跟誰同源」。
+    """
+    return sorted({m for lo, hi, step in windows for m in range(lo, hi + 1, step)})
+
+
 #: 把 _WINDOWS 展開成當天所有排程時間點（分鐘數，已排序去重）。
 #: `next_slot_after`／`_latest_slot_at_or_before` 的唯一資料來源
 #: ——不再另外維護一份「間隔」邏輯。
-_ALL_SLOTS: list[int] = sorted({m for lo, hi, step in _WINDOWS for m in range(lo, hi + 1, step)})
+_ALL_SLOTS: list[int] = _expand_windows(_WINDOWS)
+
+#: 高價帶版本的 `_ALL_SLOTS`——`next_slot_after` 等函式的 `slots=` 引數
+#: 傳這個，就能在同一套演算法上跑高價帶自己的網格。
+_HIGH_ALL_SLOTS: list[int] = _expand_windows(_HIGH_WINDOWS)
 
 
-def next_slot_after(prev: datetime) -> datetime:
+def next_slot_after(prev: datetime, slots: list[int] | None = None) -> datetime:
     """`prev` 之後，排程網格上第一個絕對時間點（嚴格晚於 `prev`）。
 
     刻意回傳**絕對 datetime**而不是分鐘數或間隔——這是 Fix 1 的核心：
     無論 `prev` 本身漂移了幾分鐘，「下一個該接棒的時間點」永遠是網格上
     固定的那一格，不會因為 `prev` 晚起而跟著往後推、也不會非單調地亂跳。
+
+    `slots`：省略時用低價帶的 `_ALL_SLOTS`（既有行為零變化）；高價帶呼叫端
+    傳 `_HIGH_ALL_SLOTS`。兩本帳的網格永遠不會被意外混用，因為呼叫端
+    （`schedule_health` 及其上游）自己決定要傳哪一份，不會互相 fallback。
     """
+    if slots is None:
+        slots = _ALL_SLOTS
     today = prev.date()
-    for m in _ALL_SLOTS:
+    for m in slots:
         candidate = datetime(today.year, today.month, today.day, m // 60, m % 60)
         if candidate > prev:
             return candidate
     tomorrow = today + timedelta(days=1)
-    first = _ALL_SLOTS[0]
+    first = slots[0]
     return datetime(tomorrow.year, tomorrow.month, tomorrow.day, first // 60, first % 60)
 
 
-def _latest_slot_at_or_before(now: datetime) -> datetime:
+def _latest_slot_at_or_before(now: datetime, slots: list[int] | None = None) -> datetime:
     """排程網格上最後一個 `<= now` 的時間點——`now` 這一輪自己代表的那一格。
 
     不論這一輪實際跑得多準時或多晚，它的存在本身就是「這一格有被執行到」
     的證明；`missed_slots_between` 靠這個值劃出「不算漏跑」的那一格。
     """
+    if slots is None:
+        slots = _ALL_SLOTS
     today = now.date()
     todays = [
-        datetime(today.year, today.month, today.day, m // 60, m % 60) for m in _ALL_SLOTS
+        datetime(today.year, today.month, today.day, m // 60, m % 60) for m in slots
     ]
     at_or_before = [c for c in todays if c <= now]
     if at_or_before:
         return max(at_or_before)
     yesterday = today - timedelta(days=1)
-    last = _ALL_SLOTS[-1]
+    last = slots[-1]
     return datetime(yesterday.year, yesterday.month, yesterday.day, last // 60, last % 60)
 
 
-def missed_slots_between(prev: datetime, now: datetime) -> list[datetime]:
+def missed_slots_between(
+    prev: datetime, now: datetime, slots: list[int] | None = None
+) -> list[datetime]:
     """`prev` 之後、`now` 這一輪自己代表的那一格之前，被跳過的排程時間點。
 
     見模組開頭 Fix B 的事故背景：這取代了「經過分鐘數 vs 理想間隔 + 寬容值」
@@ -114,17 +156,19 @@ def missed_slots_between(prev: datetime, now: datetime) -> list[datetime]:
     也只是幾千次迭代，不會失控。`prev > now`（時鐘被往回校正）時第一次
     迭代就會直接超過 attributed，回傳空list，維持舊版「未來基準值不出聲」
     的行為不變。
+
+    `slots`：與 `next_slot_after` 同一個引數，省略時是低價帶網格。
     """
-    attributed = _latest_slot_at_or_before(now)
-    slots: list[datetime] = []
+    attributed = _latest_slot_at_or_before(now, slots)
+    result: list[datetime] = []
     cursor = prev
     while True:
-        nxt = next_slot_after(cursor)
+        nxt = next_slot_after(cursor, slots)
         if nxt >= attributed:
             break
-        slots.append(nxt)
+        result.append(nxt)
         cursor = nxt
-    return slots
+    return result
 
 
 def _format_missed(slots: list[datetime]) -> str:
@@ -136,7 +180,7 @@ def _format_missed(slots: list[datetime]) -> str:
     return f"漏跑 {len(slots)} 個時段（{slots[0]:%m-%d %H:%M} ～ {slots[-1]:%m-%d %H:%M}）"
 
 
-def expected_next_gap_minutes(prev: datetime) -> int:
+def expected_next_gap_minutes(prev: datetime, slots: list[int] | None = None) -> int:
     """`next_slot_after(prev) - prev` 的分鐘數。
 
     **`src/` 與 `web/` 裡沒有任何production呼叫端**——`schedule_health` 的
@@ -145,7 +189,7 @@ def expected_next_gap_minutes(prev: datetime) -> int:
     `next_slot_after` 最直覺的人類可讀投影，拿掉的話下次要手算「上一輪
     到下一格還有幾分鐘」得重新推導一次。
     """
-    delta = next_slot_after(prev) - prev
+    delta = next_slot_after(prev, slots) - prev
     return int(delta.total_seconds() // 60)
 
 
@@ -194,7 +238,10 @@ def resolve_alert(pending_raw: str | None, detected: str | None) -> tuple[str | 
 
 
 def schedule_health(
-    prev_started: str | None, prev_finished: str | None, now: datetime
+    prev_started: str | None,
+    prev_finished: str | None,
+    now: datetime,
+    slots: list[int] | None = None,
 ) -> str | None:
     """回傳要出聲的訊息，或 None（一切正常／沒有基準）。
 
@@ -212,6 +259,9 @@ def schedule_health(
     空 list → 不出聲。這是刻意的：一個「未來」的基準值本身就不可信，
     硬要對著它算漏了幾格只會生出更沒意義的訊息；等下一輪基準被覆寫回
     正常值，偵測會自己恢復正常，不需要額外處理這個分支。
+
+    `slots`：省略時是低價帶的 `_ALL_SLOTS`；高價帶呼叫端傳 `_HIGH_ALL_SLOTS`
+    ——兩帶各自比對自己的網格，不共用基準也不共用網格（同源條款）。
     """
     if not prev_started:
         return None
@@ -235,7 +285,7 @@ def schedule_health(
         )
 
     try:
-        missed = missed_slots_between(prev, now)
+        missed = missed_slots_between(prev, now, slots)
     except TypeError:
         # naive/aware 混用等無法比較的狀況：資訊性偵測器寧可漏報也不能讓
         # 整輪 scan() 因為 TypeError 而中斷。

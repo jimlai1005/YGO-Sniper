@@ -23,8 +23,12 @@ from .parsers import is_candidate, parse_card
 from .queries import load_queries, resolve_category
 from .schedule_watch import (
     PENDING_ALERT_KEY,
+    PENDING_ALERT_KEY_HIGH,
     RUN_FINISHED_KEY,
+    RUN_FINISHED_KEY_HIGH,
     RUN_STARTED_KEY,
+    RUN_STARTED_KEY_HIGH,
+    _HIGH_ALL_SLOTS,
     resolve_alert,
     schedule_health,
     watchdog_message,
@@ -813,13 +817,15 @@ class Pipeline:
         節奏（見那兩個方法的 docstring），兩者都不吃邊緣觸發、不動基準。
 
         `high_band` 是高價帶掃描（¥8,624～50,000，只掛 buyee_mercari，見高價帶
-        掃描 plan）的旗子，語意見 `_scan` docstring。**排程空窗偵測目前仍記在
-        低價帶的基準鍵上**——高價帶還沒有自己的 CLI 入口與 launchd 排程
-        （分別是該 plan 的 Task 5／Task 6），這兩個方法要不要為它另開一組基準鍵
-        是 Task 6 的範圍，這裡先不動，避免搶先猜錯 Task 6 的鍵名設計。
+        掃描 plan）的旗子，語意見 `_scan` docstring。**排程空窗偵測用自己的一套
+        基準鍵與網格**（`RUN_STARTED_KEY_HIGH`／`RUN_FINISHED_KEY_HIGH`／
+        `PENDING_ALERT_KEY_HIGH`＋`schedule_watch._HIGH_ALL_SLOTS`）——高價帶
+        跑在自己的 launchd 網格（Task 6），若共用低價帶的鍵，任一帶跑一輪就會
+        推進另一帶的基準，讓另一帶的漏跑偵測失聰（CLAUDE.md 第三節第八事故
+        的同一種錯誤）。見 `_update_schedule_state`／`_finish_schedule_state`。
         """
         started = self.store.begin_scan(trigger=trigger, dry_run=dry_run)
-        self._update_schedule_state(dry_run=dry_run, watch_only=watch_only)
+        self._update_schedule_state(dry_run=dry_run, watch_only=watch_only, high_band=high_band)
         try:
             result = self._scan(
                 started, skip_comps=skip_comps, dry_run=dry_run,
@@ -845,10 +851,12 @@ class Pipeline:
         )
         # 只有走到這裡（沒有例外往外拋）才算「正常收尾」——crash 時上面的
         # except 分支已經 raise 出去，這行不會執行，基準保持舊值。
-        self._finish_schedule_state(dry_run=dry_run, watch_only=watch_only)
+        self._finish_schedule_state(dry_run=dry_run, watch_only=watch_only, high_band=high_band)
         return result
 
-    def _update_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
+    def _update_schedule_state(
+        self, *, dry_run: bool, watch_only: bool, high_band: bool = False
+    ) -> None:
         """排程空窗偵測的開頭那一半：讀舊基準、算這一輪要不要出聲、寫新基準。
 
         `dry_run`：`--dry-run` 是「只掃不寫庫」，這裡也不能寫、也不能吃掉
@@ -863,17 +871,28 @@ class Pipeline:
         的節奏不是那個源）。所以 watch_only 一律跳過整段，基準只由完整掃描
         （`ygo-sniper scan`／`daily`／dashboard 的 `/api/scan`）維護。
 
+        `high_band`：高價帶（`ygo-sniper daily-high`／`scan-high`）用**自己的
+        一套鍵與網格**（`RUN_STARTED_KEY_HIGH`／`RUN_FINISHED_KEY_HIGH`／
+        `PENDING_ALERT_KEY_HIGH`＋`schedule_watch._HIGH_ALL_SLOTS`），完全不碰
+        低價帶的三把鍵——兩本帳互不污染（CLAUDE.md 第三節第八事故：兩條掃描
+        若共用基準鍵，任一帶跑一輪就會推進另一帶的基準，遮蔽另一帶的漏跑）。
+
         偵測器本身包一層 `try/except`：它只是資訊性功能，壞掉不能拖垮這一輪
         真正的掃描（見 schedule_watch.py 與 CLAUDE.md 五、靜默失敗）。
         """
         if dry_run or watch_only:
             return
+        started_key = RUN_STARTED_KEY_HIGH if high_band else RUN_STARTED_KEY
+        finished_key = RUN_FINISHED_KEY_HIGH if high_band else RUN_FINISHED_KEY
+        pending_key = PENDING_ALERT_KEY_HIGH if high_band else PENDING_ALERT_KEY
+        slots = _HIGH_ALL_SLOTS if high_band else None
         try:
             now = datetime.now()
             detected = schedule_health(
-                self.store.get_meta(RUN_STARTED_KEY),
-                self.store.get_meta(RUN_FINISHED_KEY),
+                self.store.get_meta(started_key),
+                self.store.get_meta(finished_key),
                 now,
+                slots,
             )
             # Fix A：watchdog 帳本（run_daily.sh 寫的 data/last_run_exit）折進
             # 同一條偵測。兩者都算「這一輪偵測到的問題」，合併成一句話一起
@@ -888,11 +907,11 @@ class Pipeline:
             # 兩個陳述式之間被殺掉，會出現「證據已刪、但沒人記得這件事」
             # 的窗口（哪怕只有微秒、哪怕會被下一輪自己的新帳本自癒，
             # 「先落帳、才能刪證據」這個順序本身不該顛倒）。
-            watchdog_msg, ledger_path = self._read_watchdog_ledger()
+            watchdog_msg, ledger_path = self._read_watchdog_ledger(high_band=high_band)
             if watchdog_msg:
                 detected = f"{detected}；{watchdog_msg}" if detected else watchdog_msg
             self._schedule_alert, new_pending = resolve_alert(
-                self.store.get_meta(PENDING_ALERT_KEY), detected
+                self.store.get_meta(pending_key), detected
             )
             if self._schedule_alert:
                 print(self._schedule_alert)
@@ -900,8 +919,8 @@ class Pipeline:
             # 後寫，讓「這輪偵測到的東西已經進帳」與「這輪已經開始」在語意上
             # 對齊：pending 記的是「偵測時看到的問題」，started 記的是「這輪
             # 本身何時起跑」，兩者互不覆寫對方。
-            self.store.set_meta(PENDING_ALERT_KEY, new_pending)
-            self.store.set_meta(RUN_STARTED_KEY, now.isoformat())
+            self.store.set_meta(pending_key, new_pending)
+            self.store.set_meta(started_key, now.isoformat())
             # 帳本已經折進上面的 PENDING_ALERT_KEY，現在才能刪——見本方法
             # 開頭的順序說明。`set_meta` 這一行沒寫成功就不會走到這裡
             # （例外會被下面的 except 接住，帳本檔案原封不動留給下一輪重讀）。
@@ -913,10 +932,16 @@ class Pipeline:
                 f"{type(exc).__name__}: {exc}"
             )
 
-    def _read_watchdog_ledger(self) -> tuple[str | None, Path | None]:
-        """讀 `run_daily.sh` 寫的上一輪結束帳本（`data/last_run_exit`），
-        折成一句話。**不刪檔案**——刪檔是呼叫端（`_update_schedule_state`）
-        在把這句話寫進 `PENDING_ALERT_KEY` 之後才做的事，見那裡的順序說明。
+    def _read_watchdog_ledger(self, *, high_band: bool = False) -> tuple[str | None, Path | None]:
+        """讀 `run_daily.sh`（或高價帶的 `run_high.sh`）寫的上一輪結束帳本
+        （`data/last_run_exit` 或 `data/last_run_exit_high`），折成一句話。
+        **不刪檔案**——刪檔是呼叫端（`_update_schedule_state`）
+        在把這句話寫進 `PENDING_ALERT_KEY`（或高價帶版本）之後才做的事，
+        見那裡的順序說明。
+
+        `high_band=True` 讀獨立的 `last_run_exit_high`——`run_high.sh` 寫的是
+        這個檔名（見 scripts/run_high.sh），跟低價帶的帳本完全分開，不會
+        互相覆寫或誤讀對方的失敗紀錄。
 
         回傳 `(訊息或 None, 折出訊息時的檔案路徑；沒折出東西就是 None)`——
         呼叫端只需要在訊息非 None 時才有東西可刪，第二個值把「要不要刪」
@@ -946,7 +971,8 @@ class Pipeline:
         沿用 `db_path` 讓這裡自動繼承全 repo 既有的隔離保證，不必逐一
         去改其他測試檔案。
         """
-        path = self.cfg.db_path.parent / "last_run_exit"
+        filename = "last_run_exit_high" if high_band else "last_run_exit"
+        path = self.cfg.db_path.parent / filename
         try:
             raw = path.read_text(encoding="utf-8")
         except OSError:
@@ -971,14 +997,19 @@ class Pipeline:
         except OSError:
             pass
 
-    def _finish_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
+    def _finish_schedule_state(
+        self, *, dry_run: bool, watch_only: bool, high_band: bool = False
+    ) -> None:
         """排程空窗偵測的收尾那一半：只有真正走到這裡才代表「正常收尾」。
 
         guard 理由與 `_update_schedule_state` 相同（dry-run 不寫庫、
         watch-scan 不是排程網格的一部分）。呼叫點在 `scan()` 裡故意放在
         例外處理**之外**——`_scan()` 拋例外時這個方法完全不會被呼叫，
-        `RUN_FINISHED_KEY` 因此維持舊值，下一輪 `schedule_health` 才報得出
-        「有開始沒收尾」。
+        `RUN_FINISHED_KEY`（或高價帶版本）因此維持舊值，下一輪
+        `schedule_health` 才報得出「有開始沒收尾」。
+
+        `high_band`：寫 `RUN_FINISHED_KEY_HIGH` 而不是低價帶的
+        `RUN_FINISHED_KEY`——與 `_update_schedule_state` 同一套鍵分離理由。
 
         這裡也包一層 `try/except`，跟 `_update_schedule_state` 對稱：這行只是
         排程監督自己的記帳，不能讓它的失敗把已經跑完、已經 `finish_scan`
@@ -987,8 +1018,9 @@ class Pipeline:
         """
         if dry_run or watch_only:
             return
+        finished_key = RUN_FINISHED_KEY_HIGH if high_band else RUN_FINISHED_KEY
         try:
-            self.store.set_meta(RUN_FINISHED_KEY, datetime.now().isoformat())
+            self.store.set_meta(finished_key, datetime.now().isoformat())
         except Exception as exc:  # noqa: BLE001 - 記帳壞掉不能拖垮已經跑完的掃描
             print(
                 f"[warn] 排程收尾記帳失敗（不影響本輪掃描結果）："
