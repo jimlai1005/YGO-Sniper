@@ -477,3 +477,82 @@ sale_kind，且 `comps.py:591-595` 對無精確簽章的卡退化成 `set_code|`
 **已知未做（刻意，記錄在案）**：S2（`_HIGH_ALL_SLOTS` 私有名跨模組 import）屬
 cosmetic，不動；W4 只做 WAL＋timeout，不做跨行程鎖統一——兩帶錯開 15 分鐘＋
 watchdog 25 分鐘上限使重疊窗有限，真撞鎖是大聲失敗（run_high.sh 會通知）。
+
+---
+
+# 修正回合二（2026-08-23 複審後，主線程裁決）
+
+複審結論：C2 完全修好（閘門與分母同一顆 Estimate，reviewer 讀完 estimate→predict_log
+全路徑確認）；Task 10/11 正確。但 C1 有殘口，且三個新發現共一個根因：**`band` 被當成
+任何寫入端可無條件覆寫的普通欄位**。裁決：改掉 band 的語意。
+
+**新語意（Task 12 的核心原則）**：band 記的是「這筆商品的價格落在哪一層」，
+**一律由觀測到的價格對照當日 `_price_ceiling_jpy` 推導**，不由「哪一批看到它」決定
+——關鍵字掃描的 band 與價格推導本來就恆等（伺服器端過濾保證），賣家頁列舉沒有價格
+過濾、也照樣有價格可推導。**離場地平線的判定範圍改用「判定當下重算的價格窗」**，
+不讀儲存的 band（儲存值會因 fx 漂移過期）——判定的分母永遠等於本輪觀測的視野。
+
+### Task 12（@inline）：band 語意重建——價格推導＋判定用即時價格窗
+
+**修復的三個 finding**：
+- C1 殘口：`_scan` 的 `for batch in obs_batches: batch["band"] = band` 蓋到賣家頁批次，
+  監控賣家的高價商品被洗回 'std' → 下一輪低價帶誤殺（reviewer 已實跑重現）。
+- W1：跨帶漂移商品被舊帶的地平線判成死巷（儲存 band 與現價脫節）。
+- W2：`bidding.py`／`appraise.py` 的 `upsert_signal(sig)` 用預設 `band='std'` 靜默重設
+  高價帶 signal → `daily-high` 候選池看不到它、`daily` 卻會用規則 1/2/3 評估它。
+
+**修法**：
+1. `listing_obs` 的 band：`_upsert_listing_obs` 改為**價格推導**——pipeline 把本輪的
+   `{site: (ceiling, high_cap)}` 傳進 `record_listing_scan`，有 JPY 價格的列
+   `band = 'high' if price > ceiling else 'std'`；無價格或該 site 無邊界資訊 → 保留
+   既有值（新列預設 'std'）。`batch["band"]` 整個拿掉（批次不再有宣告權），
+   賣家頁批次因此自然正確。
+2. 地平線判定：open_rows 的範圍改用**判定當下的價格窗**過濾（std 輪：
+   `price <= ceiling`；高價帶輪：`ceiling < price <= cap`），不讀儲存的 band。
+   只對「有高價帶設定的 site」（目前僅 buyee_mercari）啟用分層；其他 site 維持
+   現行全站判定、行為零變化。無價格的列歸 std 窗（維持既有行為）。
+   `listing_obs.band` 欄位保留（dashboard／除錯用，由第 1 點持續更新），但判定不再依賴它。
+3. `upsert_signal` 的 `band` 參數預設改 `None` ＝ **保留既有值**（新列 fallback 'std'）；
+   掃描路徑照舊顯式傳 'std'/'high'。`bidding.py`／`resolve-grades` 的回寫呼叫端零改動
+   即得到正確行為。這與 `store.py` 既註記的「--apply 回寫洗掉每輪語意欄位」舊事故同型，
+   修在共用 upsert 的預設值上是結構性修法。
+4. 賣家頁完整列舉判定（seller_scope_disappeared）照舊不分帶不動。
+
+**紅燈測試**：
+(a) reviewer 的殘口重現：高價帶列 → 低價帶輪的**賣家頁批次**看到它（帶價格 ¥22,222）
+    → band 仍為 'high' 且下一輪低價帶地平線不動它；
+(b) 回寫保留：`upsert_signal(sig)`（不帶 band）對既有 band='high' 列 → band 不變；
+(c) 跨帶漂移：band='high' 列價格改到 ceiling 以下 → 高價帶輪的價格窗不判它、
+    低價帶輪的價格窗接手判定；
+(d) 其他 site（如 yahoo_direct）的離場判定行為零變化（既有測試零改動全綠）。
+
+**驗收**：`make test` 全綠；`tests/test_venue_study.py`＋`tests/test_high_band_scan.py`＋
+`tests/test_high_band_isolation.py` 全綠。
+
+### Task 13（@inline）：規則 5 分子改市價基準＋可見的缺值 Skip＋health 清源
+
+**修復的 finding**：
+- W3：`fair_twd` 是**市價**基準（comps.price_twd = `apply_markup=False` 換匯、不含運雜），
+  分子卻用 `landed_twd`（到手）——同幣別不同口徑，實測 overhead 2.8-12.3%，0.70 門檻
+  實際等於「標價 0.62-0.68 × 市價」，比使用者說的「7 折」嚴。少推播是本專案最貴的
+  錯誤方向（第一節）。使用者的原話「市價 6 折／7 折以下」是**標價 vs 市價**的口徑。
+- 複審 S2：`landed_twd`／市價缺值時靜默 return——缺值是資料層的病，要留痕。
+- 複審 S1：`health --clear-source buyee_mercari` 全等比對清不到 `buyee_mercari@high`。
+
+**修法**：
+1. 規則 5 比率的分子改**該 listing 標價的市價基準 TWD**（`apply_markup=False` 換匯，
+   與 comps.price_twd／fair_twd 同一把尺——`comps.py:529` 同款）。換匯管道由 builder
+   找既有 fx 物件的最短路徑（NotifyRules 拿得到的），不得新造匯率來源；拿不到就
+   停下回報。`landed_twd` 照舊顯示在訊息裡（使用者要知道到手多少），只是不再當分子。
+2. 分子或分母缺值 → 從靜默 return 改為可見的 Skip（進 skipped log，理由寫明缺哪個值）。
+3. `health --clear-source X` 改為同時匹配 `X` 與 `X@<band>` 前綴列；help 文字同步。
+4. settings.yaml 的 `max_price_ratio` 註解改寫口徑：「標價市價比 ≤0.70」。
+
+**紅燈測試**：(a) 餵 overhead 很大的 listing：市價比 0.68 但 landed 比 0.74 → 必須推播
+（驗證分子是市價不是到手）；(b) 市價換不出來 → skipped log 有痕；(c) `--clear-source
+buyee_mercari` 清得掉 `buyee_mercari@high` 的列。
+
+**驗收**：`.venv/bin/pytest tests/ -k "notify" -v` 全綠；`make test` 全綠。
+
+**觀察（記錄不動）**：文案 N＝n_effective 在 L1/L2 閘門後就是同卡池大小（plan 明示的
+選擇），但措辭勿誘導「數字大＝證據強」——維持現狀，列入上線後觀察。
