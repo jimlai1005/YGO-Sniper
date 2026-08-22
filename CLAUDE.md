@@ -320,13 +320,17 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 1816 passed，2026-08-15 實測）
+make test                      # pytest（目前 1855 passed，2026-08-22 實測）
                                #   ⚠️ 別自己再加 `-q`：pyproject 的 addopts 已有一個，
                                #   疊成 `-qq` 會**吃掉最後那行 `N passed`**，而 exit code
                                #   仍是 0——「測試沒跑」與「跑了但看不到綠字」外顯一樣。
                                #   `make test`（-v）與裸 `.venv/bin/pytest tests/` 都會印。
 ygo-sniper daily               # 掃描＋推播（launchd 排程跑這個）
 ygo-sniper scan --dry-run      # 只掃不寫庫
+ygo-sniper daily-high          # 高價帶那一鍵：¥8,624 動態下限～¥50,000 固定上限、
+                               #   只掛 buyee_mercari，只推 ≤7 折＋L1/L2 或狙擊命中
+                               #   （獨立排程跑這個，見下方排程時段；自己的監督帳本）
+ygo-sniper scan-high --dry-run # 高價帶只掃不寫庫
 ygo-sniper serve               # dashboard → http://127.0.0.1:8321
 ygo-sniper notify-preview      # 只算不送，調門檻時用這個
 ygo-sniper health              # 各來源健康 ＋ 告警表
@@ -359,6 +363,8 @@ ygo-sniper clear-departed      # 清離場標的：逐筆開頁實證，只清 S
                                #   --state watching|asked_seller|offer_sent
                                #   --dry-run 只驗不寫（與 dashboard 清除按鈕同路徑）
 make schedule / make unschedule # launchd 排程（分時段，一天 15 個觸發點）
+make schedule-high / make unschedule-high # 高價帶獨立排程（一天 7 個觸發點，
+                               #   與低價帶零重疊，見下方排程時段）
 ```
 
 環境變數（凌晨兩點要找也找得到）：
@@ -375,6 +381,22 @@ make schedule / make unschedule # launchd 排程（分時段，一天 15 個觸�
 `scripts/run_daily.sh` 現在把整輪掃描包進 watchdog（見上）；`scripts/com.jim.ygosniper.plist`
 的時段與 `schedule_watch._WINDOWS` 被 `tests/test_schedule_watch.py::test_windows_match_plist`
 釘死——改 plist 時段沒有同步改 `_WINDOWS`，測試會直接紅，不會等到排程空窗才發現。
+
+高價帶（2026-08-22）排程另開一張表、時刻刻意與低價帶錯開：白天偶數整點
+`10:00 / 12:00 / 14:00 / 16:00`、晚間 `18:15 / 20:15 / 22:15`（避開低價帶
+的 :00/:30），一天 7 次，`scripts/com.jim.ygosniper.high.plist` 與
+`schedule_watch._HIGH_WINDOWS` 被 `test_high_windows_match_high_plist` 釘死。
+**兩帶的排程監督帳本完全分離**（各自的 `RUN_STARTED_KEY`／`PENDING_ALERT_KEY`
+與 `_HIGH` 版本、各自的 `data/last_run_exit`／`data/last_run_exit_high`）——
+`_send_schedule_alert` 一律清「偵測出這則告警的那本帳」（`pipe._schedule_alert_pending_key`），
+不會誤清另一帶的 pending（2026-08-22 事故：Task 6 曾經硬編低價帶鍵，高價帶
+告警送達後清錯帳，見本節第 7 項「送達才消耗」同一條規則）。
+
+⚠️ **預註冊的觀察項（上線一週後檢查，不要憑感覺調）**：高價帶第 1 頁存量
+2026-08-22 實測近滿頁（99 筆），代表第 1 頁的時間深度可能蓋不住兩次掃描
+之間新上架的全部量。拿 `data/logs/high-*.log` 的 `parsed_count` 對照掃描
+間隔算滿頁率——滿頁率高就代表在漏看，該加頁數或加密時段；滿頁率低就維持
+現狀，不要在沒有這份對照之前先動參數。
 
 ---
 
