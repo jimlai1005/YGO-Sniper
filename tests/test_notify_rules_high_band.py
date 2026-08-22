@@ -382,3 +382,70 @@ def test_from_config_default_settings_yaml_ratio_is_070(cfg):
     rules = NotifyRules.from_config(cfg)
     assert rules.high_band_max_price_ratio == pytest.approx(0.70)
     assert rules.high_band_enabled is True
+
+
+# ---------------------------------------------------------------------------
+# 送達接線（主線程裁決追加）：規則 5 的 match 不能停在 Outcome.high_band——
+# 必須真的走到 to_send／規則計數／訊息格式化，否則「命中卻不送」＝靜默失敗
+# （CLAUDE.md 第五節頭號紅線）。
+# ---------------------------------------------------------------------------
+def test_high_band_match_reaches_to_send():
+    """規則 5 命中後要進 `out.to_send`（不是停在 `out.high_band` 沒人接手）。"""
+    from ygo_sniper.notify_rules import RULE_HIGH_BAND
+
+    r = hb_row(ratio=0.65)
+    out = run([r])
+    assert out.high_band, "前提：規則 5 這一筆要先命中"
+    assert [m.rule for m in out.to_send] == [RULE_HIGH_BAND]
+    assert out.to_send[0] is out.high_band[0]
+
+
+def test_high_band_count_shows_in_cli_rule_counts(capsys):
+    """`cli._print_rule_counts` 要印出規則 5 的命中數——0 與「沒在跑」不能長一樣
+    （比照 `test_card_snipe_notify.py::test_rule4_appears_in_the_cli_counts`）。"""
+    import ygo_sniper.cli as cli_mod
+
+    r = hb_row(ratio=0.65)
+    out = run([r])
+    cli_mod._print_rule_counts(out)
+    printed = capsys.readouterr().out
+    assert "規則 5 高價帶折價" in printed
+    assert "命中 1 筆" in printed
+
+
+def test_format_high_band_message_carries_source_note_and_badge():
+    """送出文字含「判定來源：同卡成交 ×」與「高價帶」字樣（驗收條件 2）。"""
+    from ygo_sniper.notify import format_high_band
+
+    r = hb_row(ratio=0.65, comps_n=7)
+    m = run([r]).high_band[0]
+    text = format_high_band(m, "http://127.0.0.1:8321")
+    assert "判定來源：同卡成交 × 7 筆中位" in text
+    assert "高價帶" in text
+    assert "封印されしエクゾディア" in text
+    assert m.row["url"] in text
+
+
+def test_render_dispatches_high_band_to_its_own_formatter():
+    """`Notifier.render` 不能讓規則 5 落進規則 2 的 fallback（`format_high_p`
+    會找 `match.estimate.venue` 之類規則 5 沒有意義的欄位，訊息會失真或炸掉）。"""
+    from ygo_sniper.notify import TelegramNotifier
+
+    r = hb_row(ratio=0.65)
+    m = run([r]).high_band[0]
+    notifier = TelegramNotifier.__new__(TelegramNotifier)
+    notifier.dashboard_url = "http://127.0.0.1:8321"
+    text = notifier.render(m)
+    assert "判定來源：同卡成交" in text
+    assert "🏷️ 高價帶" in text
+
+
+def test_format_overflow_counts_high_band_separately():
+    """規則 5 超量時也要在 `format_overflow` 的分類統計裡看得到，
+    不是被吃進「另有 N 筆」卻沒人知道是哪一條規則。"""
+    from ygo_sniper.notify import format_overflow
+
+    r = hb_row(ratio=0.65)
+    m = run([r]).high_band[0]
+    text = format_overflow([m], "http://127.0.0.1:8321")
+    assert "高價帶折價 1 筆" in text

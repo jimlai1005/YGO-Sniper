@@ -64,6 +64,23 @@ def daily(
         pipe.close()
 
 
+@app.command()
+def daily_high(no_notify: bool = typer.Option(False, help="只掃不推播")):
+    """高價帶那一鍵：掃 ¥8,624～50,000 帶 → 只推 ≤7 折＋狙擊命中。獨立排程跑這個。
+
+    不跑 `_mine_snipes_daily`——狙擊挖掘一天一次由低價帶 `daily` 負責，
+    高價帶重複跑只是加倍請求（見 plan Task 5）。
+    """
+    pipe = Pipeline()
+    try:
+        result = pipe.scan(high_band=True)
+        _print_scan(result)
+        if not no_notify:
+            _run_notifications(pipe, result)
+    finally:
+        pipe.close()
+
+
 def _print_rule_counts(outcome) -> None:
     """規則有沒有在運作，要看得出來。
 
@@ -73,6 +90,7 @@ def _print_rule_counts(outcome) -> None:
     from .notify_rules import (
         RULE_AUCTION_URGENT,
         RULE_CARD_SNIPE,
+        RULE_HIGH_BAND,
         RULE_HIGH_P,
         RULE_LABEL,
         RULE_SELLER_NEW,
@@ -93,7 +111,8 @@ def _print_rule_counts(outcome) -> None:
         f"[bold]{RULE_LABEL[RULE_CARD_SNIPE]}[/bold] 命中 "
         f"{len(outcome.card_snipe)} 筆"
         f"（🎯 {sum(1 for m in outcome.card_snipe if m.row.get('tier') == 'exact')}"
-        f"／👀 {sum(1 for m in outcome.card_snipe if m.row.get('tier') == 'partial')}）"
+        f"／👀 {sum(1 for m in outcome.card_snipe if m.row.get('tier') == 'partial')}） ｜ "
+        f"[bold]{RULE_LABEL[RULE_HIGH_BAND]}[/bold] 命中 {len(outcome.high_band)} 筆"
         f" ｜ 送出 {len(outcome.sent)} 則"
     )
     if outcome.deduped:
@@ -293,6 +312,16 @@ def scan(dry_run: bool = typer.Option(False, help="不寫入資料庫")):
     pipe = Pipeline()
     try:
         _print_scan(pipe.scan(dry_run=dry_run))
+    finally:
+        pipe.close()
+
+
+@app.command()
+def scan_high(dry_run: bool = typer.Option(False, help="不寫入資料庫")):
+    """高價帶只掃不推播。"""
+    pipe = Pipeline()
+    try:
+        _print_scan(pipe.scan(high_band=True, dry_run=dry_run))
     finally:
         pipe.close()
 
