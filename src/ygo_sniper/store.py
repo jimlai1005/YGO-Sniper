@@ -63,11 +63,13 @@ CREATE TABLE IF NOT EXISTS signals (
     -- 徽章綁它。restored_count 是舊誤判帳（清除功能自己的誤殺率），語意不動。
     cleared_verified        INTEGER NOT NULL DEFAULT 0,
     verified_restored_count INTEGER NOT NULL DEFAULT 0,
-    -- 高價帶掃描（2026-08-22）。'std' = 一般掃描、'high' = 高價帶（¥8,624～
-    -- 50,000，只掛 buyee_mercari）。後見覆蓋前見：每次 upsert 寫最後一次
-    -- 看到它的那一輪所屬的帶——邊界隨匯率漂移，這是唯一穩定的語意。
-    -- notify_rules 用它決定一個 signal 有資格評估哪些規則（見高價帶掃描
-    -- plan Task 4）；band 缺失或 'std' 時行為與這個欄位出現之前完全相同。
+    -- 高價帶掃描（2026-08-22，語意定稿於修正回合二 Task 12）。'std' = 一般
+    -- 掃描、'high' = 高價帶（動態 ceiling～¥50,000，只掛 buyee_mercari）。
+    -- **只有帶價格過濾的掃描輪有宣告權**：upsert_signal 的 band 參數預設
+    -- None＝保留既有值，掃描路徑才顯式傳 'std'/'high'——回寫路徑
+    -- （recalc-bids／resolve-grades）零改動即不會洗掉它。notify_rules 用它
+    -- 決定一個 signal 有資格評估哪些規則（規則 1/2/3 只吃 std、規則 5 只吃
+    -- high、規則 4 不分帶）；band 缺失或 'std' 時行為與這欄位出現前相同。
     band                    TEXT DEFAULT 'std'
 );
 CREATE INDEX IF NOT EXISTS idx_signals_state ON signals(state);
@@ -160,12 +162,13 @@ CREATE TABLE IF NOT EXISTS listing_obs (
     disappeared_at TEXT,
     window_exit_at TEXT,
     revived_count  INTEGER DEFAULT 0,
-    -- 高價帶掃描（2026-08-22，reviewer Critical 1 修法，plan Task 8）。'std' =
-    -- 一般掃描、'high' = 高價帶。地平線判定的分組鍵加了 band：高價帶批次因
-    -- 伺服器端 price_max 天生看不到低價帶商品，若地平線不分帶，下一輪低價帶
-    -- 就會把高價帶商品判離場（同一個「觀測 scope 與判定 scope 不一致」的
-    -- 第九次事故形狀，CLAUDE.md 第五節第 8 條）。後見覆蓋前見，語意與
-    -- signals.band 同款：最後看到它的那一輪決定它現在屬於哪個帶。
+    -- 價格帶標記（2026-08-22 引入，語意定稿於修正回合二 Task 12）。
+    -- 由**觀測到的 JPY 價格對照當日 _price_ceiling_jpy 推導**（見
+    -- _derive_listing_band），任何批次都沒有宣告權；推不出來（無價格／
+    -- 非 JPY／該 site 無邊界）時 sticky 保留既有值，新列 fallback 'std'。
+    -- ⚠️ 離場地平線判定**不讀這個欄位**——它用判定當下重算的價格窗
+    -- （record_listing_scan 的 price_bounds），儲存值會因匯率漂移過期。
+    -- 本欄位純供 dashboard／除錯；與 signals.band（掃描輪語意）同名不同義。
     band           TEXT DEFAULT 'std'
 );
 CREATE INDEX IF NOT EXISTS idx_listing_obs_site ON listing_obs(site, last_seen);

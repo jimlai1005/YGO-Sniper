@@ -106,14 +106,24 @@ def _stub_valuation(monkeypatch):
 
 
 class _FX:
-    """規則 5 分子換匯用的假匯率（修正回合二 Task 13）。JPY:TWD 固定 1:1，
-    且 `apply_markup=False` 呼叫時不加價——讓 `hb_row()` 的 `ratio` 參數
-    可以直接反推 `price_native`，不必在每個測試裡重算匯率。"""
+    """規則 5 分子換匯用的假匯率（修正回合二 Task 13）。JPY:TWD 固定 1:1——
+    讓 `hb_row()` 的 `ratio` 參數可以直接反推 `price_native`。
+
+    ⚠️ 對 `apply_markup` **不是盲的**：市價基準的不變式是「分子必須以
+    `apply_markup=False` 換匯」（與 comps.price_twd 同尺，comps.py 的
+    `to_twd(..., apply_markup=False)`）。真 `FxRates.to_twd` 的預設是
+    `apply_markup=True`——日後重構若少寫這個 kwarg，會靜默退回加價口徑、
+    比率整體膨脹（少推播＝本專案最貴的錯誤方向）。這裡直接拋錯釘死。"""
 
     def to_twd(self, amount: float, currency: str, *, apply_markup: bool = True) -> float:
+        if apply_markup:
+            raise AssertionError(
+                "規則 5 的市價分子必須以 apply_markup=False 換匯"
+                "（與 comps.price_twd 同一把尺）——少寫 kwarg 會靜默退回加價口徑"
+            )
         if str(currency).upper() != "JPY":
             raise ValueError(f"未知幣別: {currency}")
-        return float(amount)  # 1:1，apply_markup 對這個假匯率沒有作用
+        return float(amount)  # 1:1
 
 
 FX = _FX()
