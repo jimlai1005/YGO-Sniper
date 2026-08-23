@@ -331,7 +331,7 @@ ygo-sniper daily-high          # 高價帶那一鍵：¥8,624 動態下限～¥5
                                #   只掛 buyee_mercari，只推 ≤7 折＋L1/L2 或狙擊命中
                                #   （獨立排程跑這個，見下方排程時段；自己的監督帳本）
 ygo-sniper scan-high --dry-run # 高價帶只掃不寫庫
-ygo-sniper serve               # dashboard → http://127.0.0.1:8321
+ygo-sniper serve               # dashboard → http://127.0.0.1:8321（含高價掃描按鈕）
 ygo-sniper notify-preview      # 只算不送，調門檻時用這個
 ygo-sniper health              # 各來源健康 ＋ 告警表
 ygo-sniper sellers --rank      # Seller Alpha 排行榜

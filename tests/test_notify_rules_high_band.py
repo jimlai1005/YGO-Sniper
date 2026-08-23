@@ -618,3 +618,56 @@ def test_format_overflow_counts_high_band_separately():
     m = run([r]).high_band[0]
     text = format_overflow([m], "http://127.0.0.1:8321")
     assert "高價帶折價 1 筆" in text
+
+
+# ---------------------------------------------------------------------------
+# `notify-preview` CLI（高價帶掃描 plan Task 14）：這是調 `max_price_ratio`
+# 門檻用的工具，看不到規則 5 的表格就調不了——打**真正的 `notify-preview`
+# 指令**（CLAUDE.md 第六節：驗證使用者實際會打的指令，不是元件會不會動）。
+# 用 `run()` 算出來的**真實** Outcome（走過 `evaluate`／`_match_high_band`
+# 本人，不是手拼一個 Match）餵給 monkeypatch 過的 `Pipeline.notification_outcome`
+# ——這樣既不必為了 L1/L2 估價搭一整套真實 comps／DB，也不是在測試裡
+# 重新實作 CLI 的表格渲染邏輯（那才是假守衛）。
+# ---------------------------------------------------------------------------
+def test_notify_preview_prints_rule5_table_and_skip_reasons(tmp_path, monkeypatch):
+    from dataclasses import replace as dc_replace
+
+    from typer.testing import CliRunner
+
+    import ygo_sniper.cli as cli_mod
+    import ygo_sniper.config as config_mod
+    import ygo_sniper.pipeline as pipeline_mod
+
+    db = tmp_path / "preview_hb.db"
+    config_mod.load_config.cache_clear()
+    test_cfg = dc_replace(
+        config_mod.load_config(),
+        storage={**config_mod.load_config().storage, "db_path": str(db)},
+    )
+    # `notify_preview` 自己 `Pipeline()`（不帶 cfg）→ 走 pipeline 模組的
+    # load_config。承重斷言：這條測試絕不能碰正式庫。
+    monkeypatch.setattr(pipeline_mod, "load_config", lambda: test_cfg)
+    monkeypatch.setattr(pipeline_mod, "FxRates", lambda _cfg: FX)
+    monkeypatch.setattr(pipeline_mod, "build_sources", lambda _cfg, _f=None: {})
+    assert pipeline_mod.load_config().db_path == db, "preview 的 cfg 沒有指到 tmp db"
+
+    hit = hb_row(ratio=0.62)
+    missing = hb_row(key="buyee_mercari:h2", ratio=0.65)
+    missing["price_native"] = None
+    outcome = run([hit, missing])
+    assert len(outcome.high_band) == 1  # 命中；缺值那筆進 outcome.skipped
+    assert any(s.rule == RULE_HIGH_BAND for s in outcome.skipped)
+    monkeypatch.setattr(
+        pipeline_mod.Pipeline, "notification_outcome", lambda self, *a, **kw: outcome
+    )
+
+    try:
+        r = CliRunner().invoke(cli_mod.app, ["notify-preview"])
+        assert r.exit_code == 0, f"{r.output}\n{r.exception!r}"
+        assert "規則 5 高價帶折價：命中 1 筆" in r.output
+        assert f"標價/市價 {outcome.high_band[0].price_ratio:.0%}" in r.output
+        assert f"公允價 NT${FAIR_TWD:,.0f}" in r.output
+        # 缺值那筆要在「被排除」表格裡看得見理由，不能靜默消失
+        assert "缺值不送" in r.output
+    finally:
+        config_mod.load_config.cache_clear()

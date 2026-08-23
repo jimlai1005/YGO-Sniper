@@ -556,3 +556,39 @@ buyee_mercari` 清得掉 `buyee_mercari@high` 的列。
 
 **觀察（記錄不動）**：文案 N＝n_effective 在 L1/L2 閘門後就是同卡池大小（plan 明示的
 選擇），但措辭勿誘導「數字大＝證據強」——維持現狀，列入上線後觀察。
+
+---
+
+# 收尾回合（2026-08-23，使用者要求 dashboard 呈現）
+
+### Task 14（@inline）：dashboard 高價掃描按鈕＋帶別徽章＋notify-preview 規則 5
+
+**使用者決策**：dashboard 用**獨立的「高價掃描」按鈕**（不併進「立即掃描」——與全案
+隔離哲學一致，兩條管線的失敗模式不互綁）；訊號列標示高價帶身分。
+
+**現況（scout 盤點）**：`/api/scan`（web/app.py:1238-1285）→ `store.begin_scan/finish_scan/
+scan_status`（全域單一狀態，跑起來就拒絕再排）；前端按鈕 `web/static/index.html:371`
+＋`scanNow()`:1919-1935＋`pollScanStatus()`:1895-1917；`/api/signals` 的 `SELECT s.*`
+已自然把 `band` 流到前端但前端沒用；`cli.py` 的 `notify_preview`（:3507-3606）漏列規則 5。
+
+**修法**：
+1. 後端：`POST /api/scan-high`——複製 `trigger_scan` 的 begin/finish/status 骨架，
+   呼叫 `p.scan(high_band=True, trigger="dashboard-high")`；**共用同一個全域 scan 狀態**
+   （兩顆按鈕互斥：另一輪在跑就回 `started:false`——Playwright 不該兩個並開，這是
+   既有防線的正確延伸，不是偷懶）。`scan_status` 端點照用。
+2. 前端：「立即掃描」旁加「高價掃描」按鈕（`scanHighNow()` 打 `/api/scan-high`，
+   輪詢共用 `pollScanStatus()`；任一輪在跑時兩顆一起 disable）。
+3. 前端：`card()` 在 `it.band === 'high'` 時畫 🏷️ 高價帶 chip（樣式比照既有
+   bucketChip 的視覺語彙）。
+4. `cli.py` 的 `notify_preview` 補規則 5 的表格（欄位對齊 `_match_high_band` 的
+   Match 欄位：標價市價比、公允價、樣本數、Skip 理由要看得到——它是調
+   `max_price_ratio` 門檻的工具，看不到規則 5 就調不了）。
+5. 文件：CLAUDE.md 第九節 `serve` 行補「含高價掃描按鈕」一句；`notify-preview`
+   行不用動（本來就寫調門檻用）。
+
+**紅燈測試**：web 的既有測試慣例在哪就跟著放（scout 未列 web 測試檔，builder 先找
+`tests/` 有沒有 dashboard/API 測試；有就比照加 `/api/scan-high` 的觸發與互斥測試，
+沒有就以 FastAPI TestClient 起最小測試）。notify-preview 規則 5 至少一條輸出斷言。
+
+**驗收**：`make test` 全綠；`ygo-sniper serve` 起來後 `curl -X POST /api/scan-high` 回
+`started:true`（或 running 中回 false）；前端兩顆按鈕與徽章人工截圖或 DOM 斷言。
