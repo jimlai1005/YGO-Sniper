@@ -79,6 +79,13 @@
   .bkt{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 7px;
        border-radius:5px;margin-left:6px;vertical-align:2px;white-space:nowrap;
        background:#2a1f3d;color:#c4b5fd;border:1px solid #5b4b8a}
+  /* 高價帶徽章。同尺寸／同版位（跟在標題後面）但**不共用 `.bkt` 的配色**：
+     `.bkt` 是使用者手動指派的分類，這個是系統依 `band='high'` 判出來的
+     （¥8,624～50,000，只掛 Mercari），色系刻意不同，理由與上面 `.bkt`
+     的註解同一條——系統判定與使用者指派不能長得一樣。 */
+  .band-high{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 7px;
+       border-radius:5px;margin-left:6px;vertical-align:2px;white-space:nowrap;
+       background:#3a2410;color:#fbbf24;border:1px solid #7a5518}
   .top{display:flex;gap:12px;padding:12px}
   .thumb{width:88px;height:88px;flex:0 0 88px;border-radius:7px;object-fit:contain;
          background:var(--panel-2);border:1px solid var(--line)}
@@ -369,6 +376,10 @@
     <div style="margin-left:auto" class="row">
       <span class="pill" id="scan-when" title="還沒讀到掃描狀態">最後掃描 <b>–</b></span>
       <button id="scan-btn" onclick="scanNow()">立即掃描</button>
+      <!-- 獨立按鈕、不併進「立即掃描」：與高價帶 plan 的隔離哲學一致——
+           兩條管線的失敗模式不互綁。共用同一個全域 scan 狀態，互斥不並跑
+           （見 pollScanStatus／renderScanStatus，任一輪在跑時兩顆一起 disable）。 -->
+      <button id="scan-high-btn" onclick="scanHighNow()" title="掃 ¥8,624～50,000 高價帶（只掛 Mercari）">高價掃描</button>
       <button onclick="loadAll()">重新整理</button>
     </div>
   </div>
@@ -1017,7 +1028,7 @@ function card(it){
   <article class="card ${hot?'hot':''} ${trig?'trig':''} ${gone?'expired':''}">
     ${shot(it.image_url, it.title)}
     <div class="body">
-      <h3 class="title"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>${badge}${bucketChip(it)}${xpBadge}${backBadge}${shelfAge(it)}</h3>
+      <h3 class="title"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>${badge}${bucketChip(it)}${bandChip(it)}${xpBadge}${backBadge}${shelfAge(it)}</h3>
       <div class="money">${nt(it.landed_twd)}<small>到手 · ${escapeHtml(it.route || "")}</small></div>
       <div class="cmp">${comps} · ${pWorth(it)}</div>
       <div class="cmp">${escapeHtml(it.grader || "")} ${it.grade ?? ""} ${escapeHtml(it.set_code || "")}</div>
@@ -1262,6 +1273,16 @@ function bucketChip(it){
   const label = BUCKETS[it.bucket];
   return label
     ? `<span class="bkt" title="你指派的分類（手動，不是系統判的）">${label}</span>`
+    : "";
+}
+
+/** 高價帶徽章。`band` 是後端 `_upsert_listing_obs`／signal upsert 依觀測
+    價格對照當日 `_price_ceiling_jpy` 推導出來的（見 store.py band 語意），
+    不是使用者指派——`it.band !== 'high'` 一律不畫（含 'std'／缺欄位的舊
+    回應），避免整張卡片多一個永遠空的位子。 */
+function bandChip(it){
+  return it.band === "high"
+    ? `<span class="band-high" title="高價帶標的（¥8,624～50,000，只掛 Mercari，7 折以下才會推播）">🏷️ 高價帶</span>`
     : "";
 }
 
@@ -1862,8 +1883,13 @@ let wasRunning = false;
 function renderScanStatus(st){
   const pill = document.getElementById("scan-when");
   const btn  = document.getElementById("scan-btn");
+  const btnHigh = document.getElementById("scan-high-btn");
   const last = st.last_run || {};
   const lastAt = last.finished_at || null;
+  // 兩顆按鈕共用同一個全域 scan 狀態（互斥不並跑，見 /api/scan-high 註解）：
+  // 不論哪一輪在跑，兩顆都要一起 disable，不然使用者按另一顆會被後端拒絕
+  // 但前端看起來像沒反應。
+  const isHigh = (st.trigger || "").startsWith("dashboard-high") || st.trigger === "high";
 
   const doneNote = lastAt
     ? `${abs(lastAt)}\n掃 ${last.scanned ?? "?"} 筆 → 符合年代 ${last.candidates ?? "?"}`
@@ -1872,11 +1898,14 @@ function renderScanStatus(st){
 
   if(st.running){
     pill.className = "pill live";
-    pill.innerHTML = `<span class="spin"></span>掃描中… <b>${mmss(st.elapsed_seconds)}</b>`;
-    pill.title = `開始於 ${abs(st.started_at)}（${st.trigger === "dashboard" ? "你按的" : st.trigger || "?"}）\n`
-               + `上一次完成：${doneNote}`;
+    pill.innerHTML = `<span class="spin"></span>${isHigh ? "高價掃描中…" : "掃描中…"} <b>${mmss(st.elapsed_seconds)}</b>`;
+    pill.title = `開始於 ${abs(st.started_at)}（${
+      st.trigger === "dashboard" || st.trigger === "dashboard-high" ? "你按的" : st.trigger || "?"
+    }）\n上一次完成：${doneNote}`;
     btn.disabled = true;
     btn.textContent = "掃描中…";
+    btnHigh.disabled = true;
+    btnHigh.textContent = "掃描中…";
   }else{
     pill.className = "pill" + (st.stale ? " stale" : "");
     const rel = ago(lastAt);
@@ -1889,6 +1918,8 @@ function renderScanStatus(st){
       : doneNote + (st.error ? `\n最近一次錯誤：${st.error}` : "");
     btn.disabled = false;
     btn.textContent = "立即掃描";
+    btnHigh.disabled = false;
+    btnHigh.textContent = "高價掃描";
   }
 }
 
@@ -1918,8 +1949,12 @@ async function pollScanStatus(){
 
 async function scanNow(){
   const btn = document.getElementById("scan-btn");
-  btn.disabled = true;                     // 先鎖，不等 API 回來——雙擊就是在這半秒發生
+  const btnHigh = document.getElementById("scan-high-btn");
+  // 兩顆一起先鎖，不等 API 回來——雙擊就是在這半秒發生，而且兩條掃描
+  // 共用同一個全域 scan 狀態，另一顆此刻按下去後端也只會回 started:false。
+  btn.disabled = true;
   btn.textContent = "掃描中…";
+  btnHigh.disabled = true;
   try{
     const r = await api("/api/scan", {method:"POST"});
     toast(r.started ? "背景掃描已啟動…" : (r.message || "已經有一輪在跑"));
@@ -1928,6 +1963,30 @@ async function scanNow(){
     toast("啟動失敗：" + e.message);
     btn.disabled = false;
     btn.textContent = "立即掃描";
+    btnHigh.disabled = false;
+    return;
+  }
+  clearTimeout(scanPollTimer);
+  scanPollTimer = setTimeout(pollScanStatus, 700);
+}
+
+/** 高價掃描（`/api/scan-high`）。與 `scanNow` 同款骨架——共用
+    `pollScanStatus`／全域 scan 狀態，兩顆按鈕互斥（見 renderScanStatus）。 */
+async function scanHighNow(){
+  const btn = document.getElementById("scan-btn");
+  const btnHigh = document.getElementById("scan-high-btn");
+  btnHigh.disabled = true;
+  btnHigh.textContent = "掃描中…";
+  btn.disabled = true;
+  try{
+    const r = await api("/api/scan-high", {method:"POST"});
+    toast(r.started ? "背景高價掃描已啟動…" : (r.message || "已經有一輪在跑"));
+    wasRunning = true;
+  }catch(e){
+    toast("啟動失敗：" + e.message);
+    btnHigh.disabled = false;
+    btnHigh.textContent = "高價掃描";
+    btn.disabled = false;
     return;
   }
   clearTimeout(scanPollTimer);

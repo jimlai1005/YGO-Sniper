@@ -3519,6 +3519,7 @@ def notify_preview(
     from .notify_rules import (
         RULE_AUCTION_URGENT,
         RULE_CARD_SNIPE,
+        RULE_HIGH_BAND,
         RULE_HIGH_P,
         RULE_LABEL,
         RULE_SELLER_NEW,
@@ -3539,7 +3540,8 @@ def notify_preview(
             f"出價≥{rules.min_bids} 次且 ≤{rules.price_discovered_within_hours:.0f}h 結標、"
             f"監控賣家同儕折價≥{rules.seller_min_discount:.0%}"
             f"（沒有同儕時改用模型估值，門檻 {rules.seller_model_min_discount:.0%}；"
-            f"估不了的每輪上限 {rules.seller_unpriced_max_per_run} 則）[/dim]"
+            f"估不了的每輪上限 {rules.seller_unpriced_max_per_run} 則）｜"
+            f"高價帶標價市價比≤{rules.high_band_max_price_ratio:.0%}[/dim]"
         )
         _print_rule_counts(outcome)
 
@@ -3549,6 +3551,7 @@ def notify_preview(
             (RULE_SELLER_NEW, outcome.seller_new),
             (RULE_SELLER_UNPRICED, outcome.seller_unpriced),
             (RULE_CARD_SNIPE, outcome.card_snipe),
+            (RULE_HIGH_BAND, outcome.high_band),
         ):
             t = Table(title=f"{RULE_LABEL[rule]}：命中 {len(matches)} 筆")
             t.add_column("送？", justify="center")
@@ -3595,6 +3598,15 @@ def notify_preview(
                     mark = "🎯" if m.row.get("tier") == "exact" else "👀"
                     detail = (f"{mark} {w.get('grader', '')}{w.get('grade_label', '')} "
                               f"{w.get('name_ja', '')}｜{price_s}")
+                elif rule == RULE_HIGH_BAND:
+                    # 這是調 max_price_ratio 門檻用的工具（見 CLAUDE.md 第九節
+                    # notify-preview 那行）——標價市價比、公允價、樣本數三個
+                    # 都是規則 5 判準本身讀的數字（notify_rules._match_high_band），
+                    # 看不到這幾個數字就不知道門檻該往哪邊調。
+                    ratio_s = f"{m.price_ratio:.0%}" if m.price_ratio is not None else "?"
+                    fair_s = f"{m.fair_twd:,.0f}" if m.fair_twd is not None else "?"
+                    detail = (f"標價/市價 {ratio_s}｜公允價 NT${fair_s}"
+                              f"（n={m.sample_n if m.sample_n is not None else '?'}）")
                 else:
                     detail = f"P={m.p_worth:.0%}｜稀有度 {m.rarity or '未知'}"
                 t.add_row("✔" if (m.key, m.rule) in to_send else "—", detail, m.title)
@@ -3619,7 +3631,7 @@ def notify_preview(
             short = {
                 RULE_AUCTION_URGENT: "1", RULE_HIGH_P: "2",
                 RULE_SELLER_NEW: "3", RULE_SELLER_UNPRICED: "3b",
-                RULE_CARD_SNIPE: "4",
+                RULE_CARD_SNIPE: "4", RULE_HIGH_BAND: "5",
             }
             for s in outcome.skipped:
                 t.add_row(

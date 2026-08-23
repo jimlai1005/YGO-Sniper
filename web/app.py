@@ -1283,3 +1283,49 @@ def trigger_scan(tasks: BackgroundTasks):
         "running": True,
         "message": "掃描已在背景啟動，完成後清單會自動更新",
     }
+
+
+@app.post("/api/scan-high")
+def trigger_scan_high(tasks: BackgroundTasks):
+    """從 dashboard 手動觸發一次**高價帶**掃描（¥8,624～50,000，只掛
+    buyee_mercari；不推播，結果直接進 db）。
+
+    骨架與 `/api/scan` 完全同款、**共用同一個全域 scan 狀態**
+    （`store.begin_scan`/`finish_scan`/`scan_status`）：兩顆按鈕互斥，
+    任一輪在跑時另一輪回 `started:false`——這不是偷懶省一個狀態表，是
+    既有防線的正確延伸（高價帶 plan 全域紅線：Playwright 不該兩個並開；
+    兩條 pipeline 同時打來源只會更快被擋）。差別只有 `trigger` 與
+    `Pipeline.scan(high_band=True)`。
+    """
+    st = store.scan_status(timeout_seconds=cfg.scan_timeout_seconds)
+    if st["running"]:
+        return {
+            "ok": True,
+            "started": False,
+            "running": True,
+            "message": f"已經有一輪掃描在跑（{st.get('trigger') or '?'} 觸發），這次不重複啟動",
+            "status": st,
+        }
+
+    started = store.begin_scan(trigger="dashboard-high")
+
+    def _run() -> None:
+        from ygo_sniper.pipeline import Pipeline
+
+        try:
+            p = Pipeline(cfg)
+            try:
+                p.scan(high_band=True, trigger="dashboard-high")
+            finally:
+                p.close()
+        except Exception as exc:  # noqa: BLE001 - 見 trigger_scan 的同款註解
+            store.finish_scan(started, error=f"{type(exc).__name__}: {exc}")
+            raise
+
+    tasks.add_task(_run)
+    return {
+        "ok": True,
+        "started": True,
+        "running": True,
+        "message": "高價掃描已在背景啟動，完成後清單會自動更新",
+    }
