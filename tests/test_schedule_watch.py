@@ -8,9 +8,13 @@ import pytest
 
 from ygo_sniper.schedule_watch import (
     _ALL_SLOTS,
+    _HIGH_ALL_SLOTS,
     PENDING_ALERT_KEY,
+    PENDING_ALERT_KEY_HIGH,
     RUN_FINISHED_KEY,
+    RUN_FINISHED_KEY_HIGH,
     RUN_STARTED_KEY,
+    RUN_STARTED_KEY_HIGH,
     expected_next_gap_minutes,
     missed_slots_between,
     next_slot_after,
@@ -20,6 +24,7 @@ from ygo_sniper.schedule_watch import (
 )
 
 _PLIST = Path(__file__).resolve().parents[1] / "scripts" / "com.jim.ygosniper.plist"
+_HIGH_PLIST = Path(__file__).resolve().parents[1] / "scripts" / "com.jim.ygosniper.high.plist"
 
 
 def _dt(s: str) -> datetime:
@@ -237,6 +242,73 @@ def test_windows_match_plist():
 
 
 # ---------------------------------------------------------------------------
+# Task 6（高價帶排程）：_HIGH_ALL_SLOTS 是 com.jim.ygosniper.high.plist 的手抄本，
+# 與低價帶 test_windows_match_plist 同一套理由與同一種 mutant 防線。
+# ---------------------------------------------------------------------------
+def test_high_windows_match_high_plist():
+    with open(_HIGH_PLIST, "rb") as f:
+        plist = plistlib.load(f)
+    plist_slots = {
+        e["Hour"] * 60 + e["Minute"] for e in plist["StartCalendarInterval"]
+    }
+    code_slots = set(_HIGH_ALL_SLOTS)
+    assert code_slots == plist_slots, (
+        f"schedule_watch._HIGH_ALL_SLOTS 與 {_HIGH_PLIST.name} 的 "
+        f"StartCalendarInterval 不同步：\n"
+        f"code only: {sorted(code_slots - plist_slots)}\n"
+        f"plist only: {sorted(plist_slots - code_slots)}"
+    )
+
+
+def test_high_windows_do_not_overlap_low_band_windows():
+    """兩帶的觸發分鐘必須零重疊——這是排程時刻表的定案約束
+    （低價帶佔 :30 與 :00/:30，高價帶只落在偶數整點 :00 與晚間 :15）。"""
+    assert set(_ALL_SLOTS).isdisjoint(set(_HIGH_ALL_SLOTS))
+
+
+def test_high_band_missed_slot_detection_fires_on_drift():
+    """高價帶網格的漏格偵測必須跟低價帶一樣有效：18:15 起跑（正常時刻），
+    下一輪本該是 20:15，卻直接跳到 22:15，中間 20:15 那格必須被偵測出來。
+    换成高價帶自己的網格（`slots=_HIGH_ALL_SLOTS`），比照既有
+    `test_alert_fires_when_drifted_run_masks_missed_slot` 的漂移情境寫法。"""
+    msg = schedule_health(
+        "2026-08-10T18:15:00",
+        "2026-08-10T18:18:00",
+        _dt("2026-08-10T22:15:00"),
+        _HIGH_ALL_SLOTS,
+    )
+    assert msg is not None and "漏跑" in msg and "20:15" in msg
+
+
+def test_high_band_missed_slots_between_uses_high_grid():
+    """`missed_slots_between` 直接吃 `_HIGH_ALL_SLOTS`：10:00 起跑、下一輪
+    16:00 才跑起來，中間 12:00／14:00 兩格必須被列出（16:00 是這一輪自己
+    代表的那一格，不算漏跑）。"""
+    missed = missed_slots_between(
+        _dt("2026-08-11T10:00:00"), _dt("2026-08-11T16:00:00"), _HIGH_ALL_SLOTS
+    )
+    assert missed == [_dt("2026-08-11T12:00:00"), _dt("2026-08-11T14:00:00")]
+
+
+def test_high_band_schedule_keys_differ_from_low_band():
+    """兩帶的基準鍵／pending 鍵必須各自獨立——防止一帶的告警消耗掉另一帶的，
+    或一帶跑一輪覆寫掉另一帶的基準（CLAUDE.md 第三節第八事故的同一種錯誤，
+    換成「哪兩條輪次共用一本帳」）。"""
+    assert RUN_STARTED_KEY_HIGH != RUN_STARTED_KEY
+    assert RUN_FINISHED_KEY_HIGH != RUN_FINISHED_KEY
+    assert PENDING_ALERT_KEY_HIGH != PENDING_ALERT_KEY
+    keys = {
+        RUN_STARTED_KEY,
+        RUN_FINISHED_KEY,
+        PENDING_ALERT_KEY,
+        RUN_STARTED_KEY_HIGH,
+        RUN_FINISHED_KEY_HIGH,
+        PENDING_ALERT_KEY_HIGH,
+    }
+    assert len(keys) == 6  # 六把鍵字面上兩兩不同，沒有任何一對意外撞名
+
+
+# ---------------------------------------------------------------------------
 # Fix 3／Fix 4：pending 機制真的接進 Pipeline／cli 之後——手動 scan、崩潰
 # 這兩種「_run_notifications 沒被叫到」的路徑，都不能吃掉已經偵測到的告警。
 #
@@ -313,6 +385,37 @@ def test_dry_run_and_watch_only_never_touch_schedule_state(pipeline):
     pipeline._finish_schedule_state(dry_run=False, watch_only=True)
     assert pipeline.store.get_meta(RUN_STARTED_KEY) is None
     assert pipeline._schedule_alert is None
+
+
+def test_high_band_scan_never_touches_low_band_schedule_keys(pipeline):
+    """主線程追加的必修項：`high_band=True` 的一輪完全不碰低價帶的三把鍵
+    ——只寫 `*_HIGH` 那三把。用真的 `Pipeline._update_schedule_state`／
+    `_finish_schedule_state`（`scan()` 唯一會呼叫排程監督的地方）驗證，
+    不必為此另外把整條 `_scan()` 跑一遍（跟既有 Fix 3／Fix 4 測試同款理由，
+    見本檔案上方那段說明）。"""
+    pipeline._update_schedule_state(dry_run=False, watch_only=False, high_band=True)
+    pipeline._finish_schedule_state(dry_run=False, watch_only=False, high_band=True)
+
+    assert pipeline.store.get_meta(RUN_STARTED_KEY) is None
+    assert pipeline.store.get_meta(RUN_FINISHED_KEY) is None
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY) is None
+
+    assert pipeline.store.get_meta(RUN_STARTED_KEY_HIGH) is not None
+    assert pipeline.store.get_meta(RUN_FINISHED_KEY_HIGH) is not None
+
+
+def test_low_band_scan_never_touches_high_band_schedule_keys(pipeline):
+    """反向情境：一般輪（`high_band=False`，等同 `ygo-sniper daily`／`scan`）
+    完全不碰高價帶的三把鍵——兩本帳的互不污染是雙向的。"""
+    pipeline._update_schedule_state(dry_run=False, watch_only=False, high_band=False)
+    pipeline._finish_schedule_state(dry_run=False, watch_only=False, high_band=False)
+
+    assert pipeline.store.get_meta(RUN_STARTED_KEY_HIGH) is None
+    assert pipeline.store.get_meta(RUN_FINISHED_KEY_HIGH) is None
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY_HIGH) is None
+
+    assert pipeline.store.get_meta(RUN_STARTED_KEY) is not None
+    assert pipeline.store.get_meta(RUN_FINISHED_KEY) is not None
 
 
 def test_manual_scan_leaves_pending_for_next_daily_to_deliver(pipeline, monkeypatch):
@@ -403,6 +506,52 @@ def test_failed_push_keeps_pending_for_retry(pipeline, monkeypatch):
 
     assert fake.sent  # 有嘗試送
     assert pipeline.store.get_meta(PENDING_ALERT_KEY) != ""  # 但沒清帳
+
+
+def test_high_band_alert_delivery_clears_high_key_not_low_key(pipeline, monkeypatch):
+    """主線程追加必修（Task 6 builder 發現）：`daily-high` 送達的告警要清
+    `PENDING_ALERT_KEY_HIGH`，不能誤清低價帶的 `PENDING_ALERT_KEY`——否則
+    高價帶自己的 pending 永遠不會被消耗，「先前 N 次未送達」無限疊加。"""
+    import ygo_sniper.cli as cli_mod
+
+    # 低價帶先留一筆看似無關的 pending，確保它在高價帶送達後原封不動。
+    pipeline.store.set_meta(PENDING_ALERT_KEY, "低價帶自己的舊 pending")
+
+    pipeline.store.set_meta(RUN_STARTED_KEY_HIGH, _ANCIENT_START)
+    pipeline.store.set_meta(RUN_FINISHED_KEY_HIGH, _ANCIENT_FINISH)
+    pipeline._update_schedule_state(dry_run=False, watch_only=False, high_band=True)
+    assert pipeline._schedule_alert is not None and "漏跑" in pipeline._schedule_alert
+    pipeline._finish_schedule_state(dry_run=False, watch_only=False, high_band=True)
+
+    fake = _FakeNotifier(ok=True)
+    monkeypatch.setattr(pipeline, "notifier", fake)
+    cli_mod._send_schedule_alert(pipeline)
+
+    assert fake.sent == [pipeline._schedule_alert]
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY_HIGH) == ""  # 高價帶帳清了
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY) == "低價帶自己的舊 pending"  # 低價帶帳沒被動到
+
+
+def test_low_band_alert_delivery_clears_low_key_not_high_key(pipeline, monkeypatch):
+    """反向情境：`daily`／`scan`（`high_band=False`，既有行為）送達告警時，
+    只清 `PENDING_ALERT_KEY`，不動高價帶自己的 `PENDING_ALERT_KEY_HIGH`。"""
+    import ygo_sniper.cli as cli_mod
+
+    pipeline.store.set_meta(PENDING_ALERT_KEY_HIGH, "高價帶自己的舊 pending")
+
+    pipeline.store.set_meta(RUN_STARTED_KEY, _ANCIENT_START)
+    pipeline.store.set_meta(RUN_FINISHED_KEY, _ANCIENT_FINISH)
+    pipeline._update_schedule_state(dry_run=False, watch_only=False, high_band=False)
+    assert pipeline._schedule_alert is not None and "漏跑" in pipeline._schedule_alert
+    pipeline._finish_schedule_state(dry_run=False, watch_only=False, high_band=False)
+
+    fake = _FakeNotifier(ok=True)
+    monkeypatch.setattr(pipeline, "notifier", fake)
+    cli_mod._send_schedule_alert(pipeline)
+
+    assert fake.sent == [pipeline._schedule_alert]
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY) == ""  # 低價帶帳清了
+    assert pipeline.store.get_meta(PENDING_ALERT_KEY_HIGH) == "高價帶自己的舊 pending"  # 高價帶帳沒被動到
 
 
 # ---------------------------------------------------------------------------

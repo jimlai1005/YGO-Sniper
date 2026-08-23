@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  安裝／改完之後重載：
+    cp scripts/com.jim.ygosniper.dashboard.plist ~/Library/LaunchAgents/
+    launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.dashboard.plist
+    launchctl load   ~/Library/LaunchAgents/com.jim.ygosniper.dashboard.plist
+
+  跟 com.jim.ygosniper.plist（daily 排程）不同：dashboard 是長駐 server，
+  不是「跑完就結束」的批次工作，所以用 RunAtLoad + KeepAlive 常駐，
+  不用 StartCalendarInterval。開機／登入時自動起、掛了 launchd 自動重啟。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jim.ygosniper.dashboard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>$HOME/projects/ygo-sniper/scripts/run_dashboard.sh</string>
+    </array>
+
+    <!-- 登入時就起，不用等你手動跑 ygo-sniper serve -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 掛了就重啟（例如 uvicorn crash）；ThrottleInterval 防止壞掉時瘋狂重啟洗 log -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/ygosniper.dashboard.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ygosniper.dashboard.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

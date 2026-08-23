@@ -118,4 +118,28 @@ def resolve_category(
     return str(value)
 
 
-__all__ = ["QuerySpec", "load_queries", "resolve_category"]
+def load_high_band_queries(
+    watchlist: dict[str, Any],
+) -> tuple[float | None, list[QuerySpec]]:
+    """`watchlist['high_band']` → (max_price_jpy, QuerySpec 清單)。
+
+    區塊不存在 → (None, [])——高價帶是選配，不裝就是沒有。
+    `max_price_jpy` 缺失或非正數 → 印警告並回 (None, [])：沒有上限的高價帶
+    等於整個市場，那不是這個功能的語意，寧可整段不跑並大聲說。
+    查詢列的解析與 `load_queries` 同一套容錯（壞列印警告跳過）。
+    """
+    block = watchlist.get("high_band")
+    if not isinstance(block, dict):
+        return None, []
+    max_price = block.get("max_price_jpy")
+    if not isinstance(max_price, (int, float)) or isinstance(max_price, bool) or max_price <= 0:
+        print(
+            f"[warn] watchlist high_band.max_price_jpy 缺失或非正數（{max_price!r}）"
+            "——高價帶沒有上限就等於整個市場，本輪不跑"
+        )
+        return None, []
+    queries = load_queries(block)
+    return float(max_price), queries
+
+
+__all__ = ["QuerySpec", "load_queries", "load_high_band_queries", "resolve_category"]

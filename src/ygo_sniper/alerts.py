@@ -95,7 +95,11 @@ class AlertEngine:
 
     # ------------------------------------------------------------------
     def evaluate(
-        self, results: list[SearchResult], now: datetime | None = None
+        self,
+        results: list[SearchResult],
+        now: datetime | None = None,
+        *,
+        band: str = "std",
     ) -> list[Alert]:
         """吃整輪 scan 的 SearchResult，回傳「現在該發」的訊息文字。
 
@@ -103,18 +107,27 @@ class AlertEngine:
         超過 notify.max_alerts_per_run 的部分併成一則統計。
         會更新觀測帳（occurrences 等），但**不**記 notified——
         呼叫端送出成功後要再呼叫 mark_sent()。
+
+        `band`：`'std'`（預設，既有行為零改動）或 `'high'`。高價帶輪
+        （`daily-high`）與低價帶輪（`daily`）並行跑，同一個來源在兩邊都可能
+        壞掉或都健康——這是兩個獨立的觀測序列，帳本不能合併（2026-08-22
+        修正回合 W2；CLAUDE.md 第五節「兩本帳不能合併」）。做法是把 band
+        併進 source 這把鍵本身（`{source}@high`），fingerprint／occurrences／
+        notify_count／冷卻／復原全部自然分帶，不需要在四個方法各加一次判斷。
+        `band='std'` 時鍵不變（`{source}`），既有帳本列不失效。
         """
         now = now or datetime.now(UTC)
         due: list[Alert] = []
         recoveries: list[Alert] = []
 
         for source, rep in self._aggregate(results).items():
+            key = source if band == "std" else f"{source}@{band}"
             if rep.health in _ALERTABLE:
-                alert = self._observe_failure(source, rep, now)
+                alert = self._observe_failure(key, rep, now)
                 if alert is not None:
                     due.append(alert)
             else:
-                recovery = self._observe_ok(source, now)
+                recovery = self._observe_ok(key, now)
                 if recovery is not None:
                     recoveries.append(recovery)
 

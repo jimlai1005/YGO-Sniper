@@ -160,7 +160,7 @@ def test_one_broken_pass_makes_batch_unobservable(monkeypatch, tmp_path, cfg):
     captured: list[dict] = []
     monkeypatch.setattr(
         pipe.store, "record_listing_scan",
-        lambda batches: captured.extend(batches) or {},
+        lambda batches, **kw: captured.extend(batches) or {},
     )
     try:
         pipe.scan(skip_comps=True, dry_run=False)

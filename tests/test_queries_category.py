@@ -17,7 +17,12 @@ import pytest
 
 from ygo_sniper.domain import Site
 from ygo_sniper.pipeline import _optional_kwargs, run_source_search
-from ygo_sniper.queries import QuerySpec, load_queries, resolve_category
+from ygo_sniper.queries import (
+    QuerySpec,
+    load_high_band_queries,
+    load_queries,
+    resolve_category,
+)
 from ygo_sniper.sources.buyee import BuyeeSource
 from ygo_sniper.sources.ebay import EbaySource
 from ygo_sniper.sources.paypay import PayPayDirectSource
@@ -180,6 +185,27 @@ def test_optional_kwargs_never_passes_empty_category():
 
 
 # ---------------------------------------------------------------------------
+# 3b. min_price（高價帶掃描，2026-08-22）：傳給不支援的來源必須大聲失敗，
+# 不可比照 category 靜默丟掉（CLAUDE.md 第五節，前科是 category 被吞了一年）。
+# ---------------------------------------------------------------------------
+def test_min_price_reaches_search_detailed_when_supported():
+    src = _SpySource()
+    src.supports_min_price = True
+    run_source_search("spy", src, "PSA 初期", pages=1, min_price=15000)
+    assert src.calls[0]["min_price"] == 15000
+
+
+def test_min_price_raises_loudly_when_source_cannot_use_it():
+    """沒有宣告 `supports_min_price` 的來源收到 min_price 必須大聲拋錯，
+    不准像 category 那樣印一行警告後把參數丟掉——那個先例正是本案的事故根源。
+    """
+    src = _SpySource()  # 未宣告 supports_min_price
+    with pytest.raises(ValueError, match="min_price"):
+        run_source_search("spy", src, "PSA 初期", pages=1, min_price=15000)
+    assert src.calls == []  # 從未把參數送到來源
+
+
+# ---------------------------------------------------------------------------
 # 4. 真的那份 watchlist：分類別名一定解得出值
 # ---------------------------------------------------------------------------
 def test_real_watchlist_categories_all_resolve(cfg):
@@ -211,3 +237,56 @@ def test_real_watchlist_stays_within_request_budget(cfg):
 def test_query_spec_label_is_readable():
     assert QuerySpec("PSA 初期", "PSA 初期", ("x",), "yugioh").label == "PSA 初期+yugioh"
     assert QuerySpec("PSA 初期", "PSA 初期", ("x",)).label == "PSA 初期"
+
+
+# ---------------------------------------------------------------------------
+# 5. 高價帶（high_band，2026-08-22）：watchlist['high_band'] → (上限, QuerySpec 清單)
+# ---------------------------------------------------------------------------
+def test_load_high_band_queries_normal_block():
+    watchlist = {
+        "high_band": {
+            "max_price_jpy": 50000,
+            "queries": [
+                {"name": "高價帶 PSA 初期（分類）", "keyword": "PSA 初期",
+                 "category": "yugioh", "sources": ["buyee_mercari"]},
+                {"name": "高價帶 PSA 初期（無分類保險）", "keyword": "遊戯王 PSA 初期",
+                 "sources": ["buyee_mercari"]},
+                {"name": "高價帶 PSA 1999", "keyword": "PSA 1999",
+                 "sources": ["buyee_mercari"]},
+                {"name": "高價帶 ARS 初期（分類）", "keyword": "ARS 初期",
+                 "category": "yugioh", "sources": ["buyee_mercari"]},
+            ],
+        }
+    }
+    cap, qs = load_high_band_queries(watchlist)
+    assert cap == 50000.0
+    assert len(qs) == 4
+    assert all(isinstance(q, QuerySpec) for q in qs)
+
+
+def test_load_high_band_queries_missing_block_is_legal_absence():
+    """區塊不存在＝高價帶是選配，不裝就是沒有——不算設定錯誤。"""
+    assert load_high_band_queries({}) == (None, [])
+
+
+def test_load_high_band_queries_missing_max_price_warns_and_disables(capsys):
+    """沒有上限的高價帶等於整個市場，那不是這個功能的語意，寧可整段不跑並大聲說。"""
+    watchlist = {
+        "high_band": {
+            "queries": [
+                {"name": "x", "keyword": "PSA", "sources": ["buyee_mercari"]},
+            ],
+        }
+    }
+    result = load_high_band_queries(watchlist)
+    assert result == (None, [])
+    assert "max_price_jpy" in capsys.readouterr().out
+
+
+def test_real_watchlist_high_band_stays_within_request_budget(cfg):
+    """高價帶查詢 ≤4 條、來源展開後每輪請求 ≤4——硬約束，加查詢前先改這條測試。"""
+    cap, qs = load_high_band_queries(cfg.watchlist)
+    assert cap == 50000.0
+    assert len(qs) <= 4, f"高價帶 query 條目 {len(qs)} 超過上限 4"
+    requests = sum(len(q.sources) for q in qs)
+    assert requests <= 4, f"高價帶每輪請求數 {requests} 超過上限 4"

@@ -521,6 +521,33 @@ def _snipe_census_line(watch: dict) -> str:
     return f"存世量：{watch.get('grader', '')}{tgt} 全世界 {at} 張{tail}"
 
 
+def format_high_band(match, dashboard_url: str) -> str:
+    """規則 5：高價帶折價。回答「這筆比同卡行情便宜多少、判定憑的是什麼」。
+
+    `price_band_label`（🏷️ 高價帶徽章）與 `high_band_source_note`
+    （「判定來源：同卡成交 × N 筆估值」，ratio < 0.5 會多帶一行深折價警語）
+    **必須走到訊息上**——這是這條規則唯一的證據強度說明，漏掉就等於把
+    L1/L2 判定降級成看不出來歷的數字（CLAUDE.md 第七節：樣本數不等於證據
+    強度，判定來源要讓使用者自己看見）。`fair_twd`／`price_ratio` 與閘門
+    讀的是同一個 `Estimate` 物件（修正回合 Task 9），不是 `comps.stats_for`
+    的混池。**`price_ratio` 是標價市價比，不是到手成本比**——分子是這筆
+    標價自己的市價基準 TWD，`landed_twd`（到手成本）只在「到手」那行顯示，
+    不參與這個比率（修正回合二 Task 13：同幣別不同口徑不能相除）。
+    """
+    row = match.row
+    title = textwrap.shorten(str(row.get("title") or ""), width=64, placeholder="…")
+    lines = [
+        f"{match.price_band_label} <b>{_esc(title)}</b>",
+        f"到手 <b>NT${row['landed_twd']:,.0f}</b>"
+        f"（{row.get('price_native', 0):,.0f} {row.get('currency', '')} via "
+        f"{_esc(str(row.get('route') or ''))}）",
+        f"估值公允價 NT${match.fair_twd:,.0f}（標價市價比 {match.price_ratio:.0%}）",
+        _esc(str(match.high_band_source_note or "")),
+        f'<a href="{row["url"]}">看標的</a> ｜ <a href="{dashboard_url}">開 dashboard</a>',
+    ]
+    return "\n".join(lines)
+
+
 def format_overflow(overflow: list, dashboard_url: str) -> str:
     """超出單次上限的部分併成一則統計（與 alerts 的做法一致：不能讓好貨變洗版）。
 
@@ -529,6 +556,7 @@ def format_overflow(overflow: list, dashboard_url: str) -> str:
     """
     from .notify_rules import (
         RULE_AUCTION_URGENT,
+        RULE_HIGH_BAND,
         RULE_HIGH_P,
         RULE_SELLER_NEW,
         RULE_SELLER_UNPRICED,
@@ -541,7 +569,8 @@ def format_overflow(overflow: list, dashboard_url: str) -> str:
         f"🃏 另有 <b>{len(overflow)} 筆</b>命中但未列出（本輪推播上限）",
         f"競標急件 {n(RULE_AUCTION_URGENT)} 筆 ｜ 高信心 {n(RULE_HIGH_P)} 筆"
         f" ｜ 監控賣家新上架 {n(RULE_SELLER_NEW)} 筆"
-        f" ｜ 估不了 {n(RULE_SELLER_UNPRICED)} 筆",
+        f" ｜ 估不了 {n(RULE_SELLER_UNPRICED)} 筆"
+        f" ｜ 高價帶折價 {n(RULE_HIGH_BAND)} 筆",
         "它們**沒有**被記成已通知，下一輪會繼續排隊。",
         f'<a href="{dashboard_url}">開 dashboard</a>',
     ]
@@ -847,6 +876,7 @@ class TelegramNotifier:
         from .notify_rules import (
             RULE_AUCTION_URGENT,
             RULE_CARD_SNIPE,
+            RULE_HIGH_BAND,
             RULE_SELLER_NEW,
             RULE_SELLER_UNPRICED,
         )
@@ -859,6 +889,8 @@ class TelegramNotifier:
             return format_seller_new(match, self.dashboard_url)
         if match.rule == RULE_SELLER_UNPRICED:
             return format_seller_unpriced(match, self.dashboard_url)
+        if match.rule == RULE_HIGH_BAND:
+            return format_high_band(match, self.dashboard_url)
         return format_high_p(match, self.dashboard_url)
 
     def send_rule_matches(self, outcome) -> list[tuple[str, str]]:

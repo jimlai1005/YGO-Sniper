@@ -23,8 +23,12 @@ from .parsers import is_candidate, parse_card
 from .queries import load_queries, resolve_category
 from .schedule_watch import (
     PENDING_ALERT_KEY,
+    PENDING_ALERT_KEY_HIGH,
     RUN_FINISHED_KEY,
+    RUN_FINISHED_KEY_HIGH,
     RUN_STARTED_KEY,
+    RUN_STARTED_KEY_HIGH,
+    _HIGH_ALL_SLOTS,
     resolve_alert,
     schedule_health,
     watchdog_message,
@@ -155,6 +159,7 @@ def run_source_search(
     *,
     pages: int,
     max_price: float | None = None,
+    min_price: float | None = None,
     category: str | None = None,
     sort: str | None = None,
     seller: str | None = None,
@@ -167,7 +172,17 @@ def run_source_search(
     SearchResult，其他管道照常產出——這是本專案的核心約束。
     FetchError/BlockedError 轉對應健康碼；其他例外一律 PARSER_BROKEN
     （對呼叫端而言「來源程式炸了」與「解析壞了」同一種需要告警的病）。
+
+    `min_price` 是唯一的例外：傳給不支援的來源**直接拋 ValueError**，不落進
+    上面那套「隔離成健康碼」的機制。理由見高價帶掃描 plan 的全域紅線第 3 條——
+    `category` 曾經在不支援的來源上被 `_optional_kwargs` 安靜丟掉一整年
+    （症狀與「今天貨就長這樣」外顯一模一樣），這次不重蹈覆轍：沒有
+    `supports_min_price = True` 就不准假裝這條參數有生效。
     """
+    if min_price is not None and not getattr(src, "supports_min_price", False):
+        raise ValueError(
+            f"{source_name} 不支援 min_price——參數會被靜默丟棄，拒絕執行"
+        )
     site_value = src.site.value
     try:
         if seller is not None:
@@ -176,6 +191,13 @@ def run_source_search(
             # 落進下面的隔離邊界，而不是安靜地退化成關鍵字搜尋。
             return src.search_seller(seller, pages=pages)
         extra = _optional_kwargs(source_name, src, category=category, sort=sort)
+        # min_price 不進 _optional_kwargs、也不無條件傳遞：上面的守衛只保證
+        # 「min_price 不是 None 時」support 一定為真，但其他來源（Yahoo/PayPay/
+        # eBay/Ruten）的 search_detailed 簽名根本沒有這個參數——min_price=None
+        # 時若照樣傳下去，會讓每一條既有管道 TypeError，被隔離邊界吞成假的
+        # PARSER_BROKEN。只在真的要求 min_price 時才加這個 kwarg。
+        if min_price is not None:
+            extra["min_price"] = min_price
         if hasattr(src, "search_detailed"):
             return src.search_detailed(
                 keyword, max_price=max_price, pages=pages, **extra
@@ -237,6 +259,12 @@ class Pipeline:
         #: 這輪還沒跑過 scan()——初始化在這裡而不是只在 scan() 裡設，
         #: 讓呼叫端用 `getattr` 都不必也能安全讀到 None，見 schedule_watch.py）。
         self._schedule_alert: str | None = None
+        #: `_schedule_alert` 是哪一本帳偵測出來的（`PENDING_ALERT_KEY` 或
+        #: `PENDING_ALERT_KEY_HIGH`）——送達後 `cli._send_schedule_alert`
+        #: 靠這個決定清哪把鍵，不能靠猜（兩本帳不能合併，CLAUDE.md 第五節）。
+        #: 預設低價帶鍵，維持 `daily`／`scan`（`high_band=False`）呼叫路徑的
+        #: 既有行為——這兩者從來不會設成別的值。
+        self._schedule_alert_pending_key: str = PENDING_ALERT_KEY
 
     # ------------------------------------------------------------------
     def valuator(self):
@@ -393,6 +421,7 @@ class Pipeline:
         *,
         pages: int | None = None,
         price_ceiling: bool = True,
+        high_band_max: float | None = None,
         sort: str | None = None,
         category: str | None = None,
     ) -> SearchResult:
@@ -412,10 +441,41 @@ class Pipeline:
         canary 問的是「這條管道還活著嗎」——把商業過濾套上去，回傳筆數就會
         跟著平台當下的價格分布跳動，答案只會更不穩定（這正是 parsed_count
         那次假警報的同一種錯：拿商業結果當健康指標）。
+
+        `high_band_max` 不為 None 時，這一趟改成高價帶查詢：下限沿用
+        `_price_ceiling_jpy(src.site)` **+ 1**——與低價帶上限同一個函式呼叫，
+        高低兩帶的邊界永遠無縫相接、不重疊（高價帶掃描 plan 的同源條款；
+        +1 是因為 Buyee 的 `price_min`／`price_max` 都是閉區間，不 +1 的話
+        恰好等於上限的商品會同時落在兩帶，band 隨掃描順序翻面，見修正回合
+        S3）。上限就是這個參數本身。此時 `price_ceiling` 不生效——一趟查詢
+        不能同時是「無上限」與「高價帶」。
+
+        高價帶輪的下限算不出來（`_price_ceiling_jpy` 回 `None` 或 ≤0——路由
+        設定缺失、fx 讀不到）時，**拒絕以無下限掃描**：那會塌成「只有
+        ≤¥50,000 上限」，大量低價標的被寫成 `band='high'` 並被推播規則
+        1/2/3 永久排除，而且沒有任何痕跡（CLAUDE.md 第一節「誤殺是靜默
+        的」）。與 `load_high_band_queries` 對上限缺失的既有立場（拒跑＋
+        大聲）對齊，回 `PARSER_BROKEN` 且**不發任何網路請求**（修正回合
+        W1）。
         """
         pages = pages if pages is not None else self.cfg.max_pages_for(source_name)
         try:
-            max_price = self._price_ceiling_jpy(src.site) if price_ceiling else None
+            if high_band_max is not None:
+                ceiling = self._price_ceiling_jpy(src.site)
+                if ceiling is None or ceiling <= 0:
+                    return SearchResult(
+                        source=source_name, site=src.site.value, query=keyword,
+                        health=ParseHealth.PARSER_BROKEN,
+                        detail=(
+                            f"高價帶下限算不出來（_price_ceiling_jpy={ceiling!r}，"
+                            "routes/fx 缺失），拒絕以無下限掃描"
+                        ),
+                    )
+                min_price = ceiling + 1
+                max_price = high_band_max
+            else:
+                min_price = None
+                max_price = self._price_ceiling_jpy(src.site) if price_ceiling else None
         except Exception as exc:  # noqa: BLE001 - 隔離邊界：算上限失敗不該炸掉整輪掃描
             return SearchResult(
                 source=source_name, site=src.site.value, query=keyword,
@@ -424,11 +484,18 @@ class Pipeline:
             )
         return run_source_search(
             source_name, src, keyword,
-            pages=pages, max_price=max_price, category=category, sort=sort,
+            pages=pages, max_price=max_price, min_price=min_price,
+            category=category, sort=sort,
         )
 
     def _scan_source_passes(
-        self, source_name: str, src, keyword: str, *, category: str | None = None
+        self,
+        source_name: str,
+        src,
+        keyword: str,
+        *,
+        category: str | None = None,
+        high_band_max: float | None = None,
     ) -> list[SearchResult]:
         """一個 (source, query) 的**全部抓取趟數**。
 
@@ -438,7 +505,12 @@ class Pipeline:
         「一切正常」（`_merge_summary` 取最嚴重的那個）。
         """
         def single() -> list[SearchResult]:
-            return [self._scan_source(source_name, src, keyword, category=category)]
+            return [
+                self._scan_source(
+                    source_name, src, keyword,
+                    category=category, high_band_max=high_band_max,
+                )
+            ]
 
         passes = getattr(src, "scan_passes", None)
         if not callable(passes):
@@ -467,6 +539,7 @@ class Pipeline:
         first = self._scan_source(
             source_name, src, keyword,
             pages=plan[0].pages, sort=plan[0].mode, category=category,
+            high_band_max=high_band_max,
         )
         results = [first]
         if len(plan) == 1:
@@ -484,7 +557,8 @@ class Pipeline:
         )
         results.extend(
             self._scan_source(
-                source_name, src, keyword, pages=p.pages, sort=p.mode, category=category
+                source_name, src, keyword, pages=p.pages, sort=p.mode, category=category,
+                high_band_max=high_band_max,
             )
             for p in plan[1:]
         )
@@ -751,6 +825,7 @@ class Pipeline:
         trigger: str = "cli",
         watch_only: bool = False,
         watch_force: bool = False,
+        high_band: bool = False,
     ) -> dict:
         """一輪掃描。**掃描狀態的開始／結束一律在這裡落**，CLI 與 dashboard 共用。
 
@@ -766,13 +841,22 @@ class Pipeline:
         再補一個完成戳記，見 `_update_schedule_state`／`_finish_schedule_state`）。
         `--dry-run` 的語意是「只掃不寫庫」、`watch_only` 是 `watch-scan` 的獨立
         節奏（見那兩個方法的 docstring），兩者都不吃邊緣觸發、不動基準。
+
+        `high_band` 是高價帶掃描（¥8,624～50,000，只掛 buyee_mercari，見高價帶
+        掃描 plan）的旗子，語意見 `_scan` docstring。**排程空窗偵測用自己的一套
+        基準鍵與網格**（`RUN_STARTED_KEY_HIGH`／`RUN_FINISHED_KEY_HIGH`／
+        `PENDING_ALERT_KEY_HIGH`＋`schedule_watch._HIGH_ALL_SLOTS`）——高價帶
+        跑在自己的 launchd 網格（Task 6），若共用低價帶的鍵，任一帶跑一輪就會
+        推進另一帶的基準，讓另一帶的漏跑偵測失聰（CLAUDE.md 第三節第八事故
+        的同一種錯誤）。見 `_update_schedule_state`／`_finish_schedule_state`。
         """
         started = self.store.begin_scan(trigger=trigger, dry_run=dry_run)
-        self._update_schedule_state(dry_run=dry_run, watch_only=watch_only)
+        self._update_schedule_state(dry_run=dry_run, watch_only=watch_only, high_band=high_band)
         try:
             result = self._scan(
                 started, skip_comps=skip_comps, dry_run=dry_run,
                 watch_only=watch_only, watch_force=watch_force,
+                high_band=high_band,
             )
         except BaseException as exc:  # noqa: BLE001 - 落狀態後原樣往外拋，見 docstring
             self.store.finish_scan(started, error=f"{type(exc).__name__}: {exc}")
@@ -793,10 +877,12 @@ class Pipeline:
         )
         # 只有走到這裡（沒有例外往外拋）才算「正常收尾」——crash 時上面的
         # except 分支已經 raise 出去，這行不會執行，基準保持舊值。
-        self._finish_schedule_state(dry_run=dry_run, watch_only=watch_only)
+        self._finish_schedule_state(dry_run=dry_run, watch_only=watch_only, high_band=high_band)
         return result
 
-    def _update_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
+    def _update_schedule_state(
+        self, *, dry_run: bool, watch_only: bool, high_band: bool = False
+    ) -> None:
         """排程空窗偵測的開頭那一半：讀舊基準、算這一輪要不要出聲、寫新基準。
 
         `dry_run`：`--dry-run` 是「只掃不寫庫」，這裡也不能寫、也不能吃掉
@@ -811,17 +897,33 @@ class Pipeline:
         的節奏不是那個源）。所以 watch_only 一律跳過整段，基準只由完整掃描
         （`ygo-sniper scan`／`daily`／dashboard 的 `/api/scan`）維護。
 
+        `high_band`：高價帶（`ygo-sniper daily-high`／`scan-high`）用**自己的
+        一套鍵與網格**（`RUN_STARTED_KEY_HIGH`／`RUN_FINISHED_KEY_HIGH`／
+        `PENDING_ALERT_KEY_HIGH`＋`schedule_watch._HIGH_ALL_SLOTS`），完全不碰
+        低價帶的三把鍵——兩本帳互不污染（CLAUDE.md 第三節第八事故：兩條掃描
+        若共用基準鍵，任一帶跑一輪就會推進另一帶的基準，遮蔽另一帶的漏跑）。
+
         偵測器本身包一層 `try/except`：它只是資訊性功能，壞掉不能拖垮這一輪
         真正的掃描（見 schedule_watch.py 與 CLAUDE.md 五、靜默失敗）。
         """
         if dry_run or watch_only:
             return
+        started_key = RUN_STARTED_KEY_HIGH if high_band else RUN_STARTED_KEY
+        finished_key = RUN_FINISHED_KEY_HIGH if high_band else RUN_FINISHED_KEY
+        pending_key = PENDING_ALERT_KEY_HIGH if high_band else PENDING_ALERT_KEY
+        slots = _HIGH_ALL_SLOTS if high_band else None
+        # 設在 try 之外：即使下面偵測本身出例外，這一輪是哪一帶跑的仍然
+        # 確定——`_send_schedule_alert` 要清哪把鍵不該因為偵測器壞掉而
+        # 退回猜測（本方法整段包 try/except 是給偵測邏輯本身用的，不是
+        # 給「這輪屬於哪一帶」這個事實用的，那件事在方法一開頭就已知）。
+        self._schedule_alert_pending_key = pending_key
         try:
             now = datetime.now()
             detected = schedule_health(
-                self.store.get_meta(RUN_STARTED_KEY),
-                self.store.get_meta(RUN_FINISHED_KEY),
+                self.store.get_meta(started_key),
+                self.store.get_meta(finished_key),
                 now,
+                slots,
             )
             # Fix A：watchdog 帳本（run_daily.sh 寫的 data/last_run_exit）折進
             # 同一條偵測。兩者都算「這一輪偵測到的問題」，合併成一句話一起
@@ -836,11 +938,11 @@ class Pipeline:
             # 兩個陳述式之間被殺掉，會出現「證據已刪、但沒人記得這件事」
             # 的窗口（哪怕只有微秒、哪怕會被下一輪自己的新帳本自癒，
             # 「先落帳、才能刪證據」這個順序本身不該顛倒）。
-            watchdog_msg, ledger_path = self._read_watchdog_ledger()
+            watchdog_msg, ledger_path = self._read_watchdog_ledger(high_band=high_band)
             if watchdog_msg:
                 detected = f"{detected}；{watchdog_msg}" if detected else watchdog_msg
             self._schedule_alert, new_pending = resolve_alert(
-                self.store.get_meta(PENDING_ALERT_KEY), detected
+                self.store.get_meta(pending_key), detected
             )
             if self._schedule_alert:
                 print(self._schedule_alert)
@@ -848,8 +950,8 @@ class Pipeline:
             # 後寫，讓「這輪偵測到的東西已經進帳」與「這輪已經開始」在語意上
             # 對齊：pending 記的是「偵測時看到的問題」，started 記的是「這輪
             # 本身何時起跑」，兩者互不覆寫對方。
-            self.store.set_meta(PENDING_ALERT_KEY, new_pending)
-            self.store.set_meta(RUN_STARTED_KEY, now.isoformat())
+            self.store.set_meta(pending_key, new_pending)
+            self.store.set_meta(started_key, now.isoformat())
             # 帳本已經折進上面的 PENDING_ALERT_KEY，現在才能刪——見本方法
             # 開頭的順序說明。`set_meta` 這一行沒寫成功就不會走到這裡
             # （例外會被下面的 except 接住，帳本檔案原封不動留給下一輪重讀）。
@@ -861,10 +963,16 @@ class Pipeline:
                 f"{type(exc).__name__}: {exc}"
             )
 
-    def _read_watchdog_ledger(self) -> tuple[str | None, Path | None]:
-        """讀 `run_daily.sh` 寫的上一輪結束帳本（`data/last_run_exit`），
-        折成一句話。**不刪檔案**——刪檔是呼叫端（`_update_schedule_state`）
-        在把這句話寫進 `PENDING_ALERT_KEY` 之後才做的事，見那裡的順序說明。
+    def _read_watchdog_ledger(self, *, high_band: bool = False) -> tuple[str | None, Path | None]:
+        """讀 `run_daily.sh`（或高價帶的 `run_high.sh`）寫的上一輪結束帳本
+        （`data/last_run_exit` 或 `data/last_run_exit_high`），折成一句話。
+        **不刪檔案**——刪檔是呼叫端（`_update_schedule_state`）
+        在把這句話寫進 `PENDING_ALERT_KEY`（或高價帶版本）之後才做的事，
+        見那裡的順序說明。
+
+        `high_band=True` 讀獨立的 `last_run_exit_high`——`run_high.sh` 寫的是
+        這個檔名（見 scripts/run_high.sh），跟低價帶的帳本完全分開，不會
+        互相覆寫或誤讀對方的失敗紀錄。
 
         回傳 `(訊息或 None, 折出訊息時的檔案路徑；沒折出東西就是 None)`——
         呼叫端只需要在訊息非 None 時才有東西可刪，第二個值把「要不要刪」
@@ -894,7 +1002,8 @@ class Pipeline:
         沿用 `db_path` 讓這裡自動繼承全 repo 既有的隔離保證，不必逐一
         去改其他測試檔案。
         """
-        path = self.cfg.db_path.parent / "last_run_exit"
+        filename = "last_run_exit_high" if high_band else "last_run_exit"
+        path = self.cfg.db_path.parent / filename
         try:
             raw = path.read_text(encoding="utf-8")
         except OSError:
@@ -919,14 +1028,19 @@ class Pipeline:
         except OSError:
             pass
 
-    def _finish_schedule_state(self, *, dry_run: bool, watch_only: bool) -> None:
+    def _finish_schedule_state(
+        self, *, dry_run: bool, watch_only: bool, high_band: bool = False
+    ) -> None:
         """排程空窗偵測的收尾那一半：只有真正走到這裡才代表「正常收尾」。
 
         guard 理由與 `_update_schedule_state` 相同（dry-run 不寫庫、
         watch-scan 不是排程網格的一部分）。呼叫點在 `scan()` 裡故意放在
         例外處理**之外**——`_scan()` 拋例外時這個方法完全不會被呼叫，
-        `RUN_FINISHED_KEY` 因此維持舊值，下一輪 `schedule_health` 才報得出
-        「有開始沒收尾」。
+        `RUN_FINISHED_KEY`（或高價帶版本）因此維持舊值，下一輪
+        `schedule_health` 才報得出「有開始沒收尾」。
+
+        `high_band`：寫 `RUN_FINISHED_KEY_HIGH` 而不是低價帶的
+        `RUN_FINISHED_KEY`——與 `_update_schedule_state` 同一套鍵分離理由。
 
         這裡也包一層 `try/except`，跟 `_update_schedule_state` 對稱：這行只是
         排程監督自己的記帳，不能讓它的失敗把已經跑完、已經 `finish_scan`
@@ -935,8 +1049,9 @@ class Pipeline:
         """
         if dry_run or watch_only:
             return
+        finished_key = RUN_FINISHED_KEY_HIGH if high_band else RUN_FINISHED_KEY
         try:
-            self.store.set_meta(RUN_FINISHED_KEY, datetime.now().isoformat())
+            self.store.set_meta(finished_key, datetime.now().isoformat())
         except Exception as exc:  # noqa: BLE001 - 記帳壞掉不能拖垮已經跑完的掃描
             print(
                 f"[warn] 排程收尾記帳失敗（不影響本輪掃描結果）："
@@ -951,6 +1066,7 @@ class Pipeline:
         dry_run: bool = False,
         watch_only: bool = False,
         watch_force: bool = False,
+        high_band: bool = False,
     ) -> dict:
         """`watch_only=True`：只跑賣家輪替監控那一段（`ygo-sniper watch-scan`）。
 
@@ -961,8 +1077,31 @@ class Pipeline:
         行情回補——回補的需求端雖然也吃監控賣家的定價上架（見 _refill_comps），
         但它會打真實網路請求並寫節流帳與 comps，那是 `daily`/`scan` 完整輪的事；
         `watch-scan` 是手動輔助指令，維持零回補請求的預算不因本次來源擴充而變。
+
+        `high_band=True`：高價帶掃描（¥8,624～50,000，只掛 buyee_mercari，見
+        高價帶掃描 plan）。同樣是同一支 `_scan` 的一面旗——候選判定／估價／
+        落庫走同一份程式碼，band 專屬行為全部鎖在旗子後面：
+        - 查詢改用 `load_high_band_queries`（watchlist 的 `high_band:` 區塊）；
+          區塊未設定時印警告，`base_queries` 為空，其餘步驟自然變成空跑一輪。
+        - 每條查詢的下限＝`_price_ceiling_jpy(src.site)`（與低價帶上限**同一個
+          函式**，同源條款），上限＝`high_band.max_price_jpy`。
+        - `skip_comps` 語意等同 `watch_only`：不 refresh，只 `load_from_store`
+          （7 折判定要用行情，但這一輪不該再花請求預算去更新它）。
+        - 不跑賣家輪替監控、不跑 canary、不跑需求驅動回補——那些是低價帶
+          完整輪的事，高價帶輪要維持獨立的、與低價帶互不干擾的請求預算。
+        - 狙擊比對照跑：`_collect_candidates` 內建掛鉤，對任何管道發現的
+          listing 一視同仁，高價帶正是 ¥8,624 以上狙擊卡唯一的發現管道。
+        - 在架觀測批次**不帶** `band`（2026-08-23 修正回合二 Task 12 拿掉了
+          批次的宣告權——曾經讓 `_scan` 把整輪的 band 蓋到每個批次上，
+          監控賣家批次撈到的高價商品因此被洗回 `'std'`，下一輪低價帶誤殺
+          它，reviewer 實跑重現過）。`exit_scope` 維持預設 True：高價帶
+          批次看得到自己這個價格子集完整的第 1 頁，能且應該建地平線。
+          `listing_obs.band` 改成**每一列自己觀測到的價格**推導，判定
+          （地平線 open_rows 的候選）也改成用**判定當下重算的價格窗**
+          過濾，不讀儲存的 band——見 `store.record_listing_scan` 的
+          `price_bounds`／`round_band` 參數與其 docstring「地平線分帶」段。
         """
-        skip_comps = skip_comps or watch_only
+        skip_comps = skip_comps or watch_only or high_band
         comps_added = 0 if skip_comps else self.refresh_comps()
         if skip_comps:
             self.comps.load_from_store()
@@ -979,16 +1118,52 @@ class Pipeline:
         #: healthy 旗標**——離場判定要用它決定「這一批的缺席算不算證據」。
         obs_batches: list[dict] = []
 
-        # 狙擊卡自己的關鍵字查詢：等一根已知的針，就得主動去找它，不能只靠
-        # watchlist 那些廣撒查詢碰巧掃到。來源沿用既有查詢的聯集（不猜來源名）；
-        # base 是空的（watch_only）就不跑——那一輪根本沒有關鍵字管道。
-        base_queries = load_queries(wl) if not watch_only else []
-        if base_queries:
-            from .card_snipe import scan_queries
+        from .queries import load_high_band_queries
 
-            base_queries = base_queries + scan_queries(
-                self._snipe_matchers(), base_queries
-            )
+        # 只算一次，`high_band` 與 `std` 輪共用——見下方 price_bounds 段的
+        # 理由（兩種輪都要知道「有沒有高價帶設定」，不是只有高價帶輪才需要）。
+        hb_cap, hb_queries = load_high_band_queries(wl)
+
+        # 價格窗分層表：{site: (ceiling, high_cap)}，只列「有高價帶設定的
+        # site」（目前僅 buyee_mercari，修正回合二 Task 12）。**不管這一輪
+        # 是不是高價帶掃描都要算**——`record_listing_scan` 拿它幫每一列
+        # （含賣家頁批次撈到的）推導 band，賣家頁批次天生沒有價格上限，
+        # 只有靠這張表才能正確判斷它看到的商品落在哪一帶（C1 殘口修法：
+        # band 不再由「哪一批看到它」決定，改由「它自己的價格」決定）。
+        # ceiling 算不出來的 site（routes/fx 缺失）直接跳過分層，不強行用
+        # 半套資訊分帶——這與 `_scan_source` 對高價帶輪本身的「下限算不出來
+        # 拒絕掃描」是兩件事：那裡擋的是請求本身，這裡只是分層資訊選配。
+        price_bounds: dict[str, tuple[float, float]] = {}
+        if hb_cap is not None:
+            hb_source_names = {s for q in hb_queries for s in q.sources}
+            for source_name in hb_source_names:
+                src = self.sources.get(source_name)
+                if src is None:
+                    continue
+                try:
+                    ceiling = self._price_ceiling_jpy(src.site)
+                except Exception:  # noqa: BLE001 - 分層資訊是加分項，不該讓整輪掃描死
+                    continue
+                if ceiling and ceiling > 0:
+                    price_bounds[src.site.value] = (ceiling, hb_cap)
+
+        high_cap: float | None = None
+        if high_band:
+            high_cap, base_queries = hb_cap, hb_queries
+            if high_cap is None:
+                print("[scan] 高價帶未設定（watchlist 缺 high_band 區塊或 "
+                      "max_price_jpy 無效），本輪空手而回")
+        else:
+            # 狙擊卡自己的關鍵字查詢：等一根已知的針，就得主動去找它，不能只靠
+            # watchlist 那些廣撒查詢碰巧掃到。來源沿用既有查詢的聯集（不猜來源
+            # 名）；base 是空的（watch_only）就不跑——那一輪根本沒有關鍵字管道。
+            base_queries = load_queries(wl) if not watch_only else []
+            if base_queries:
+                from .card_snipe import scan_queries
+
+                base_queries = base_queries + scan_queries(
+                    self._snipe_matchers(), base_queries
+                )
         for query in base_queries:
             for source_name in query.sources:
                 src = self.sources.get(source_name)
@@ -1004,7 +1179,8 @@ class Pipeline:
                 # 多趟抓取（Yahoo：新着＋即將結標）。兩趟合併去重之後才進評分——
                 # 同一個標的兩趟都出現時，它是一筆，不是兩筆。
                 results = self._scan_source_passes(
-                    source_name, src, query.keyword, category=category
+                    source_name, src, query.keyword, category=category,
+                    high_band_max=high_cap if high_band else None,
                 )
                 listings = dedupe_listings(results)
                 for i, res in enumerate(results):
@@ -1024,6 +1200,15 @@ class Pipeline:
                     "source": source_name,
                     "site": src.site.value,
                     "healthy": healthy,
+                    # 高價帶批次也能建地平線（reviewer Critical 1 修法，plan
+                    # Task 8）：地平線判定的分組鍵已經改成 (site, band)（見
+                    # `store.record_listing_scan` docstring「地平線分帶」段），
+                    # 高價帶批次看得到自己那個 band 完整的第 1 頁，能且應該
+                    # 為自己的 band 建地平線——不然高價帶商品沒有任何管道能被
+                    # 判離場（CLAUDE.md 第五節第 8 條死巷條款）。band 本身
+                    # 由 `_scan` 統一補在 obs_batches 上（見下方 record_listing_scan
+                    # 呼叫前那段），這裡維持預設 True 即可。
+                    "exit_scope": True,
                     "rows": self._collect_candidates(listings, source_name, candidates),
                 })
 
@@ -1031,18 +1216,28 @@ class Pipeline:
         # 產出的候選與觀測列直接併進同一條管線，下面的估價／評分／落庫一視同仁。
         # 先收在自己的清單再併進主清單：refill 要分得出「監控賣家的定價上架」
         # 這個需求來源（見下方 _refill_comps 的呼叫），靠的就是這條分界。
+        # high_band 不跑：那是低價帶完整輪的事，高價帶輪要維持獨立的請求預算
+        # （見 _scan docstring「高價帶」段）。
         watch_candidates: list = []
-        watch_batches, watch_report = self._scan_watched_sellers(
-            watch_candidates, force=watch_force
-        )
+        if high_band:
+            watch_batches, watch_report = [], {
+                "enabled": False, "batch": None,
+                "reason": "高價帶掃描不跑賣家輪替監控", "sellers": [],
+                "skipped": [], "requests": 0, "found": 0, "candidates": 0,
+            }
+        else:
+            watch_batches, watch_report = self._scan_watched_sellers(
+                watch_candidates, force=watch_force
+            )
         candidates.extend(watch_candidates)
         obs_batches.extend(watch_batches)
         scanned += watch_report.get("found", 0)
 
         # 掃描結束才跑 canary：正常 query 已經產出的來源健康是免費的證據，
         # canary 只補「全部 query 都 0 筆，到底是沒貨還是瞎了」這個缺口。
-        # watch_only 不跑：它問的是「關鍵字管道還活著嗎」，而這一輪根本沒跑關鍵字。
-        for res in ([] if watch_only else self._run_canaries(source_summary)):
+        # watch_only／high_band 不跑：前者問的是「關鍵字管道還活著嗎」而這一輪
+        # 根本沒跑關鍵字；後者是低價帶完整輪的健康檢查，高價帶輪不重複打。
+        for res in ([] if (watch_only or high_band) else self._run_canaries(source_summary)):
             search_results.append(res)
             self._merge_summary(source_summary, res)
 
@@ -1108,15 +1303,27 @@ class Pipeline:
         obs_pruned = 0
         restored: dict = {"restored": 0, "keys": []}
         if not dry_run:
+            # signals.band：仍是「最後一次看到它的那一輪屬於哪個帶」——這是
+            # scan-mode 語意（哪個 CLI 指令跑出這筆訊號），跟下面 listing_obs
+            # 的 band 是兩件不同的事（後者是價格推導，見 record_listing_scan）。
+            band = "high" if high_band else "std"
             for sig in signals:
-                if self.store.upsert_signal(sig):
+                if self.store.upsert_signal(sig, band=band):
                     new_count += 1
             self.store.snapshot(
                 [(s.listing.key, s.best_route.landed_twd) for s in signals]
             )
             # 在架觀測帳：signals 每輪 upsert 覆寫，回答不了「在架多久、何時消失」。
             # 這張表是那個問題的唯一資料來源，所以每輪都要落，不管有沒有訊號。
-            obs_report = self.store.record_listing_scan(obs_batches)
+            # `price_bounds`／`round_band`：讓 record_listing_scan 用**判定當下
+            # 的價格**推導 listing_obs.band、用**判定當下的價格窗**過濾地平線
+            # 候選——批次本身不再宣告 band（修正回合二 Task 12，見其 docstring
+            # 「地平線分帶」段）。
+            obs_report = self.store.record_listing_scan(
+                obs_batches,
+                price_bounds=price_bounds,
+                round_band="high" if high_band else "std",
+            )
             # 「清除已離場」的防線：我們清掉、但這一輪又被看到的標的放回原狀態。
             # **必須排在 record_listing_scan 之後**——那裡才是清掉
             # `disappeared_at` 的地方，放前面的話還原永遠慢一輪。
@@ -1149,7 +1356,11 @@ class Pipeline:
 
         # 只算不發：evaluate() 落觀測帳並回傳「現在該發」的訊息，
         # 真的送出與冷卻落帳由 CLI 的 daily 流程負責（alerts.py 模組註解）。
-        alerts: list[Alert] = self.alerts.evaluate(search_results)
+        # band 帶給 evaluate：高價帶輪的告警帳要與低價帶分開（2026-08-22
+        # 修正回合 W2）——兩本帳語意不同，永遠不要合併（CLAUDE.md 第五節）。
+        alerts: list[Alert] = self.alerts.evaluate(
+            search_results, band="high" if high_band else "std"
+        )
 
         result = {
             "started_at": started,
@@ -1229,13 +1440,18 @@ class Pipeline:
         return result
 
     # ------------------------------------------------------------------
-    def notification_outcome(self, now=None):
+    def notification_outcome(self, now=None, *, band: str | None = None):
         """這一輪兩條規則各命中什麼。**只判定，不送、不落帳**（preview 也用它）。
 
         估價模型建不起來時**不整批罷工**：規則 1（競標急件）用的是掃描當下就
         存進 payload 的上限，本來就不需要模型；只有規則 2 會被跳過，而且
         `Outcome.valuation_ok=False` 會讓 CLI 明講「這一輪算不出 P 值」——
         降級要看得見，不能長得像「今天沒好貨」（工程原則 3）。
+
+        `band`：`None`（預設）＝ 全帶（`notify-preview` 用這個）；
+        `'std'`／`'high'` 只評估該帶的候選——`daily`／`daily-high` 各自傳入，
+        防止兩輪互相消耗對方的 per-run 上限（2026-08-22 修正回合 W3；
+        見 `store.notification_candidates` docstring）。
         """
         from .notify_rules import NotifyRules, evaluate
 
@@ -1245,13 +1461,17 @@ class Pipeline:
             print(f"[warn] 估價模型建立失敗，本輪規則 2（P 值）跳過：{exc}")
             valuator = None
         return evaluate(
-            self.store.notification_candidates(),
+            self.store.notification_candidates(band=band),
             rules=NotifyRules.from_config(self.cfg),
             valuator=valuator,
             now=now,
             notified=self.store.notify_log_map(),
             seller_ctx=self._seller_notify_context(),
             snipe_ctx=self._snipe_notify_context(),
+            # 規則 5 的分子要換成市價基準 TWD，用這顆掃描全程共用的 fx——
+            # 與 comps.py:529（`apply_markup=False`）同一個換匯物件，不新造
+            # 匯率來源（修正回合二 Task 13）。
+            fx=self.fx,
         )
 
     def _seller_notify_context(self):
@@ -1282,9 +1502,12 @@ class Pipeline:
                   f"{type(exc).__name__}: {exc}")
             return None
 
-    def notify(self):
-        """判定 → 送出 → **只對送成功的落帳**。回傳 `notify_rules.Outcome`。"""
-        outcome = self.notification_outcome()
+    def notify(self, *, band: str | None = None):
+        """判定 → 送出 → **只對送成功的落帳**。回傳 `notify_rules.Outcome`。
+
+        `band` 透傳給 `notification_outcome`（見其 docstring）。
+        """
+        outcome = self.notification_outcome(band=band)
         sent = self.notifier.send_rule_matches(outcome)
         self.store.mark_rule_notified(sent)
         return outcome

@@ -187,6 +187,19 @@ def test_paypay_url_and_flags(make_source):
     assert src.name == "buyee_paypay"
 
 
+def test_min_price_reaches_url_as_price_min(make_source):
+    """高價帶掃描（2026-08-22）：`min_price` 對照組實測 Buyee Mercari 的
+    `price_min` 生效且閉區間（plan `docs/superpowers/plans/2026-08-22-high-band-scan.md`）。
+    寫法比照 `price_max`：`min_price=None` 完全不帶這個鍵，不留一個空參數。
+    """
+    src = make_source(Site.BUYEE_MERCARI, 200, MERCARI_OK)
+
+    url = src.build_url(KEYWORD, min_price=15000)
+    assert "price_min=15000" in url
+
+    assert "price_min" not in src.build_url(KEYWORD)
+
+
 # ---------------------------------------------------------------------------
 # 4b. 新着排序：兩站的值不同，而且**不可互換**
 # ---------------------------------------------------------------------------

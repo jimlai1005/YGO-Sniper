@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  高價帶（¥8,624～50,000）獨立排程——與 com.jim.ygosniper.plist（低價帶）
+  完全分開裝卸，互不影響。安裝／改完之後重載：
+    cp scripts/com.jim.ygosniper.high.plist ~/Library/LaunchAgents/
+    launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.high.plist
+    launchctl load   ~/Library/LaunchAgents/com.jim.ygosniper.high.plist
+
+  ── 為什麼時段跟低價帶錯開 ──
+
+  低價帶佔白天每小時 :30 與晚上每 30 分的 :00/:30。高價帶落在白天偶數
+  整點 :00（09:30-17:30 的空檔中間）與晚間 :15（18:00-22:30 每 30 分的
+  中間），觸發分鐘與低價帶零重疊——兩條 launchd job 不會搶同一分鐘的
+  系統喚醒，log／鎖／請求也各自獨立（`run_high.sh` 用自己的鎖檔、log
+  檔、排程監督帳本，見 scripts/run_high.sh）。
+
+  排程監督（漏格偵測）使用 `schedule_watch._HIGH_WINDOWS`，與低價帶的
+  `_WINDOWS` 分開比對；`tests/test_schedule_watch.py::
+  test_high_windows_match_high_plist` 把這裡的時刻表與程式碼裡的網格
+  釘死，改時段時兩邊要一起改。
+
+  StartCalendarInterval（而非 StartInterval）的理由與低價帶 plist 相同：
+  睡眠期間錯過的排程，launchd 醒來後只補跑一次，不會把錯過的全部補齊。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jim.ygosniper.high</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>$HOME/projects/ygo-sniper/scripts/run_high.sh</string>
+    </array>
+
+    <!--
+      白天偶數整點（新上架）＋晚間 :15（結標高峰前後，避開低價帶的 :00/:30）。
+      共 7 次/日 × 4 查詢 × 1 來源（buyee_mercari）＝ 28 請求/日。
+    -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <!-- 白天：偶數整點，抓新上架 -->
+        <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+        <!-- 晚間：:15，避開低價帶結標高峰的 :00/:30 -->
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+    </array>
+
+    <!-- 載入時不要立刻跑一次，等排程時間到 -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- 掛掉不要無限重啟；跑不完就等下一個時段，不要疊上去 -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/ygosniper.high.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ygosniper.high.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <!--
+      節流：避免同一分鐘內被重複觸發。與低價帶 plist 同一套理由，
+      不設成間隔本身的秒數，避免抖動把一次合法執行吃掉。
+      真正防重入的是 run_high.sh 自己的鎖，不是這個值。
+    -->
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

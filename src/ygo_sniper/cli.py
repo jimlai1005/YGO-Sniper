@@ -59,7 +59,24 @@ def daily(
         _print_scan(result)
         _mine_snipes_daily(pipe)
         if not no_notify:
-            _run_notifications(pipe, result)
+            _run_notifications(pipe, result, band="std")
+    finally:
+        pipe.close()
+
+
+@app.command()
+def daily_high(no_notify: bool = typer.Option(False, help="只掃不推播")):
+    """高價帶那一鍵：掃 ¥8,624～50,000 帶 → 只推 ≤7 折＋狙擊命中。獨立排程跑這個。
+
+    不跑 `_mine_snipes_daily`——狙擊挖掘一天一次由低價帶 `daily` 負責，
+    高價帶重複跑只是加倍請求（見 plan Task 5）。
+    """
+    pipe = Pipeline()
+    try:
+        result = pipe.scan(high_band=True)
+        _print_scan(result)
+        if not no_notify:
+            _run_notifications(pipe, result, band="high")
     finally:
         pipe.close()
 
@@ -73,6 +90,7 @@ def _print_rule_counts(outcome) -> None:
     from .notify_rules import (
         RULE_AUCTION_URGENT,
         RULE_CARD_SNIPE,
+        RULE_HIGH_BAND,
         RULE_HIGH_P,
         RULE_LABEL,
         RULE_SELLER_NEW,
@@ -93,7 +111,8 @@ def _print_rule_counts(outcome) -> None:
         f"[bold]{RULE_LABEL[RULE_CARD_SNIPE]}[/bold] 命中 "
         f"{len(outcome.card_snipe)} 筆"
         f"（🎯 {sum(1 for m in outcome.card_snipe if m.row.get('tier') == 'exact')}"
-        f"／👀 {sum(1 for m in outcome.card_snipe if m.row.get('tier') == 'partial')}）"
+        f"／👀 {sum(1 for m in outcome.card_snipe if m.row.get('tier') == 'partial')}） ｜ "
+        f"[bold]{RULE_LABEL[RULE_HIGH_BAND]}[/bold] 命中 {len(outcome.high_band)} 筆"
         f" ｜ 送出 {len(outcome.sent)} 則"
     )
     if outcome.deduped:
@@ -152,8 +171,14 @@ def _mine_snipes_daily(pipe) -> None:
         pipe.store.set_meta(_SNIPE_MINE_META_KEY, today)
 
 
-def _run_notifications(pipe, result: dict) -> int:
+def _run_notifications(pipe, result: dict, *, band: str | None = None) -> int:
     """推播決策的唯一落點。回傳實際送出的訊號筆數。
+
+    `band`：`None`（預設，維持既有全帶行為）／`'std'`／`'high'`——透傳給
+    `Pipeline.notify`／`notification_outcome`，讓 `daily`（std）與
+    `daily-high` 只評估自己那一帶的候選，互不消耗對方的 per-run 上限
+    （2026-08-22 修正回合 W3）。band=None 時**不傳關鍵字參數**下去
+    （而不是傳 `band=None`）——保留舊呼叫形狀，相容既有測試替身。
 
     每小時跑 24 次，其中絕大多數必然沒有新貨。如果每輪都送一則「掃完了、0 筆」，
     推播很快就會被訓練成雜訊，然後真的有貨的那一次你會直接滑過去
@@ -171,10 +196,10 @@ def _run_notifications(pipe, result: dict) -> int:
     silent 判斷**之外**無條件執行。
     """
     if not bool(pipe.cfg.notify.get("enabled", True)):
-        _report_notify_disabled(pipe, result)
+        _report_notify_disabled(pipe, result, band=band)
         return 0
 
-    outcome = pipe.notify()
+    outcome = pipe.notify(band=band) if band is not None else pipe.notify()
     n = len(outcome.sent)
     silent = bool(pipe.cfg.notify.get("silent_when_empty", True))
 
@@ -200,7 +225,7 @@ def _run_notifications(pipe, result: dict) -> int:
     return n
 
 
-def _report_notify_disabled(pipe, result: dict) -> None:
+def _report_notify_disabled(pipe, result: dict, *, band: str | None = None) -> None:
     """推播關掉時的唯一輸出。**不呼叫 notifier 的任何方法。**
 
     為什麼不是「照送、讓 send() 自己擋下來」：那條路上每則告警都會拿到
@@ -212,14 +237,17 @@ def _report_notify_disabled(pipe, result: dict) -> None:
 
     命中數走的是與真的推播**同一支判定**（`Pipeline.notification_outcome`）：
     停用期間印一個用別的算法算出來的數字，等於讓使用者看不到規則的真實狀態。
+    `band` 透傳給 `notification_outcome`（見 `_run_notifications` docstring），
+    同一個立場——band=None 才傳 `band=None` 下去，維持舊呼叫形狀相容測試替身。
     """
-    outcome = pipe.notification_outcome()
+    outcome = pipe.notification_outcome(band=band) if band is not None else pipe.notification_outcome()
     alerts = result.get("alerts") or []
     console.print(
         f"\n[yellow]Telegram 已停用（notify.enabled=false），本輪"
         f" 競標急件 {len(outcome.urgent)} 筆 ／ 高信心 {len(outcome.high_p)} 筆"
         f" ／ 監控賣家新上架 {len(outcome.seller_new)} 筆"
         f" ／ 估不了 {len(outcome.seller_unpriced)} 筆"
+        f" ／ 高價帶折價 {len(outcome.high_band)} 筆"
         f" 只落庫不推播[/yellow]"
     )
     if alerts:
@@ -276,12 +304,22 @@ def _send_schedule_alert(pipe: Pipeline) -> None:
 
     用 `getattr` 防呆：只有 `scan()` 真的跑過（且不是 dry-run／watch-scan）
     才會設 `_schedule_alert` 這個屬性。
+
+    **清帳一定要清「偵測出這則告警的那本帳」**：高價帶輪（`daily-high`）
+    的告警是 `_update_schedule_state(high_band=True)` 用
+    `PENDING_ALERT_KEY_HIGH` 偵測出來的，送達後若清成低價帶的
+    `PENDING_ALERT_KEY`，會清掉不相干的那把鍵——高價帶自己的 pending
+    永遠不會被消耗，於是「先前 N 次未送達」無限疊加（兩本帳不能合併，
+    CLAUDE.md 第五節）。`pipe._schedule_alert_pending_key` 由
+    `_update_schedule_state` 在算 `pending_key` 的同一刻寫下，跟
+    `_schedule_alert` 本身同源，不用另外猜這一輪是哪一帶。
     """
     schedule_alert = getattr(pipe, "_schedule_alert", None)
     if not schedule_alert:
         return
+    pending_key = getattr(pipe, "_schedule_alert_pending_key", PENDING_ALERT_KEY)
     if pipe.notifier.send_alert(schedule_alert):
-        pipe.store.set_meta(PENDING_ALERT_KEY, "")
+        pipe.store.set_meta(pending_key, "")
         console.print("[yellow]已推播排程監督告警[/yellow]")
     else:
         console.print("[red]排程監督告警送出失敗——留在 pending 帳裡，下一輪會一併重送[/red]")
@@ -293,6 +331,16 @@ def scan(dry_run: bool = typer.Option(False, help="不寫入資料庫")):
     pipe = Pipeline()
     try:
         _print_scan(pipe.scan(dry_run=dry_run))
+    finally:
+        pipe.close()
+
+
+@app.command()
+def scan_high(dry_run: bool = typer.Option(False, help="不寫入資料庫")):
+    """高價帶只掃不推播。"""
+    pipe = Pipeline()
+    try:
+        _print_scan(pipe.scan(high_band=True, dry_run=dry_run))
     finally:
         pipe.close()
 
@@ -2112,7 +2160,9 @@ def health(
         False, "--clear", help="清掉 alerts 表所有告警列（修好病因之後用）"
     ),
     clear_source: str = typer.Option(
-        None, "--clear-source", help="只清掉這個來源的告警列（例：yahoo_direct）"
+        None, "--clear-source",
+        help="只清掉這個來源的告警列，含高價帶 band 後綴（例：buyee_mercari 會"
+        "一併清掉 buyee_mercari@high）",
     ),
 ):
     """看各來源最近一次 scan 的健康狀況，以及目前掛著的告警。
@@ -2188,10 +2238,21 @@ def health(
     console.print(t)
 
 
+def _source_matches(alert_source: str, only_source: str) -> bool:
+    """`--clear-source buyee_mercari` 要同時清得掉 `buyee_mercari` 與
+    `buyee_mercari@high`（高價帶輪的告警指紋帶 band 後綴，見 `alerts.AlertEngine
+    .evaluate` 的 `f"{source}@{band}"`）——全等比對會漏掉後者，讓 `--clear-source`
+    在高價帶上線後變成清不乾淨（修正回合二 Task 13，複審 S1）。
+    """
+    return alert_source == only_source or alert_source.startswith(f"{only_source}@")
+
+
 def _clear_alerts(store: Store, *, only_source: str | None = None) -> int:
     """刪掉告警列並把刪掉的內容印出來。回傳刪除筆數（0 也照印，讓人知道本來就空）。"""
     rows = store.list_alerts()
-    targets = [r for r in rows if not only_source or r["source"] == only_source]
+    targets = [
+        r for r in rows if not only_source or _source_matches(r["source"], only_source)
+    ]
     if not targets:
         scope = f"來源 {only_source} " if only_source else ""
         console.print(f"[dim]{scope}告警表本來就是空的，沒有東西要清。[/dim]")
