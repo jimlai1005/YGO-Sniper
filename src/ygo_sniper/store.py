@@ -450,7 +450,13 @@ _LISTING_OBS_CONTENT_COLUMNS: tuple[str, ...] = (
 #: 判準：**「這次不知道」≠「這筆沒有賣家」**。來源給了新值就用新值（一筆標的
 #: 的賣家不會變，給了就是更正確的值），沒給就保留既有值（COALESCE）。
 #: 價格與標題不在這個名單裡是刻意的——那些欄位本來就該跟著最新一次觀測走。
-_LISTING_OBS_STICKY_COLUMNS: frozenset[str] = frozenset({"seller_id"})
+#:
+#: `band`（2026-08-23 加入，修正回合二 Task 12）：band 現在是**價格推導**，
+#: 只有「這個 site 有高價帶邊界設定＋這一列有 JPY 價格」時才推得出新值
+#: （`Store._derive_listing_band`）；推不出來（該 site 無邊界資訊、或這次
+#: 沒有 JPY 價格）不代表這筆商品的價格帶變得未知，維持既有判定就好——
+#: 跟 seller_id 是同一種「這次不知道 ≠ 沒有」，同一套 COALESCE 機制。
+_LISTING_OBS_STICKY_COLUMNS: frozenset[str] = frozenset({"seller_id", "band"})
 
 #: 舊 db 的 listing_obs 沒有 seller_id（與 _COMPS_ATTR_COLUMNS 同一套 additive
 #: migration：PRAGMA 看過再 ADD COLUMN，O(1)、不重寫既有列、重跑安全）。
@@ -460,6 +466,34 @@ _LISTING_OBS_MIGRATE_COLUMNS: dict[str, str] = {
     # COLUMN 回填既有列，語意與新寫入端一致（見 _SCHEMA 的欄位註解）。
     "band": "TEXT DEFAULT 'std'",
 }
+
+
+def _derive_listing_band(
+    row: dict[str, Any], bounds: tuple[float, float] | None
+) -> str | None:
+    """依這一列**本輪觀測到的價格**判定它屬於哪個 band（修正回合二 Task 12）。
+
+    `bounds`：呼叫端（`Store.record_listing_scan`）傳入的 `(ceiling, high_cap)`
+    ——只有「有高價帶設定的 site」才有值（目前僅 `buyee_mercari`）。
+
+    回 `None` 表示「這一列判不出來」（沒有 bounds、或這一列沒有 JPY 價格），
+    呼叫端（`_upsert_listing_obs`）解讀為：**保留既有值**，新列才 fallback
+    `'std'`——不確定的東西不該覆寫已知的東西，這跟 `seller_id` 的
+    「這次不知道 ≠ 沒有」是同一條規則（`_LISTING_OBS_STICKY_COLUMNS`）。
+    """
+    if bounds is None:
+        return None
+    if row.get("currency") != "JPY":
+        return None
+    price = row.get("price_native")
+    if price is None:
+        return None
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        return None
+    ceiling, _cap = bounds
+    return "high" if price > ceiling else "std"
 
 #: 舊 db 的 signals 沒有 bucket（卡片分類，見 `domain.CardBucket`）。同一套
 #: additive migration：PRAGMA 看過再 ADD COLUMN，O(1)、不重寫既有列、重跑安全。
@@ -644,13 +678,19 @@ class Store:
             conn.close()
 
     # ------------------------------------------------------------------
-    def upsert_signal(self, sig: Signal, *, band: str = "std") -> bool:
+    def upsert_signal(self, sig: Signal, *, band: str | None = None) -> bool:
         """回傳 True 代表這是新標的（值得推播）。
 
-        `band`：'std'（一般掃描）或 'high'（高價帶掃描，見高價帶掃描 plan
-        Task 3）。**每次 upsert 都覆寫**——後見覆蓋前見，語意見 `_SCHEMA`
-        的 `band` 欄位註解；呼叫端（`Pipeline._scan`）依 `high_band` 旗決定
-        傳哪個值，這裡不猜。
+        `band`：`None`（預設）＝**保留既有值**，不覆寫；新列 fallback `'std'`。
+        掃描路徑（`Pipeline._scan`）依 `high_band` 旗顯式傳 `'std'`／`'high'`
+        （每次 upsert 都覆寫，語意見 `_SCHEMA` 的 `band` 欄位註解）。
+
+        預設改 `None` 是修正回合二 Task 12 的結構性修法：`bidding.py`／
+        `appraise.py` 的回寫呼叫（`--apply` 洗回估價／鑑定分數時）一直是
+        `apply_to.upsert_signal(sig)`，舊預設 `'std'` 會把高價帶掃描寫入的
+        `band='high'` signal 靜默重設回 `'std'`——那些呼叫端不知道、也不該
+        知道 band 這件事，讓共用 upsert 的預設值變安全，呼叫端就零改動變
+        正確（同型舊事故：`--apply` 回寫洗掉每輪語意欄位）。
         """
         key = sig.listing.key
         now = _now_iso()
@@ -682,8 +722,9 @@ class Store:
                 "reason": sig.reason,
                 "payload": json.dumps(sig.to_dict(), default=str, ensure_ascii=False),
                 "last_seen": now,
-                "band": band,
             }
+            if band is not None:
+                row["band"] = band
 
             if existing:
                 # 保留人工狀態與筆記 —— 這是狀態機的重點，
@@ -700,6 +741,7 @@ class Store:
                 c.execute(f"UPDATE signals SET {sets} WHERE key = :key", row)
                 return False
 
+            row.setdefault("band", "std")
             row["first_seen"] = now
             row["state"] = TriageState.NEW.value
             row["note"] = ""
@@ -1226,7 +1268,12 @@ class Store:
     # ------------------------------------------------------------------
     # 在架觀測帳（listing_obs）
     def record_listing_scan(
-        self, batches: list[dict[str, Any]], *, now: str | None = None
+        self,
+        batches: list[dict[str, Any]],
+        *,
+        now: str | None = None,
+        price_bounds: dict[str, tuple[float, float]] | None = None,
+        round_band: str = "std",
     ) -> dict[str, int]:
         """一輪掃描的在架觀測：**寫入與離場判定必須在同一次交易裡**。
 
@@ -1256,20 +1303,59 @@ class Store:
         一個站有多個查詢時取**各批次地平線的最大值**（最保守：地平線越新，
         被判定成「真的消失」的越少）。
 
-        ── 地平線分帶（band）───────────────────────────────────────────
-        地平線的分組鍵是 **(site, band)**，不是單純 site（2026-08-22，
-        reviewer Critical 1 修法，高價帶掃描 plan Task 8）。高價帶批次
-        （`ygo-sniper daily-high`）因伺服器端 `price_max` 天生看不到低價帶
-        商品，若地平線不分帶，下一輪低價帶批次的 open_rows 查詢會把高價帶
-        商品也納入考慮，而它「本輪缺席」只是因為它根本不在低價帶的搜尋
-        範圍內——會被誤判 `window_exit_at`／`disappeared_at`（實跑重現過：
-        18:15 高價帶入庫 → 18:30 低價帶輪 → 被標離場）。批次不帶 `band`
-        鍵時 fallback 成 `'std'`（既有批次、既有測試零改動）。
-        `exit_scope` 與 `band` 是兩件事：前者問「這一批看得到整個站的第 1
-        頁嗎」，後者問「這一批看得到的是哪個價格子集」——高價帶批次現在
-        `exit_scope=True`：它看得到高價帶自己完整的第 1 頁，能夠、也應該
-        為**自己的 band**建地平線，不然高價帶商品永遠沒有管道被判離場
-        （CLAUDE.md 第五節第 8 條：狀態機的「無結論」分支不能是死巷）。
+        ── 地平線分帶（band）：判定當下的價格窗，不讀儲存值 ─────────────
+        2026-08-22（reviewer Critical 1，plan Task 8）曾經讓批次自己宣告
+        `band` 並寫死進地平線的分組鍵 `(site, band)`——但批次的宣告權後來
+        證明是錯的：`_scan` 把「這一輪是不是高價帶掃描」整個蓋到每一批
+        （含賣家頁批次）上，於是賣家頁看到的高價商品被洗回 `'std'`，下一輪
+        低價帶批次的地平線把它判離場（reviewer 實跑重現：18:15 高價帶入庫
+        → 18:30 低價帶輪、賣家頁批次看到它但被強制蓋成 std → 被標離場）。
+        儲存的 `band` 欄位也會因 fx 匯率漂移過期（W1：邊界隨匯率移動，
+        昨天寫的 band 不代表今天還對）。
+
+        修正回合二（2026-08-23，Task 12）的新語意：**地平線判定不分組、
+        不讀儲存的 band**，改成單純以 `site` 分組（回到 Task 8 之前的
+        grouping），horizon 只在同一個 `site` 內比較——但比較的 open_rows
+        候選集用**判定當下重算的價格窗**過濾，不看它們儲存的 band：
+
+        - `price_bounds`：呼叫端（`Pipeline._scan`）傳入的
+          `{site: (ceiling, high_cap)}`，只列「有高價帶設定的 site」
+          （目前僅 `buyee_mercari`）。`ceiling` 與低價帶查詢的價格上限
+          同一次 `_price_ceiling_jpy()` 呼叫（同源條款）。
+        - `round_band`：這一輪呼叫本身是低價帶還是高價帶掃描（`'std'`／
+          `'high'`，呼叫端依 `high_band` 旗傳）。
+        - `site` 不在 `price_bounds` 裡 → **維持現行全站判定，行為零
+          變化**（沒有高價帶設定的 site，例如 `yahoo_direct`，price 過濾
+          完全不介入，跟 Task 8 之前一樣）。
+        - `site` 在 `price_bounds` 裡：`round_band='std'` 只把 open_rows
+          裡 `price_native <= ceiling`（或沒有 JPY 價格——無價格的列歸
+          std 窗，維持既有行為）的列視為「這一輪蓋得到」；
+          `round_band='high'` 只把 `ceiling < price_native <= high_cap`
+          的列視為蓋得到。這樣一來，高價帶商品在低價帶輪的 open_rows
+          查詢裡天生就不會出現（價格對不上），不需要靠分組鍵把它們隔開；
+          反過來，高價帶輪也只會對高價帶商品判離場，不會誤判低價帶商品
+          缺席。
+
+        `listing_obs.band` 欄位本身仍然每輪更新（見下方寫入段落），但只
+        給 dashboard／除錯用——這裡的判定邏輯不再依賴它，所以邊界隨 fx
+        漂移也不會讓判定跟著錯（W1 修法）。
+
+        `exit_scope`（見上段）與這裡的價格窗過濾是兩件獨立的事：前者問
+        「這一批看得到整個站的第 1 頁嗎」（決定要不要用這批建地平線），
+        後者問「open_rows 裡哪些列屬於這一輪能看到的價格子集」（決定
+        horizon 要跟誰比）。高價帶批次 `exit_scope=True`：它看得到高價帶
+        自己完整的第 1 頁，能夠、也應該建地平線，不然高價帶商品永遠沒有
+        管道被判離場（CLAUDE.md 第五節第 8 條：狀態機的「無結論」分支
+        不能是死巷）。
+
+        ── listing_obs.band 的寫入：價格推導，批次沒有宣告權 ────────────
+        每一列寫入 `listing_obs` 時，`band` 由**這一列本身觀測到的價格**
+        對照 `price_bounds[site]` 推導（`price_native > ceiling` → `'high'`，
+        否則 `'std'`）；`site` 不在 `price_bounds` 裡、或這一列沒有 JPY
+        價格 → 保留既有值（新列 fallback `'std'`，見 `_upsert_listing_obs`／
+        `_LISTING_OBS_STICKY_COLUMNS`）。批次本身**不帶**任何 band 宣告——
+        這正是修掉 C1 殘口的地方：賣家頁批次看到的高價商品，band 由它自己
+        ¥22,222 的價格推出來，不會被「這一輪是低價帶掃描」的批次宣告蓋掉。
 
         ── 離場判定：賣家頁完整列舉（獨立於地平線的第二條證據）──────────
         賣家頁監控（`seller_watch`）固定抓 1 頁，容量 100-200 筆，實測單一
@@ -1306,10 +1392,10 @@ class Store:
         if not healthy:
             return report
 
-        #: 地平線判定的分組鍵是 (site, band)，不是單純 site（docstring「地平線
-        #: 分帶」段）——批次沒帶 `band` 鍵時 fallback 成 `'std'`。
-        seen_by_scope: dict[tuple[str, str], set[str]] = {}
-        horizons: dict[tuple[str, str], str] = {}
+        #: 地平線判定的分組鍵改回單純 site（docstring「地平線分帶」段——
+        #: 分帶邏輯移到 open_rows 的價格窗過濾，不再是分組鍵）。
+        seen_by_site: dict[str, set[str]] = {}
+        horizons: dict[str, str] = {}
         handled: set[str] = set()
         #: 這一輪觀測到的賣家 → feedback（可能是 None）。同一交易內聚合更新
         #: sellers 表；feedback 只有部分來源給（eBay/paypay 的 row 會帶）。
@@ -1318,8 +1404,7 @@ class Store:
         with self._conn() as c:
             for batch in healthy:
                 site = str(batch.get("site") or "")
-                band = str(batch.get("band") or "std")
-                scope = (site, band)
+                bounds = (price_bounds or {}).get(site)
                 batch_first: list[str] = []
                 for row in batch.get("rows") or []:
                     key = str(row.get("key") or "")
@@ -1332,7 +1417,7 @@ class Store:
                             row.get("seller_feedback_score", prev[0]),
                             row.get("seller_feedback_pct", prev[1]),
                         )
-                    seen_by_scope.setdefault(scope, set()).add(key)
+                    seen_by_site.setdefault(site, set()).add(key)
                     if key in handled:
                         # 同一輪被兩個查詢撈到 → 只算一次觀測，但地平線仍要納入
                         first = c.execute(
@@ -1341,27 +1426,52 @@ class Store:
                         batch_first.append((first["first_seen"] if first else stamp) or stamp)
                         continue
                     handled.add(key)
-                    # band 進 content columns：後見覆蓋前見，最後看到它的那一輪
-                    # 決定它現在屬於哪個帶（docstring「地平線分帶」段）。
-                    row["band"] = band
+                    # band 由這一列自己的價格推導，批次沒有宣告權（docstring
+                    # 「listing_obs.band 的寫入」段——這是修掉 C1 殘口的地方）。
+                    row["band"] = _derive_listing_band(row, bounds)
                     batch_first.append(self._upsert_listing_obs(c, key, row, stamp, report))
                 if batch_first and batch.get("exit_scope", True):
                     h = min(batch_first)
-                    if h > horizons.get(scope, ""):
-                        horizons[scope] = h
+                    if h > horizons.get(site, ""):
+                        horizons[site] = h
 
             report["seen"] = len(handled)
 
-            for (site, band), seen in seen_by_scope.items():
-                horizon = horizons.get((site, band))
+            for site, seen in seen_by_site.items():
+                horizon = horizons.get(site)
                 if horizon is None:
                     continue
-                open_rows = c.execute(
-                    "SELECT key, first_seen FROM listing_obs "
-                    "WHERE site = ? AND band = ? "
-                    "AND disappeared_at IS NULL AND window_exit_at IS NULL",
-                    (site, band),
-                ).fetchall()
+                bounds = (price_bounds or {}).get(site)
+                if bounds is None:
+                    # 沒有高價帶設定的 site：維持現行全站判定，行為零變化
+                    # （docstring「地平線分帶」段）。
+                    open_rows = c.execute(
+                        "SELECT key, first_seen FROM listing_obs "
+                        "WHERE site = ? "
+                        "AND disappeared_at IS NULL AND window_exit_at IS NULL",
+                        (site,),
+                    ).fetchall()
+                elif round_band == "high":
+                    ceiling, cap = bounds
+                    open_rows = c.execute(
+                        "SELECT key, first_seen FROM listing_obs "
+                        "WHERE site = ? "
+                        "AND disappeared_at IS NULL AND window_exit_at IS NULL "
+                        "AND currency = 'JPY' AND price_native IS NOT NULL "
+                        "AND price_native > ? AND price_native <= ?",
+                        (site, ceiling, cap),
+                    ).fetchall()
+                else:
+                    ceiling, _cap = bounds
+                    # 無 JPY 價格的列歸 std 窗（維持既有行為，docstring 段）。
+                    open_rows = c.execute(
+                        "SELECT key, first_seen FROM listing_obs "
+                        "WHERE site = ? "
+                        "AND disappeared_at IS NULL AND window_exit_at IS NULL "
+                        "AND (price_native IS NULL OR currency != 'JPY' "
+                        "OR price_native <= ?)",
+                        (site, ceiling),
+                    ).fetchall()
                 for r in open_rows:
                     if r["key"] in seen:
                         continue
@@ -1431,6 +1541,11 @@ class Store:
         ).fetchone()
         content = {col: row.get(col) for col in _LISTING_OBS_CONTENT_COLUMNS}
         if existing is None:
+            # 新列沒有既有值可 COALESCE——`band` 判不出來（`_derive_listing_band`
+            # 回 None）時 fallback 'std'，不能讓 INSERT 寫進 NULL
+            # （欄位的 schema DEFAULT 'std' 只在完全省略該欄位時生效）。
+            if content.get("band") is None:
+                content["band"] = "std"
             payload = {**content, "key": key, "first_seen": stamp, "last_seen": stamp}
             cols = ", ".join(payload)
             vals = ", ".join(f":{k}" for k in payload)

@@ -224,6 +224,55 @@ def test_high_band_signal_gets_band_high_std_scan_gets_band_std(
     assert high_row["band"] == "high"
 
 
+def _signal_for(key: str, *, site: str = "buyee_mercari"):
+    """組一個最小可用的 Signal 給 `upsert_signal` 用（比照
+    `tests/test_expiry_clear.py::_signal_for`：`Listing.key` 是
+    `f"{site}:{external_id}"`，餵裸 key 會新插一列而不是走 existing 分支）。
+    """
+    from ygo_sniper.domain import (
+        CardInfo, CompStats, Currency, Listing, RouteQuote, Signal, Site as _Site,
+    )
+
+    prefix = f"{site}:"
+    external_id = key[len(prefix):] if key.startswith(prefix) else key
+    listing = Listing(
+        site=_Site(site), external_id=external_id, title=f"卡 {key}",
+        url=f"https://example.test/{key}", price=22222.0, currency=Currency.JPY,
+    )
+    assert listing.key == key, f"測試 key 形狀不對：{listing.key!r} != {key!r}"
+    route = RouteQuote(
+        route="direct", label="直寄", landed_twd=5000.0, item_twd=4500.0,
+        fee_twd=200.0, shipping_twd=300.0, bundle_size=1,
+    )
+    return Signal(
+        listing=listing,
+        card=CardInfo(),
+        best_route=route,
+        all_routes=[route],
+        comps=CompStats(n=0, median_twd=None, p25_twd=None, p40_twd=None,
+                        p75_twd=None, window_days=90),
+        flags=[],
+        score=50.0,
+        reason="",
+    )
+
+
+def test_upsert_signal_without_band_preserves_existing_band(tmp_path):
+    """(b) 回寫保留：`upsert_signal(sig)`（不帶 band）對既有 `band='high'`
+    的 signal → band 不變。模擬 `bidding.py`／`appraise.py` 的呼叫形狀
+    （`apply_to.upsert_signal(sig)`，修正回合二 Task 12 W2）——那些呼叫端
+    不知道 band 這件事，共用 upsert 的預設值改成 `None`＝保留既有值之後，
+    它們零改動就得到正確行為。"""
+    key = "buyee_mercari:high1"
+    store = Store(tmp_path / "t.db")
+    store.upsert_signal(_signal_for(key), band="high")
+    assert store.get_signal(key)["band"] == "high"
+
+    store.upsert_signal(_signal_for(key))  # 不帶 band——模擬 bidding.py 的呼叫
+
+    assert store.get_signal(key)["band"] == "high"
+
+
 def test_migration_adds_band_column_defaulting_existing_rows_to_std(tmp_path):
     """舊 db（沒有 `band` 欄位）開一次就補上，既有列一律 `'std'`（additive
     migration，重跑安全——比照 `_migrate_signals` 對 `bucket` 的既有測試）。
@@ -258,19 +307,17 @@ def test_migration_adds_band_column_defaulting_existing_rows_to_std(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 4. 地平線：高價帶批次不建地平線，不誤判帶外標的離場
+# 4. 地平線：高價帶輪不誤判帶外標的離場
 # ---------------------------------------------------------------------------
 def test_high_band_round_does_not_exit_horizon_low_band_listings(monkeypatch, tmp_path, cfg):
-    """**2026-08-22 reviewer Critical 1 修法後改寫**（原測試名
-    `test_high_band_batch_does_not_create_exit_horizon`，斷言的是舊行為：
-    高價帶批次 `exit_scope=False`，靠「完全不建地平線」來保護低價帶標的。
-    reviewer 抓到那條路是死巷——高價帶批次自己的商品因此永遠沒有管道被判
-    離場（CLAUDE.md 第五節第 8 條）。修法是分帶（`store.record_listing_scan`
-    docstring「地平線分帶」段）：高價帶批次現在 `exit_scope=True`，但地平線
-    判定的分組鍵是 (site, band)，所以低價帶標的（band='std'，價格帶外，
-    高價帶批次天生看不到）在高價帶輪缺席，仍然不會被誤判離場——保護的
-    機制從「不建地平線」換成「地平線只在同一個 band 裡比對」。
-    """
+    """**2026-08-23 修正回合二 Task 12 改寫**（原斷言的是 Task 8 的機制：
+    批次自己宣告 `band='high'`，地平線分組鍵是 (site, band)）。reviewer 複審
+    抓到那個機制的殘口：`_scan` 把批次的 band 蓋成整輪模式，賣家頁批次撈到
+    的高價商品會被強制洗回 'std'。新機制拿掉了批次的宣告權——`_scan` 改成
+    把 `price_bounds`／`round_band` 傳給 `record_listing_scan`，band 由每一
+    列自己的價格推導，地平線判定改用判定當下重算的價格窗過濾 open_rows。
+    這裡驗的是 pipeline 層真的把這兩個參數接上、而不是批次不再帶任何
+    band 鍵。"""
     low_listing = make_listing(
         price=5000, site=Site.BUYEE_MERCARI, external_id="low1",
         title=_TITLE, source="hb_src",
@@ -289,10 +336,12 @@ def test_high_band_round_does_not_exit_horizon_low_band_listings(monkeypatch, tm
     monkeypatch.setattr(Pipeline, "_price_ceiling_jpy", lambda self, site: 8624.0)
 
     captured: list = []
+    captured_kwargs: list = []
     orig = pipe.store.record_listing_scan
 
     def spy(batches, **kw):
         captured.append(batches)
+        captured_kwargs.append(kw)
         return orig(batches, **kw)
 
     monkeypatch.setattr(pipe.store, "record_listing_scan", spy)
@@ -306,15 +355,19 @@ def test_high_band_round_does_not_exit_horizon_low_band_listings(monkeypatch, tm
 
     assert captured, "record_listing_scan 沒被呼叫，測試沒有驗到東西"
     high_round_batches = captured[-1]
+    high_round_kwargs = captured_kwargs[-1]
     assert high_round_batches, "高價帶輪應該至少有一個批次"
-    # exit_scope 改回 True（plan Task 8 第 4 點）：高價帶批次現在能且應該
-    # 為自己的 band 建地平線，不再靠關掉判定來保護低價帶標的。
+    # exit_scope 維持預設 True：高價帶批次能且應該建地平線。
     assert all(b.get("exit_scope") is True for b in high_round_batches)
-    assert all(b.get("band") == "high" for b in high_round_batches)
+    # 批次不再宣告 band（修正回合二 Task 12 拿掉了宣告權）——band 資訊
+    # 改由呼叫端的 price_bounds／round_band 傳遞。
+    assert all("band" not in b for b in high_round_batches)
+    assert high_round_kwargs.get("round_band") == "high"
+    assert high_round_kwargs.get("price_bounds") == {"buyee_mercari": (8624.0, 50000.0)}
 
     obs = {r["key"]: r for r in pipe.store.listing_obs()}
-    # 保護低價帶標的的機制換成了「地平線只在同一個 band 裡比對」——
-    # low1 是 band='std'，高價帶批次的地平線（band='high'）不涉及它。
+    # 保護低價帶標的的機制換成了「地平線判定用即時價格窗過濾」——
+    # low1 現在的價格（¥5,000）落在 std 窗，高價帶輪的價格窗看不到它。
     assert obs[low_listing.key]["band"] == "std"
     assert obs[low_listing.key]["disappeared_at"] is None
     assert obs[low_listing.key]["window_exit_at"] is None

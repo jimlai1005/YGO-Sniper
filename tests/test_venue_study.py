@@ -36,31 +36,32 @@ def store(tmp_path):
 
 
 def obs_row(
-    key, *, site="buyee_paypay", price=1000.0, rarity="ultra", grader="PSA",
-    grade=9.0, seller_id=None,
+    key, *, site="buyee_paypay", price=1000.0, price_native=None, currency="JPY",
+    rarity="ultra", grader="PSA", grade=9.0, seller_id=None,
 ):
+    """`price_native` 可以直接覆寫（不吃 `price * 5` 的預設換算）——band
+    推導（`store._derive_listing_band`）比的是 `price_native`（JPY），高價帶
+    測試要能精準控制它是否落在 ceiling 之上（見「band 語意重建」測試段）。
+    """
     return {
         "key": key, "source": site, "site": site, "title": f"卡 {key}",
-        "url": f"https://example.test/{key}", "price_native": price * 5,
-        "currency": "JPY", "price_twd": price, "landed_twd": price + 300,
+        "url": f"https://example.test/{key}",
+        "price_native": price * 5 if price_native is None else price_native,
+        "currency": currency, "price_twd": price, "landed_twd": price + 300,
         "rarity": rarity, "grader": grader, "grade": grade,
         "card_name": None, "era_evidence": "初期", "price_kind": "fixed",
         "seller_id": seller_id,
     }
 
 
-def batch(*keys, site="buyee_paypay", healthy=True, band=None, **kw):
-    """`band=None` 省略 batch 層的 `band` 鍵——比照生產端既有批次（未升級到
-    高價帶分帶前寫的批次）不帶這個鍵，落庫端要 fallback 成 `'std'`
-    （見 `store.record_listing_scan` 對 band 缺失時的預設）。
-    """
-    b: dict = {
+def batch(*keys, site="buyee_paypay", healthy=True, **kw):
+    """批次**沒有 band 宣告權**（修正回合二 Task 12 拿掉了——band 由每一列
+    自己觀測到的價格推導，不是「哪一批看到它」，見 `store.record_listing_scan`
+    docstring「地平線分帶」段）。"""
+    return {
         "source": site, "site": site, "healthy": healthy,
         "rows": [obs_row(k, site=site, **kw) for k in keys],
     }
-    if band is not None:
-        b["band"] = band
-    return b
 
 
 def seller_batch(*keys, site="buyee_paypay", seller_id="s1", healthy=True, seen_keys=None, **kw):
@@ -180,45 +181,61 @@ def test_horizon_uses_max_across_queries_of_same_site(store):
 
 
 # ---------------------------------------------------------------------------
-# 高價帶掃描分帶離場判定（2026-08-22，plan Task 8，reviewer Critical 1 修法）。
+# band 語意重建：價格推導＋判定用即時價格窗（2026-08-23，修正回合二 Task 12）。
 #
-# 事故：高價帶批次落地的商品因伺服器端 price_max 永遠不在低價帶結果裡；
-# 舊行為（地平線判定只看 site，不看 band）會讓下一輪低價帶輪把它判成
-# window_exit_at／disappeared_at——reviewer 實跑重現過（18:15 high 入庫 →
-# 18:30 std 輪 → 被標離場）。修法：`listing_obs.band` 進地平線的分組鍵，
-# 高價帶批次的 `exit_scope` 也改回 True（CLAUDE.md 第五節第 8 條死巷條款：
-# 不能讓高價帶商品沒有任何管道可以判離場）。
+# Task 8 曾經讓批次自己宣告 `band` 並寫進地平線的分組鍵——但 `_scan` 把整輪
+# 的 band 蓋到每一批（含賣家頁批次）上，監控賣家撈到的高價商品因此被洗回
+# 'std'，下一輪低價帶批次的地平線把它判離場（reviewer 實跑重現：C1 殘口）。
+# 新語意：band 由**這一列自己觀測到的價格**對照 `price_bounds` 推導，批次
+# 沒有宣告權；地平線判定改用**判定當下重算的價格窗**（`round_band` ＋
+# `price_bounds`）過濾 open_rows，不讀儲存的 band（W1：儲存值會因 fx 漂移
+# 過期）。
 # ---------------------------------------------------------------------------
-def test_high_band_listing_untouched_by_next_low_band_round(store):
-    """C1 重現：高價帶列入庫後，下一輪**看不到它**的低價帶批次，不能把它
-    判成離場——兩個離場欄位必須維持 NULL（band 分組把它擋在低價帶的
-    open_rows 查詢之外）。"""
+_HB_BOUNDS = {"buyee_mercari": (8624.0, 50000.0)}
+_HB_SITE = "buyee_mercari"
+
+
+def test_high_band_listing_seen_by_seller_batch_keeps_high_band(store):
+    """(a) C1 殘口重現：高價帶列入庫後，下一輪**賣家頁批次**（不是關鍵字
+    批次）看到它，價格依然是 ¥22,222——band 必須仍是 'high'，兩個離場欄位
+    必須維持 NULL。批次本身沒有宣告 band 的能力，band 完全由這一列自己的
+    價格決定，賣家頁批次因此自然正確。"""
     store.record_listing_scan(
-        [batch("high1", band="high")], now="2026-08-22T18:15:00+00:00"
+        [batch("high1", site=_HB_SITE, price_native=22222)],
+        now="2026-08-22T18:15:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="high",
     )
     store.record_listing_scan(
-        [batch("std1", band="std")], now="2026-08-22T18:30:00+00:00"
+        [seller_batch("high1", site=_HB_SITE, price_native=22222)],
+        now="2026-08-22T18:30:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="std",
     )
     row = {r["key"]: r for r in store.listing_obs()}["high1"]
+    assert row["band"] == "high"
     assert row["disappeared_at"] is None
     assert row["window_exit_at"] is None
-    assert row["band"] == "high"
 
 
 def test_high_band_round_marks_its_own_horizon_disappeared(store):
     """高價帶自己的輪能對帶內缺席列正常判 `disappeared_at`——分帶不是關掉
-    地平線，是把地平線的分母縮小成同一個 band（Task 8 第 4 點：高價帶批次
-    的 exit_scope 改回 True，不再是無人判定的死巷）。比照
+    地平線，是價格窗把地平線的候選集縮小成同一個帶（高價帶批次
+    `exit_scope` 維持預設 True，不再是無人判定的死巷）。比照
     `test_absent_newer_listing_is_marked_disappeared` 的時序安排：缺席的
     那筆 first_seen 比地平線新，才是「頁面還蓋得到它、它卻不在」的形狀。"""
     store.record_listing_scan(
-        [batch("h_a", band="high")], now="2026-08-22T10:00:00+00:00"
+        [batch("h_a", site=_HB_SITE, price_native=20000)],
+        now="2026-08-22T10:00:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="high",
     )
     store.record_listing_scan(
-        [batch("h_a", "h_b", band="high")], now="2026-08-22T11:00:00+00:00"
+        [batch("h_a", "h_b", site=_HB_SITE, price_native=20000)],
+        now="2026-08-22T11:00:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="high",
     )
     rep = store.record_listing_scan(
-        [batch("h_a", band="high")], now="2026-08-22T12:00:00+00:00"
+        [batch("h_a", site=_HB_SITE, price_native=20000)],
+        now="2026-08-22T12:00:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="high",
     )
     assert rep["disappeared"] == 1
     rows = {r["key"]: r for r in store.listing_obs()}
@@ -228,16 +245,61 @@ def test_high_band_round_marks_its_own_horizon_disappeared(store):
 
 def test_high_band_round_marks_its_own_horizon_window_exit(store):
     """高價帶自己的輪對比地平線更舊的缺席列判 `window_exit_at`（右設限，
-    無結論）——同一套地平線邏輯只是分母縮小成 band，不是換了一套判準。"""
+    無結論）——同一套地平線邏輯只是候選集縮小成價格窗，不是換了一套判準。"""
     store.record_listing_scan(
-        [batch("h_old", band="high")], now="2026-08-22T10:00:00+00:00"
+        [batch("h_old", site=_HB_SITE, price_native=20000)],
+        now="2026-08-22T10:00:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="high",
     )
     rep = store.record_listing_scan(
-        [batch("h_new1", band="high")], now="2026-08-22T11:00:00+00:00"
+        [batch("h_new1", site=_HB_SITE, price_native=20000)],
+        now="2026-08-22T11:00:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="high",
     )
     assert rep["window_exit"] == 1
     row = {r["key"]: r for r in store.listing_obs()}["h_old"]
     assert row["window_exit_at"] == "2026-08-22T11:00:00+00:00"
+    assert row["disappeared_at"] is None
+
+
+def test_cross_band_drift_high_round_stops_judging_std_round_takes_over(store):
+    """(c) 跨帶漂移：band='high' 列的價格改到 ceiling 以下之後——高價帶輪的
+    價格窗不再判它（它的即時價格已經落在 std 窗），改由低價帶輪的價格窗
+    接手判定。band 是價格推導、判定是即時價格窗，兩者都不看「這一列曾經
+    被寫過什麼 band」，只看它**現在**的價格。"""
+    # T0：高價帶輪把它寫進去，band='high'
+    store.record_listing_scan(
+        [batch("x", site=_HB_SITE, price_native=20000)],
+        now="2026-08-23T09:00:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="high",
+    )
+    # T1：低價帶輪重新觀測到它，價格已經跌到 ceiling 以下 → band 改寫成 std
+    store.record_listing_scan(
+        [batch("x", site=_HB_SITE, price_native=5000)],
+        now="2026-08-23T09:05:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="std",
+    )
+    assert {r["key"]: r for r in store.listing_obs()}["x"]["band"] == "std"
+
+    # T2：高價帶輪跑一輪（另一個高價商品建地平線）——x 現在的價格落在 std
+    # 窗，不會出現在高價帶輪的 open_rows 候選裡，維持 NULL。
+    store.record_listing_scan(
+        [batch("z_high", site=_HB_SITE, price_native=20000)],
+        now="2026-08-23T09:10:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="high",
+    )
+    row = {r["key"]: r for r in store.listing_obs()}["x"]
+    assert row["disappeared_at"] is None and row["window_exit_at"] is None
+
+    # T3：低價帶輪跑一輪、地平線比 x 的 first_seen（T0）新，x 這輪缺席
+    # → 低價帶輪的價格窗接手判定（x 現在的價格落在 std 窗內）。
+    store.record_listing_scan(
+        [batch("y_std", site=_HB_SITE, price_native=3000)],
+        now="2026-08-23T09:15:00+00:00",
+        price_bounds=_HB_BOUNDS, round_band="std",
+    )
+    row = {r["key"]: r for r in store.listing_obs()}["x"]
+    assert row["window_exit_at"] == "2026-08-23T09:15:00+00:00"
     assert row["disappeared_at"] is None
 
 

@@ -1091,16 +1091,15 @@ class Pipeline:
           完整輪的事，高價帶輪要維持獨立的、與低價帶互不干擾的請求預算。
         - 狙擊比對照跑：`_collect_candidates` 內建掛鉤，對任何管道發現的
           listing 一視同仁，高價帶正是 ¥8,624 以上狙擊卡唯一的發現管道。
-        - 在架觀測批次帶自己的 `band`（'high'／'std'，`_scan` 統一補在
-          record_listing_scan 呼叫前），`exit_scope` 維持預設 True：地平線
-          判定的分組鍵是 (site, band)（見 `store.record_listing_scan`
-          docstring「地平線分帶」段），高價帶批次看得到自己那個子集完整的
-          第 1 頁，能且應該為自己的 band 建地平線。**這是 2026-08-22
-          reviewer Critical 1 修法後的行為**：舊版本讓高價帶批次
-          `exit_scope=False`（不建地平線），結果高價帶商品沒有任何管道能
-          被判離場——是同一個「觀測 scope 與判定 scope 不一致」的錯誤換了
-          個入口重演（CLAUDE.md 第五節第 8 條死巷條款），現在改成分帶而不是
-          關掉判定。
+        - 在架觀測批次**不帶** `band`（2026-08-23 修正回合二 Task 12 拿掉了
+          批次的宣告權——曾經讓 `_scan` 把整輪的 band 蓋到每個批次上，
+          監控賣家批次撈到的高價商品因此被洗回 `'std'`，下一輪低價帶誤殺
+          它，reviewer 實跑重現過）。`exit_scope` 維持預設 True：高價帶
+          批次看得到自己這個價格子集完整的第 1 頁，能且應該建地平線。
+          `listing_obs.band` 改成**每一列自己觀測到的價格**推導，判定
+          （地平線 open_rows 的候選）也改成用**判定當下重算的價格窗**
+          過濾，不讀儲存的 band——見 `store.record_listing_scan` 的
+          `price_bounds`／`round_band` 參數與其 docstring「地平線分帶」段。
         """
         skip_comps = skip_comps or watch_only or high_band
         comps_added = 0 if skip_comps else self.refresh_comps()
@@ -1119,15 +1118,38 @@ class Pipeline:
         #: healthy 旗標**——離場判定要用它決定「這一批的缺席算不算證據」。
         obs_batches: list[dict] = []
 
-        # 高價帶查詢集與上限：`load_high_band_queries` 未設定時回 (None, [])，
-        # `high_cap` 維持 None、`base_queries` 為空——後面每一段都天然變成
-        # 空跑（不影響 skip_comps／賣家監控／canary 的旗子判斷，那些已經
-        # 直接看 `high_band` 這個布林，不看查詢集是否為空）。
+        from .queries import load_high_band_queries
+
+        # 只算一次，`high_band` 與 `std` 輪共用——見下方 price_bounds 段的
+        # 理由（兩種輪都要知道「有沒有高價帶設定」，不是只有高價帶輪才需要）。
+        hb_cap, hb_queries = load_high_band_queries(wl)
+
+        # 價格窗分層表：{site: (ceiling, high_cap)}，只列「有高價帶設定的
+        # site」（目前僅 buyee_mercari，修正回合二 Task 12）。**不管這一輪
+        # 是不是高價帶掃描都要算**——`record_listing_scan` 拿它幫每一列
+        # （含賣家頁批次撈到的）推導 band，賣家頁批次天生沒有價格上限，
+        # 只有靠這張表才能正確判斷它看到的商品落在哪一帶（C1 殘口修法：
+        # band 不再由「哪一批看到它」決定，改由「它自己的價格」決定）。
+        # ceiling 算不出來的 site（routes/fx 缺失）直接跳過分層，不強行用
+        # 半套資訊分帶——這與 `_scan_source` 對高價帶輪本身的「下限算不出來
+        # 拒絕掃描」是兩件事：那裡擋的是請求本身，這裡只是分層資訊選配。
+        price_bounds: dict[str, tuple[float, float]] = {}
+        if hb_cap is not None:
+            hb_source_names = {s for q in hb_queries for s in q.sources}
+            for source_name in hb_source_names:
+                src = self.sources.get(source_name)
+                if src is None:
+                    continue
+                try:
+                    ceiling = self._price_ceiling_jpy(src.site)
+                except Exception:  # noqa: BLE001 - 分層資訊是加分項，不該讓整輪掃描死
+                    continue
+                if ceiling and ceiling > 0:
+                    price_bounds[src.site.value] = (ceiling, hb_cap)
+
         high_cap: float | None = None
         if high_band:
-            from .queries import load_high_band_queries
-
-            high_cap, base_queries = load_high_band_queries(wl)
+            high_cap, base_queries = hb_cap, hb_queries
             if high_cap is None:
                 print("[scan] 高價帶未設定（watchlist 缺 high_band 區塊或 "
                       "max_price_jpy 無效），本輪空手而回")
@@ -1281,8 +1303,9 @@ class Pipeline:
         obs_pruned = 0
         restored: dict = {"restored": 0, "keys": []}
         if not dry_run:
-            # 後見覆蓋前見：`band` 記的是「最後一次看到它的那一輪屬於哪個帶」，
-            # 邊界隨匯率漂移時，這是唯一穩定的語意（高價帶掃描 plan Task 3）。
+            # signals.band：仍是「最後一次看到它的那一輪屬於哪個帶」——這是
+            # scan-mode 語意（哪個 CLI 指令跑出這筆訊號），跟下面 listing_obs
+            # 的 band 是兩件不同的事（後者是價格推導，見 record_listing_scan）。
             band = "high" if high_band else "std"
             for sig in signals:
                 if self.store.upsert_signal(sig, band=band):
@@ -1290,15 +1313,17 @@ class Pipeline:
             self.store.snapshot(
                 [(s.listing.key, s.best_route.landed_twd) for s in signals]
             )
-            # 觀測批次也要帶 band——`record_listing_scan` 的地平線判定分組鍵是
-            # (site, band)，不分帶的話高價帶商品會被低價帶批次的地平線誤判離場
-            # （reviewer Critical 1，plan Task 8）。整趟 `_scan` 呼叫只有一個
-            # band（旗子在函式入口就定了），所以每個批次一律套同一個值。
-            for batch in obs_batches:
-                batch["band"] = band
             # 在架觀測帳：signals 每輪 upsert 覆寫，回答不了「在架多久、何時消失」。
             # 這張表是那個問題的唯一資料來源，所以每輪都要落，不管有沒有訊號。
-            obs_report = self.store.record_listing_scan(obs_batches)
+            # `price_bounds`／`round_band`：讓 record_listing_scan 用**判定當下
+            # 的價格**推導 listing_obs.band、用**判定當下的價格窗**過濾地平線
+            # 候選——批次本身不再宣告 band（修正回合二 Task 12，見其 docstring
+            # 「地平線分帶」段）。
+            obs_report = self.store.record_listing_scan(
+                obs_batches,
+                price_bounds=price_bounds,
+                round_band="high" if high_band else "std",
+            )
             # 「清除已離場」的防線：我們清掉、但這一輪又被看到的標的放回原狀態。
             # **必須排在 record_listing_scan 之後**——那裡才是清掉
             # `disappeared_at` 的地方，放前面的話還原永遠慢一輪。
