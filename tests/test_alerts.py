@@ -290,3 +290,37 @@ def test_clear_alerts_on_empty_table_is_a_no_op(store, capsys):
 
     assert _clear_alerts(store) == 0
     assert "本來就是空的" in capsys.readouterr().out
+
+
+def test_clear_source_also_clears_high_band_suffixed_alerts(store):
+    """`--clear-source buyee_mercari` 要同時清掉 `buyee_mercari@high`——
+    高價帶輪的告警指紋帶 band 後綴（`AlertEngine.evaluate` 的
+    `f"{source}@{band}"`），全等比對清不到它（修正回合二 Task 13，複審 S1）。
+    這是修復前會紅、修復後會綠的錨定測試（(c) 的紅燈證據）。"""
+    from ygo_sniper.cli import _clear_alerts
+
+    _seed(store, "buyee_mercari:parser_broken", "buyee_mercari", "parser_broken")
+    _seed(store, "buyee_mercari@high:parser_broken", "buyee_mercari@high", "parser_broken")
+    _seed(store, "yahoo_direct:blocked", "yahoo_direct", "blocked")
+
+    n = _clear_alerts(store, only_source="buyee_mercari")
+
+    assert n == 2
+    assert [r["fingerprint"] for r in store.list_alerts()] == ["yahoo_direct:blocked"]
+
+
+def test_clear_source_does_not_over_match_similar_prefix(store):
+    """`buyee_mercari` 不該連帶清掉 `buyee_mercari_paypay` 這種只是前綴相同、
+    不是 band 後綴（`@`）的別的來源——`startswith` 若沒釘死 `@` 分隔字元
+    會誤殺。"""
+    from ygo_sniper.cli import _clear_alerts
+
+    _seed(store, "buyee_mercari:parser_broken", "buyee_mercari", "parser_broken")
+    _seed(store, "buyee_mercari_paypay:blocked", "buyee_mercari_paypay", "blocked")
+
+    n = _clear_alerts(store, only_source="buyee_mercari")
+
+    assert n == 1
+    assert [r["fingerprint"] for r in store.list_alerts()] == [
+        "buyee_mercari_paypay:blocked"
+    ]

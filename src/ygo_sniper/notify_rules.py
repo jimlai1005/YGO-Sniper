@@ -22,26 +22,37 @@ dashboard 回答「有什麼」，推播只回答一件事：「現在有沒有�
       只說「有一件我們估不了的東西」＋為什麼估不了。低音量（每輪有自己的上限）。
 
   規則 5 高價帶折價（`high_band_discount`，2026-08-22 新增，2026-08-22 修正回合
-  Task 9 同源化）
+  Task 9 同源化，2026-08-23 修正回合二 Task 13 分子改市價基準）
       只評估 `signals.band == "high"` 的標的（高價帶掃描，見 `pipeline._scan(
       high_band=True)`）——那一帶單價高、雜訊代價大，只有「相對市場行情深
-      折價＋證據夠強」才值得打斷你。**閘門與分母現在是同一個 `Estimate` 物件**
-      （`comps.stats_for` 的 `comps_median`／`discount_pct` 不再進這條規則的
+      折價＋證據夠強」才值得打斷你。**閘門與分母是同一個 `Estimate` 物件**
+      （`comps.stats_for` 的 `comps_median`／`discount_pct` 不進這條規則的
       任何判定或文案——那個池子不分平台、不分 sale_kind，且對無精確簽章的卡
       會退化成 `set_code|` 前綴匹配，混進該卡號所有機構所有分數的成交；
       閘門讀的是 venue-aware 的同卡池，分母若還讀混池就等於沒認證，見
       CLAUDE.md 第三節、修正回合 Task 9）：
         1. 估價等級 L1/L2（`estimate.has_card_specific_evidence`）——同卡
            成交池撐著，不是整個稀有度的池子。
-        2. `landed_twd / estimate.fair_twd ≤ high_band_max_price_ratio`
-           （預設 0.70，使用者 2026-08-22 定案）——分子分母都是 TWD 到手口徑
-           （`estimate_signal_row` 用 signal 自己的 `site` 當目標平台估出
-           `fair_twd`，與 `landed_twd` 同源同基準）。文案的「× N 筆」讀
-           `estimate.n_effective`——L1/L2 時它就是同卡池大小（CLAUDE.md
-           第七節）。
+        2. `市價基準_twd / estimate.fair_twd ≤ high_band_max_price_ratio`
+           （預設 0.70，使用者 2026-08-22 定案「市價 X 折以下」）。
+           `estimate.fair_twd` 本身就是**市價**基準（模型吃 `comps.price_twd`，
+           `apply_markup=False` 換匯、不含運雜費，`comps.py:529`）；分子若用
+           `landed_twd`（到手成本，含運費與刷卡加成）就是拿不同口徑的兩個數字
+           相除——修正回合二 Task 13（W3）：實測 overhead 2.8-12.3%，0.70 門檻
+           會被讀成「標價 0.62-0.68 × 市價」，比使用者定案的「7 折」嚴，
+           少推播是本專案最貴的錯誤方向（CLAUDE.md 第一節）。所以分子改成
+           **該筆標價自己的市價基準 TWD**（`fx.to_twd(price_native, currency,
+           apply_markup=False)`，與 `estimate.fair_twd` 同一把尺、同一種
+           換匯不加價）。`landed_twd` 不再進比率計算，但仍照舊顯示在訊息裡
+           （使用者要知道到手多少）。文案的「× N 筆」讀 `estimate.n_effective`
+           ——L1/L2 時它就是同卡池大小（CLAUDE.md 第七節）。
       任一條件不滿足 → 完全靜默（dashboard 仍看得到，這是通知閘門不是
       過濾）。ratio < 0.5（折價異常深）不擋，但文案追加警語——誤殺是靜默的，
-      通知錯了使用者自己一眼可辨（CLAUDE.md 第一節）。
+      通知錯了使用者自己一眼可辨（CLAUDE.md 第一節）。分子或分母**缺值**
+      （公允價算不出來、標價／幣別讀不到、換匯物件沒帶進來、換匯失敗）→
+      不是「沒過門檻」，是資料層的病，改記成可見的 `Skip`（進 skipped log，
+      理由寫明缺哪個值）——缺值靜默 return 與「沒過折價門檻」外顯一樣，
+      但成因完全不同（CLAUDE.md 第五節：0 筆結果必須可分類）。
 
   band 閘門（規則 1/2/3 vs 規則 4/5）
       `band` 是 signal 上的欄位（`'std'`／`'high'`，Task 3 落庫）。
@@ -201,10 +212,11 @@ DEFAULT_SELLER_MIN_PEERS = 1
 #: 監控賣家新上架）：≥15% 有 4 筆、≥20% 3 筆、**≥25% 2 筆**、≥30% 1 筆。
 DEFAULT_SELLER_MODEL_MIN_DISCOUNT = 0.25
 
-#: 規則 5 的折價門檻（`landed_twd / estimate.fair_twd`，0.70 ＝ ≤7 折才推）。
-#: 使用者 2026-08-22 定案——高價帶單價高，雜訊代價大，門檻刻意比規則 3
-#: 的同儕折價（15%＝0.85）嚴很多：規則 5 沒有同儕相對這條強證據可用，
-#: 只能靠「便宜夠多」自己撐住信心。
+#: 規則 5 的折價門檻（`市價基準_twd / estimate.fair_twd`，0.70 ＝ 標價市價比
+#: ≤7 折才推——**分子是標價的市價基準，不是到手成本**，修正回合二 Task 13
+#: W3，見模組頂註規則 5 段落）。使用者 2026-08-22 定案——高價帶單價高，
+#: 雜訊代價大，門檻刻意比規則 3 的同儕折價（15%＝0.85）嚴很多：規則 5
+#: 沒有同儕相對這條強證據可用，只能靠「便宜夠多」自己撐住信心。
 DEFAULT_HIGH_BAND_MAX_PRICE_RATIO = 0.70
 
 #: 規則 5 的「折價異常深」警語門檻（修正回合 W5，2026-08-22）。ratio < 0.5
@@ -513,8 +525,10 @@ class Match:
     #: 的混池（修正回合 Task 9：C2＋W5，見模組頂註規則 5 段落）。
     fair_twd: float | None = None
     sample_n: int | None = None
-    #: 到手成本（`landed_twd`）/ 公允價（`fair_twd`）——同一顆 Estimate、同 TWD
-    #: 基準（≤1 才有機會過門檻）。
+    #: 標價的市價基準（`fx.to_twd(price_native, currency, apply_markup=False)`）
+    #: / 公允價（`fair_twd`）——**同一把尺、同一種換匯口徑**（皆不加價，
+    #: 修正回合二 Task 13：不是 `landed_twd`／`fair_twd`，那是不同口徑的兩個
+    #: 數字相除，見模組頂註規則 5 段落）。≤1 才有機會過門檻。
     price_ratio: float | None = None
     #: 訊息文案：「判定來源：同卡成交 × N 筆中位」。**這一欄必須走到訊息上**
     #: （比照規則 3 把 `judgement_source` 走上訊息的作法）。
@@ -594,6 +608,7 @@ def evaluate(
     notified: dict[tuple[str, str], str] | None = None,
     seller_ctx: Any = None,
     snipe_ctx: Any = None,
+    fx: Any = None,
 ) -> Outcome:
     """吃候選列，回傳「這一輪該送什麼」。**只判定，不送、不落帳。**
 
@@ -604,6 +619,10 @@ def evaluate(
     （同一個立場：一條規則的資料建不起來，不該讓另外兩條閉嘴）。
     `snipe_ctx` 是 `card_snipe.SnipeNotifyContext`；None 時規則 4 整條跳過
     （同一個立場）。
+    `fx` 是 `fx.FxRates`（或同介面的替身）——**只有規則 5 用**，把該筆標價
+    換成與 `estimate.fair_twd` 同源同基準的市價 TWD（`apply_markup=False`，
+    修正回合二 Task 13）。`None` 時規則 5 對每一筆 band='high' 的候選都記
+    `Skip`（換匯物件缺值），不靜默略過——見 `_match_high_band`。
     """
     now = now or datetime.now(UTC)
     notified = notified or {}
@@ -649,7 +668,7 @@ def evaluate(
                 out.skipped.append(skip)
 
         if rules.high_band_enabled and valuator is not None and is_high_band:
-            m, skip = _match_high_band(row, key, rules, valuator)
+            m, skip = _match_high_band(row, key, rules, valuator, fx)
             if m is not None:
                 out.high_band.append(m)
             elif skip is not None:
@@ -1146,6 +1165,7 @@ def _match_high_band(
     key: str,
     rules: NotifyRules,
     valuator: Any,
+    fx: Any,
 ) -> tuple[Match | None, Skip | None]:
     """高價帶折價（band='high' 專屬）。**閘門與分母是同一個 `Estimate` 物件**
     （修正回合 Task 9 同源化，CLAUDE.md 第三節）——`comps.stats_for` 的
@@ -1157,14 +1177,22 @@ def _match_high_band(
       1. 估價等級 L1/L2（`estimate.has_card_specific_evidence`，與規則 2
          同一支 `estimate_signal_row` 拿到的同一顆 `estimate`）——同卡成交池
          撐著，不是整個稀有度的池子。
-      2. `landed_twd / estimate.fair_twd ≤ high_band_max_price_ratio`。
-         兩者都是 TWD 到手口徑、同一顆 `estimate`（`estimate_signal_row`
-         用 signal 自己的 `site` 當目標平台，見該函式 docstring）——同源
-         同基準，不混池。
+      2. `市價基準_twd / estimate.fair_twd ≤ high_band_max_price_ratio`。
+         `estimate.fair_twd` 是模型吃 `comps.price_twd`（`apply_markup=False`）
+         算出來的**市價**點估計；分子改成該筆標價自己的市價基準
+         `fx.to_twd(price_native, currency, apply_markup=False)`——同一種
+         換匯口徑（不含運雜費、不加刷卡海外手續費），與 `estimate.fair_twd`
+         同源同基準（修正回合二 Task 13：**不是** `landed_twd`／`fair_twd`，
+         那是到手成本除以市價，兩個口徑，見模組頂註規則 5 段落）。
 
     任一條件不滿足 → 完全靜默（不記 skipped：這不是「排除」，是沒過門檻，
     與規則 2／3 沒過折價門檻的既有慣例一致）。ratio < 0.5（折價異常深）
     不擋，但文案追加警語（W5：誤殺是靜默的，通知錯了使用者自己一眼可辨）。
+
+    分子或分母**缺值**（公允價算不出來、標價／幣別讀不到、`fx` 沒帶進來、
+    換匯本身失敗）則是資料層的病，不是「沒過門檻」——一律記成可見的
+    `Skip`，理由寫明缺哪個值（修正回合二 Task 13：CLAUDE.md 第五節，
+    0 筆結果必須可分類）。
     """
     from .valuation import estimate_signal_row
 
@@ -1178,17 +1206,36 @@ def _match_high_band(
         return None, None  # L3/L0：只有整個稀有度的池子撐著，不夠格
 
     fair_twd = estimate.fair_twd
-    landed_twd = row.get("landed_twd")
     if fair_twd is None or float(fair_twd) <= 0:
-        return None, None  # 模型過了層級閘門但給不出公允價，沒有比價基準
-    if landed_twd is None or float(landed_twd) <= 0:
-        return None, None  # 沒有到手成本，沒有比價基準
+        # 模型過了層級閘門但給不出公允價，沒有比價基準——這是缺值，不是沒過門檻。
+        return None, Skip(key, title, RULE_HIGH_BAND, "缺值不送：公允價（estimate.fair_twd）")
 
-    ratio = float(landed_twd) / float(fair_twd)
+    price_native = row.get("price_native")
+    currency = row.get("currency")
+    if price_native is None or not currency:
+        return None, Skip(
+            key, title, RULE_HIGH_BAND, "缺值不送：標價（price_native／currency）"
+        )
+    if fx is None:
+        return None, Skip(
+            key, title, RULE_HIGH_BAND, "缺值不送：換匯物件（fx）未提供，算不出市價基準"
+        )
+    try:
+        market_twd = fx.to_twd(float(price_native), str(currency), apply_markup=False)
+    except (TypeError, ValueError) as exc:
+        return None, Skip(key, title, RULE_HIGH_BAND, f"缺值不送：市價換匯失敗（{exc}）")
+    if market_twd <= 0:
+        return None, Skip(key, title, RULE_HIGH_BAND, "缺值不送：市價換算結果非正數")
+
+    ratio = float(market_twd) / float(fair_twd)
     if ratio > rules.high_band_max_price_ratio:
         return None, None  # 沒過門檻不是「被排除」，不必列進 skipped 洗版
 
-    missing = _missing_fields({"標題": title, "連結": row.get("url")})
+    # landed_twd 不再進比率計算，但訊息裡仍要顯示到手成本——缺了它整則訊息
+    # 會印出空值，與其他必備欄位同一條紅線。
+    missing = _missing_fields(
+        {"標題": title, "連結": row.get("url"), "到手成本": row.get("landed_twd")}
+    )
     if missing:
         return None, Skip(key, title, RULE_HIGH_BAND, f"欄位缺值不送：{missing}")
 

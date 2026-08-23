@@ -105,11 +105,25 @@ def _stub_valuation(monkeypatch):
     _ESTIMATE_OVERRIDES_BY_KEY.clear()
 
 
+class _FX:
+    """規則 5 分子換匯用的假匯率（修正回合二 Task 13）。JPY:TWD 固定 1:1，
+    且 `apply_markup=False` 呼叫時不加價——讓 `hb_row()` 的 `ratio` 參數
+    可以直接反推 `price_native`，不必在每個測試裡重算匯率。"""
+
+    def to_twd(self, amount: float, currency: str, *, apply_markup: bool = True) -> float:
+        if str(currency).upper() != "JPY":
+            raise ValueError(f"未知幣別: {currency}")
+        return float(amount)  # 1:1，apply_markup 對這個假匯率沒有作用
+
+
+FX = _FX()
+
+
 def run(rows, *, rules: NotifyRules = RULES, notified=None, valuator=VALUATOR,
-        seller_ctx=None, snipe_ctx=None):
+        seller_ctx=None, snipe_ctx=None, fx=FX):
     return evaluate(
         rows, rules=rules, valuator=valuator, now=NOW, notified=notified,
-        seller_ctx=seller_ctx, snipe_ctx=snipe_ctx,
+        seller_ctx=seller_ctx, snipe_ctx=snipe_ctx, fx=fx,
     )
 
 
@@ -123,12 +137,23 @@ def hb_row(
     comps_median: float | None = 10000.0,
     comps_n: int = 3,
     ratio: float = 0.65,
+    landed_ratio: float | None = None,
+    price_native: float | None = None,
+    currency: str = "JPY",
     rarity: str | None = "ultra",
 ) -> dict:
-    """一筆高價帶 signal。`landed_twd` 由 `ratio × FAIR_TWD` 反推——
-    Task 9 之後規則 5 的比率讀 `landed_twd / estimate.fair_twd`，不再讀
-    `comps_median`／`discount_pct`，所以 `landed_twd` 必須用 `FAIR_TWD`
-    （`FakeEstimate` 的預設公允價）反推，`ratio` 才會精確等於呼叫端指定的值。
+    """一筆高價帶 signal。**修正回合二 Task 13**：規則 5 的比率改讀
+    `market_twd / estimate.fair_twd`，`market_twd` 由 `price_native`／`currency`
+    經 `FX`（1:1、不加價）換算——`ratio` 反推 `price_native`，讓呼叫端指定的
+    `ratio` 精確等於 `Match.price_ratio`。
+
+    `landed_ratio`（預設 ＝ `ratio`，向後相容 Task 9 時期的呼叫端）另外反推
+    `landed_twd`——**不參與比率計算**，只顯示在訊息裡。要驗證「分子是市價
+    不是到手成本」時把它調成跟 `ratio` 不同即可（見
+    `test_ratio_uses_market_basis_not_landed_cost`）。
+
+    `price_native` 可直接覆寫（不經 `ratio` 反推），用於缺值／換匯失敗的紅燈
+    測試。
 
     `comps_median`／`comps_n`／`discount_pct` 仍然寫進 row（真實 signals 列
     本來就有這幾欄），但**刻意**保留可以跟 `FAIR_TWD` 不一致——規則 5 不該讀
@@ -137,8 +162,9 @@ def hb_row(
     `domain.Signal.discount_pct` 的定義（`(median - price) / median`），
     只是它現在對規則 5 而言是死欄位。
     """
-    price = round(ratio * FAIR_TWD, 2)
-    discount_pct = (comps_median - price) / comps_median if comps_median else None
+    market_native = round(ratio * FAIR_TWD, 2) if price_native is None else price_native
+    landed = round((ratio if landed_ratio is None else landed_ratio) * FAIR_TWD, 2)
+    discount_pct = (comps_median - landed) / comps_median if comps_median else None
     payload = {
         "listing": {"site": "buyee_mercari", "seller_id": "s1"},
         "card": {"grader": "PSA", "grade": 9.0, "rarity": rarity},
@@ -147,9 +173,9 @@ def hb_row(
         "key": key,
         "title": "PSA9 封印されしエクゾディア 初期 ウルトラ",
         "url": f"https://example.test/{key}",
-        "landed_twd": price,
-        "price_native": price,
-        "currency": "JPY",
+        "landed_twd": landed,
+        "price_native": market_native,
+        "currency": currency,
         "route": "buyee_consolidated",
         "score": 30.0,
         "flags": json.dumps([]),
@@ -191,10 +217,13 @@ def test_c_high_band_not_sent_without_card_specific_level():
 def test_high_band_not_sent_without_fair_twd():
     """估價過了層級閘門但給不出公允價（`estimate.fair_twd is None`）
     → 沒有比價基準，不推。取代舊版「`comps_median` 缺值不推」——
-    Task 9 之後 `comps_median` 已經不是規則 5 的比價基準，`fair_twd` 才是。"""
+    Task 9 之後 `comps_median` 已經不是規則 5 的比價基準，`fair_twd` 才是。
+    修正回合二 Task 13：這是**缺值**不是「沒過門檻」，要留痕在 skipped。"""
     r = hb_row(ratio=0.65)
     _ESTIMATE_OVERRIDES_BY_KEY[r["key"]] = {"fair_twd": None}
-    assert run([r]).high_band == []
+    out = run([r])
+    assert out.high_band == []
+    assert out.skips_for("缺值不送：公允價"), "缺值要留痕，不能靜默略過"
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +240,75 @@ def test_ratio_is_computed_from_estimate_not_comps_median():
     m = out.high_band[0]
     assert m.price_ratio == pytest.approx(0.65)
     assert m.fair_twd == pytest.approx(FAIR_TWD)
+
+
+# ---------------------------------------------------------------------------
+# 修正回合二 Task 13（W3）：分子改市價基準——不是到手成本
+# ---------------------------------------------------------------------------
+def test_ratio_uses_market_basis_not_landed_cost():
+    """市價比 0.68（≤0.70 門檻，該推）、到手成本比 0.74（>0.70 門檻，該擋）
+    ——同一筆。分子若還是 `landed_twd` 就不會推；分子改市價基準才會推。
+    這是修復前會紅、修復後會綠的錨定測試（W3 的紅燈證據 (a)）。"""
+    r = hb_row(ratio=0.68, landed_ratio=0.74)
+    out = run([r])
+    assert [m.rule for m in out.high_band] == [RULE_HIGH_BAND], (
+        "分子是市價基準（0.68 ≤ 0.70），必須推播——若還在用到手成本（0.74 > "
+        "0.70）這一筆會被漏推"
+    )
+    m = out.high_band[0]
+    assert m.price_ratio == pytest.approx(0.68)
+    # 到手成本仍然要顯示在訊息裡，只是不參與比率——見 notify.format_high_band。
+    assert m.row["landed_twd"] == pytest.approx(0.74 * FAIR_TWD)
+
+
+def test_ratio_not_triggered_by_landed_cost_alone():
+    """市價比 0.75（> 門檻，不該推）、到手成本比 0.60（看起來很便宜）
+    ——若分子誤用到手成本會誤推；用市價基準則正確不推。"""
+    r = hb_row(ratio=0.75, landed_ratio=0.60)
+    assert run([r]).high_band == []
+
+
+# ---------------------------------------------------------------------------
+# 修正回合二 Task 13（S2）：分子或分母缺值 → 可見 Skip，不是靜默略過
+# ---------------------------------------------------------------------------
+def test_high_band_skip_when_fx_not_provided():
+    """`evaluate(..., fx=None)`（呼叫端沒把換匯物件帶進來）
+    → 規則 5 對 band='high' 的候選一律留下可見的 Skip，理由寫明缺 fx。
+    這是修復前會紅、修復後會綠的錨定測試（S2 的紅燈證據 (b)）。"""
+    r = hb_row(ratio=0.65)
+    out = run([r], fx=None)
+    assert out.high_band == []
+    skips = out.skips_for("缺值不送：換匯物件（fx）")
+    assert len(skips) == 1
+    assert skips[0].key == r["key"]
+
+
+def test_high_band_skip_when_price_native_missing():
+    """標價（`price_native`）缺值 → 可見 Skip，理由寫明缺標價。"""
+    r = hb_row(ratio=0.65)
+    r["price_native"] = None
+    out = run([r])
+    assert out.high_band == []
+    assert out.skips_for("缺值不送：標價")
+
+
+def test_high_band_skip_when_currency_missing():
+    """幣別缺值 → 可見 Skip，理由寫明缺標價（與 price_native 共用同一句，
+    兩者都是「市價換不出來」的同一種病）。"""
+    r = hb_row(ratio=0.65)
+    r["currency"] = None
+    out = run([r])
+    assert out.high_band == []
+    assert out.skips_for("缺值不送：標價")
+
+
+def test_high_band_skip_when_currency_unconvertible():
+    """幣別存在但 `fx.to_twd` 不認得（例如打錯字）→ 可見 Skip，理由帶原始錯誤。"""
+    r = hb_row(ratio=0.65, currency="XXX")
+    out = run([r])
+    assert out.high_band == []
+    skips = out.skips_for("缺值不送：市價換匯失敗")
+    assert len(skips) == 1
 
 
 # ---------------------------------------------------------------------------

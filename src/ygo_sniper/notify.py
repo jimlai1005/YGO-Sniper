@@ -530,7 +530,9 @@ def format_high_band(match, dashboard_url: str) -> str:
     L1/L2 判定降級成看不出來歷的數字（CLAUDE.md 第七節：樣本數不等於證據
     強度，判定來源要讓使用者自己看見）。`fair_twd`／`price_ratio` 與閘門
     讀的是同一個 `Estimate` 物件（修正回合 Task 9），不是 `comps.stats_for`
-    的混池。
+    的混池。**`price_ratio` 是標價市價比，不是到手成本比**——分子是這筆
+    標價自己的市價基準 TWD，`landed_twd`（到手成本）只在「到手」那行顯示，
+    不參與這個比率（修正回合二 Task 13：同幣別不同口徑不能相除）。
     """
     row = match.row
     title = textwrap.shorten(str(row.get("title") or ""), width=64, placeholder="…")
@@ -539,7 +541,7 @@ def format_high_band(match, dashboard_url: str) -> str:
         f"到手 <b>NT${row['landed_twd']:,.0f}</b>"
         f"（{row.get('price_native', 0):,.0f} {row.get('currency', '')} via "
         f"{_esc(str(row.get('route') or ''))}）",
-        f"估值公允價 NT${match.fair_twd:,.0f}（比率 {match.price_ratio:.0%}）",
+        f"估值公允價 NT${match.fair_twd:,.0f}（標價市價比 {match.price_ratio:.0%}）",
         _esc(str(match.high_band_source_note or "")),
         f'<a href="{row["url"]}">看標的</a> ｜ <a href="{dashboard_url}">開 dashboard</a>',
     ]

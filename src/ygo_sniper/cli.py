@@ -2160,7 +2160,9 @@ def health(
         False, "--clear", help="清掉 alerts 表所有告警列（修好病因之後用）"
     ),
     clear_source: str = typer.Option(
-        None, "--clear-source", help="只清掉這個來源的告警列（例：yahoo_direct）"
+        None, "--clear-source",
+        help="只清掉這個來源的告警列，含高價帶 band 後綴（例：buyee_mercari 會"
+        "一併清掉 buyee_mercari@high）",
     ),
 ):
     """看各來源最近一次 scan 的健康狀況，以及目前掛著的告警。
@@ -2236,10 +2238,21 @@ def health(
     console.print(t)
 
 
+def _source_matches(alert_source: str, only_source: str) -> bool:
+    """`--clear-source buyee_mercari` 要同時清得掉 `buyee_mercari` 與
+    `buyee_mercari@high`（高價帶輪的告警指紋帶 band 後綴，見 `alerts.AlertEngine
+    .evaluate` 的 `f"{source}@{band}"`）——全等比對會漏掉後者，讓 `--clear-source`
+    在高價帶上線後變成清不乾淨（修正回合二 Task 13，複審 S1）。
+    """
+    return alert_source == only_source or alert_source.startswith(f"{only_source}@")
+
+
 def _clear_alerts(store: Store, *, only_source: str | None = None) -> int:
     """刪掉告警列並把刪掉的內容印出來。回傳刪除筆數（0 也照印，讓人知道本來就空）。"""
     rows = store.list_alerts()
-    targets = [r for r in rows if not only_source or r["source"] == only_source]
+    targets = [
+        r for r in rows if not only_source or _source_matches(r["source"], only_source)
+    ]
     if not targets:
         scope = f"來源 {only_source} " if only_source else ""
         console.print(f"[dim]{scope}告警表本來就是空的，沒有東西要清。[/dim]")

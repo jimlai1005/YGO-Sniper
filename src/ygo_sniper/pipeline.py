@@ -1468,6 +1468,10 @@ class Pipeline:
             notified=self.store.notify_log_map(),
             seller_ctx=self._seller_notify_context(),
             snipe_ctx=self._snipe_notify_context(),
+            # 規則 5 的分子要換成市價基準 TWD，用這顆掃描全程共用的 fx——
+            # 與 comps.py:529（`apply_markup=False`）同一個換匯物件，不新造
+            # 匯率來源（修正回合二 Task 13）。
+            fx=self.fx,
         )
 
     def _seller_notify_context(self):
