@@ -1102,7 +1102,7 @@ class TestCli:
         ])
         assert r.exit_code == 0, r.output
         assert "已登錄狙擊 #1" in r.output
-        assert "PSA 的鑑定量查詢未支援" in r.output
+        assert "--psa-cert" in r.output
         assert "跳過市場成交檔案挖掘" in r.output
 
         r = runner.invoke(cli_mod.app, ["snipe", "list"])

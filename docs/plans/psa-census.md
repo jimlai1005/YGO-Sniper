@@ -378,7 +378,13 @@ def _warn_if_cert_mismatch(store: Any, watch_id: int, cert: dict,
 （原 469 行 `msgs.append(f"（{grader} 的鑑定量查詢未支援，census 留空）")` 從此只剩
 BGS 會走到——訊息保留原樣。）
 
-- [ ] **Step 1: 紅燈測試** `tests/test_card_snipe_psa.py`。用既有 `tests/test_card_snipe.py`
+**裁決（2026-08-24，主線程）**：既有測試 `tests/test_card_snipe.py::TestCli::
+test_add_list_report_remove_roundtrip`（~1105 行）斷言 PSA 會印「PSA 的鑑定量查詢未支援」
+——那正是本 task 刻意改掉的行為。授權把該行斷言改成 `assert "--psa-cert" in r.output`
+（新提示的關鍵字）。這是「更新過時斷言以反映預期行為變更」，不是放寬驗收；
+除此之外不得動 `tests/test_card_snipe.py` 的任何其他內容。
+
+- [x] **Step 1: 紅燈測試** `tests/test_card_snipe_psa.py`。用既有 `tests/test_card_snipe.py`
   的 Store 建法慣例（先讀它，照抄 in-memory store fixture 的寫法）＋ Task 2 的 FakeFetcher
   （import 或複製皆可，照該檔慣例）。監視點全部走真 Store（tmp_path 的 sqlite），
   斷言看 `store.get_card_watch(id)` 的落庫值：
@@ -397,10 +403,10 @@ BGS 會走到——訊息保留原樣。）
 # 6. cert 分數 9 vs 狙擊 10 → 訊息含 "PSA9"「照樣有效」警語；census 照落庫
 ```
 
-- [ ] **Step 2: 紅**：`.venv/bin/pytest tests/test_card_snipe_psa.py -v` → FAIL
-- [ ] **Step 3: 實作**（含 `add_card_watch` / `refresh_watch_census` 簽名貫穿）
-- [ ] **Step 4: 綠**：`.venv/bin/pytest tests/test_card_snipe_psa.py tests/test_card_snipe.py -v` 全 PASS（既有 ARS 測試不能壞）
-- [ ] **Step 5: Commit** `feat(snipe): _ingest_census PSA 分支——cert 換 SpecID、失敗不清舊資料`
+- [x] **Step 2: 紅**：`.venv/bin/pytest tests/test_card_snipe_psa.py -v` → FAIL
+- [x] **Step 3: 實作**（含 `add_card_watch` / `refresh_watch_census` 簽名貫穿）
+- [x] **Step 4: 綠**：`.venv/bin/pytest tests/test_card_snipe_psa.py tests/test_card_snipe.py -v` 全 PASS（既有 ARS 測試不能壞）
+- [x] **Step 5: Commit** `feat(snipe): _ingest_census PSA 分支——cert 換 SpecID、失敗不清舊資料`
 
 ---
 

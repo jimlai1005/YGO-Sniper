@@ -427,11 +427,80 @@ def _existing_census_note(store: Any, watch_id: int) -> str:
             f"——讀不到 ≠ 不存在")
 
 
+def _ingest_psa_census(store: Any, fetcher: Any, watch_id: int, *,
+                       url: str, psa_cert: str) -> list[str]:
+    """PSA census：cert → SpecID → population。失敗語意與 ARS 分支完全相同——
+    URL 照存、**絕不覆寫既有 census_json/total**（讀不到 ≠ 不存在）。"""
+    from .ars_census import CensusParseError
+    from .psa_census import (
+        POP_URL, TOKEN_ENV, TOKEN_HINT, api_token, cert_identity_line,
+        fetch_cert, fetch_spec_population, spec_id_from_pop_url,
+    )
+    from .sources.base import FetchError
+
+    msgs: list[str] = []
+    spec_id = spec_id_from_pop_url(url)
+    if not psa_cert and spec_id is None:
+        msgs.append(f"PSA 的存世量要用卡磚憑證編號換：snipe report {watch_id} "
+                    f"--refresh-census --psa-cert <標籤上的 cert 編號>"
+                    f"（賣場照片的卡磚標籤、或 PSA 官網 cert 查驗頁都有）")
+        if not api_token():
+            msgs.append(f"（另外還沒設 token——{TOKEN_HINT}）")
+        return msgs
+    token = api_token()
+    if not token:
+        msgs.append(f"⚠️ 未設 {TOKEN_ENV}，這次沒抓。{TOKEN_HINT}")
+        return msgs
+    try:
+        if psa_cert:
+            cert = fetch_cert(psa_cert.strip(), fetcher=fetcher, token=token)
+            msgs.append(f"cert 查驗：{cert_identity_line(cert)}——確認這是同一張卡")
+            spec_id = int(cert["SpecID"])
+            _warn_if_cert_mismatch(store, watch_id, cert, msgs)
+        url = POP_URL.format(spec_id=spec_id)
+        counts, total, desc = fetch_spec_population(spec_id, fetcher=fetcher, token=token)
+    except (FetchError, CensusParseError) as exc:
+        # 與 ARS 分支同一條紅線：只寫 URL，絕不碰 json／total（見 ARS 分支的註記）
+        if url:
+            store.update_card_watch_census_url(watch_id, census_url=url)
+        kept = _existing_census_note(store, watch_id)
+        msgs.append(f"⚠️ PSA census 抓取失敗（{exc}）——{kept}；之後 --refresh-census 重試")
+        return msgs
+    store.update_card_watch_census(
+        watch_id, census_url=url,
+        census_json=json.dumps(counts, ensure_ascii=False), census_total=total)
+    shown = "、".join(f"{k}: {v} 張" for k, v in counts.items() if v)
+    msgs.append(f"census：{shown}（鑑定總數 {total}）")
+    if desc:
+        msgs.append(f"（spec：{desc}）")
+    return msgs
+
+
+def _warn_if_cert_mismatch(store: Any, watch_id: int, cert: dict,
+                           msgs: list[str]) -> None:
+    """只警告不擋——pop 是整個 spec 全分數的，cert 分數不同不影響 census 正確性；
+    卡名對不上才是大事，但 Subject 是英文、watch 主鍵是日文卡名，機器只能比對
+    name_en，比不動時交給使用者的眼睛。"""
+    w = store.get_card_watch(watch_id) or {}
+    want = str(w.get("grade_label") or "").rstrip("+")
+    got = re.search(r"\d+(?:\.\d+)?", str(cert.get("CardGrade") or ""))
+    if want and got and got.group(0) != want:
+        msgs.append(f"（cert 這顆是 PSA{got.group(0)}、狙擊目標是 PSA{want}——"
+                    f"pop 涵蓋全部分數所以資料照樣有效，只要確認是同一張卡）")
+    name_en = str(w.get("name_en") or "").strip()
+    subject = str(cert.get("Subject") or "")
+    if name_en and name_en.upper() not in subject.upper():
+        msgs.append(f"⚠️ cert 的卡名是 {subject!r}、登錄的英文名是 {name_en!r}——"
+                    f"對不上就換一顆 cert 編號重跑")
+
+
 def _ingest_census(
     store: Any, fetcher: Any, watch_id: int, *, url: str,
     grader: str, name_ja: str, code_raw: str, code_norm: str,
+    psa_cert: str = "",
 ) -> list[str]:
-    """census 抓取＋落庫（add 與 refresh 共用）。url 為空時 ARS 用卡名自動搜。
+    """census 抓取＋落庫（add 與 refresh 共用）。url 為空時 ARS 用卡名自動搜；
+    PSA 用 psa_cert 換 SpecID（見 `_ingest_psa_census`）。
 
     任何失敗都不擋登錄：大聲講、URL 照存，之後 `snipe report --refresh-census` 重試。
     """
@@ -444,6 +513,8 @@ def _ingest_census(
     from .sources.base import FetchError
 
     msgs: list[str] = []
+    if grader == "PSA":
+        return _ingest_psa_census(store, fetcher, watch_id, url=url, psa_cert=psa_cert)
     if not url and grader == "ARS":
         try:
             found, entries = find_census_url(name_ja, code_norm, fetcher=fetcher)
@@ -504,7 +575,7 @@ def add_card_watch(
     store: Any, fetcher: Any, *, grader: str, grade_input: str, name_ja: str,
     name_en: str = "", code: str = "", census_url: str = "",
     evidence_urls: list[str] | None = None, note: str = "",
-    sources: dict[str, Any] | None = None,
+    sources: dict[str, Any] | None = None, psa_cert: str = "",
 ) -> AddResult:
     """登錄＋立刻補齊檔案（含**當下就去挖市場成交檔案**；`sources=None` 才跳過）。
 
@@ -571,7 +642,7 @@ def add_card_watch(
 
     msgs += _ingest_census(store, fetcher, watch_id, url=census_url.strip(),
                            grader=g, name_ja=name_ja, code_raw=code_raw,
-                           code_norm=code_norm)
+                           code_norm=code_norm, psa_cert=psa_cert.strip())
 
     # 證據頁快照：入庫當下就抓（已結束頁 ~120 天會刪，實證下界 74 天）
     for raw_url in evidence_urls or []:
@@ -620,8 +691,10 @@ def add_card_watch(
     return AddResult(watch_id=watch_id, messages=msgs)
 
 
-def refresh_watch_census(store: Any, fetcher: Any, watch: dict[str, Any]) -> list[str]:
-    """重抓 census（URL 沒存到就重新用卡名搜）。"""
+def refresh_watch_census(store: Any, fetcher: Any, watch: dict[str, Any],
+                         psa_cert: str = "") -> list[str]:
+    """重抓 census（ARS：URL 沒存到就重新用卡名搜；PSA：census_url 已是 pop URL
+    就不需要再給 cert，只有換卡或第一次要重抓才需要 psa_cert）。"""
     return _ingest_census(
         store, fetcher, int(watch["id"]),
         url=str(watch.get("census_url") or ""),
@@ -629,6 +702,7 @@ def refresh_watch_census(store: Any, fetcher: Any, watch: dict[str, Any]) -> lis
         name_ja=str(watch.get("name_ja") or ""),
         code_raw=str(watch.get("code_raw") or ""),
         code_norm=str(watch.get("code_norm") or ""),
+        psa_cert=psa_cert.strip(),
     )
 
 
