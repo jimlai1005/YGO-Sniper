@@ -274,6 +274,7 @@ class CachedFetcher:
         use_cache: bool = True,
         allow_statuses: tuple[int, ...] = (),
         min_bytes: int | None = None,
+        headers: dict[str, str] | None = None,
     ) -> str:
         """抓一個 URL。失敗一律拋 FetchError —— 絕不回傳空字串。
 
@@ -287,6 +288,10 @@ class CachedFetcher:
 
         min_bytes：覆寫「body 太短 = 被擋」的門檻（見 `MIN_BODY_BYTES`）。
         快取命中路徑用**同一個**值，不然同一個 URL 會因為走哪條路而有兩套判準。
+
+        headers：只作用在這一次請求（PSA API 的 Authorization 用）；不進快取鍵——
+        帶 auth 的呼叫端應自行 `use_cache=False`。絕不可以把 Authorization 設成
+        client 預設 header（那會把 token 送給所有主機，見 CLAUDE.md 第一節）。
         """
         floor = self.MIN_BODY_BYTES if min_bytes is None else min_bytes
         cp = self._cache_path(url)
@@ -302,7 +307,7 @@ class CachedFetcher:
             self._throttle()
             t0 = time.monotonic()  # 節流之後才起算，耗時才是這次請求本身的
             try:
-                resp = self._client.get(url)
+                resp = self._client.get(url, headers=headers)
             except httpx.HTTPError as exc:
                 _log_request(url, type(exc).__name__, t0)
                 last_error = FetchError(

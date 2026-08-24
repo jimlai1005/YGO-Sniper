@@ -322,6 +322,43 @@ def test_log_request_internal_failure_does_not_mask_transient_error(make_fetcher
     assert server.calls == fetcher.max_attempts  # 證明重試迴圈真的跑完，沒被中途打斷
 
 
+class HeaderCapturingServer:
+    """只記下這次請求實際帶了哪些 header，不做 FakeServer 的多次排隊行為。"""
+
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self.headers: httpx.Headers | None = None
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.headers = request.headers
+        return self._response
+
+
+def test_get_passes_per_request_headers(make_fetcher):
+    """get(headers=...) 要把 headers 傳給 httpx client 的這一次請求——
+    PSA API 的 `Authorization: bearer <token>` 就是靠這條路送出去，
+    絕不能改成 client 預設 header（那會把 token 送給所有主機）。
+    """
+    server = HeaderCapturingServer(httpx.Response(200, text=GOOD_HTML))
+    fetcher = make_fetcher(server)
+
+    fetcher.get(URL, use_cache=False, headers={"Authorization": "bearer T"})
+
+    assert server.headers is not None
+    assert server.headers["Authorization"] == "bearer T"
+
+
+def test_get_without_headers_sends_no_authorization(make_fetcher):
+    """沒給 headers 時不能無中生有塞出 Authorization——維持 client 預設就好。"""
+    server = HeaderCapturingServer(httpx.Response(200, text=GOOD_HTML))
+    fetcher = make_fetcher(server)
+
+    fetcher.get(URL, use_cache=False)
+
+    assert server.headers is not None
+    assert "authorization" not in server.headers
+
+
 def test_log_request_swallows_urlsplit_error_via_monkeypatch(make_fetcher, monkeypatch):
     """不依賴 IPv6 這個特定寫法繼續有效——直接讓 `urlsplit` 炸，
     確認 `_log_request` 的 try/except 包住的是整個函式本體，不是只有
