@@ -369,6 +369,20 @@ CREATE TABLE IF NOT EXISTS runs (
     notified    INTEGER,
     notes       TEXT
 );
+
+-- 估價快取（2026-08-24，估價快取＋略過樂觀更新 plan）。dashboard 讀清單過去
+-- 對每一列現算 P 值／公允價／轉賣路徑，改成掃描收尾算一次、整批落庫，
+-- 讀取端（/api/signals）只讀不算。使用者裁決：切分頁、略過等讀取操作
+-- 永不觸發重算，P 值凍結到下一輪掃描是刻意取捨（見 valuation_cache.py）。
+CREATE TABLE IF NOT EXISTS signal_valuations (
+    key             TEXT PRIMARY KEY,   -- signals.key；估價是衍生資料，signal 刪不掉所以不設 FK
+    p_worth_buying  REAL,               -- NULL = 這一輪算不出來（誠實留白，不是 0）
+    fair_twd        REAL,
+    est_level_label TEXT,
+    resale_json     TEXT,               -- resale_for_row 的整包 dict（JSON 字串）
+    comps_n         INTEGER NOT NULL,   -- 算這一批時的 comps 筆數（audit 用，讀取端不比對）
+    computed_at     TEXT NOT NULL
+);
 """
 
 
@@ -857,8 +871,15 @@ class Store:
             # 在架天數的分子。obs_ 前綴同上：signals 自己也有 first_seen
             # （首次成為候選），與觀測帳的首次觀測是兩件事，不加前綴會被
             # 靜默覆蓋（CLAUDE.md 第三節的混源陷阱）。
-            "o.first_seen AS obs_first_seen "
+            "o.first_seen AS obs_first_seen, "
+            # 估價快取（signal_valuations）。val_ 前綴同上——這裡沒有直接
+            # 同名欄位衝突（signals.comps_n 是另一件事，這裡也刻意不選
+            # v.comps_n），但保持前綴慣例讓「這是快取來的」一眼可辨。
+            "v.p_worth_buying AS val_p_worth_buying, v.fair_twd AS val_fair_twd, "
+            "v.est_level_label AS val_level_label, v.resale_json AS val_resale_json, "
+            "v.computed_at AS val_computed_at "
             "FROM signals s LEFT JOIN listing_obs o ON o.key = s.key "
+            "LEFT JOIN signal_valuations v ON v.key = s.key "
             "WHERE s.score >= ?"
         )
         params: list[Any] = [min_score]
@@ -872,6 +893,25 @@ class Store:
         params.append(limit)
         with self._conn() as c:
             return [dict(r) for r in c.execute(q, params).fetchall()]
+
+    def upsert_valuations(self, rows: list[dict[str, Any]]) -> None:
+        """整批覆寫估價快取（單一交易）。
+
+        **蓋掉就是蓋掉**：新一輪某列算不出來（值為 NULL）也照寫——留舊值等於
+        拿舊 comps 的答案冒充新 comps 的答案（工程原則 1 的混源）。
+        """
+        with self._conn() as c:
+            c.executemany(
+                "INSERT INTO signal_valuations (key, p_worth_buying, fair_twd,"
+                " est_level_label, resale_json, comps_n, computed_at)"
+                " VALUES (:key, :p_worth_buying, :fair_twd, :est_level_label,"
+                " :resale_json, :comps_n, :computed_at)"
+                " ON CONFLICT(key) DO UPDATE SET"
+                " p_worth_buying=excluded.p_worth_buying, fair_twd=excluded.fair_twd,"
+                " est_level_label=excluded.est_level_label, resale_json=excluded.resale_json,"
+                " comps_n=excluded.comps_n, computed_at=excluded.computed_at",
+                rows,
+            )
 
     def signals_missing_grade(self, limit: int = 500) -> list[dict[str, Any]]:
         """鑑定分數不明的訊號（`grade IS NULL`）。
