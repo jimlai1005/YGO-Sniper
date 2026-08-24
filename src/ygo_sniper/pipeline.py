@@ -858,6 +858,8 @@ class Pipeline:
                 watch_only=watch_only, watch_force=watch_force,
                 high_band=high_band,
             )
+            if not dry_run:
+                self._refresh_valuation_cache(result)
         except BaseException as exc:  # noqa: BLE001 - 落狀態後原樣往外拋，見 docstring
             self.store.finish_scan(started, error=f"{type(exc).__name__}: {exc}")
             # 這裡刻意不呼叫 `_finish_schedule_state`：崩潰時 RUN_FINISHED_KEY
@@ -867,8 +869,6 @@ class Pipeline:
             # `_run_notifications`（本輪崩潰），那則告警也不會跟著丟失——
             # 下一輪成功收尾時會把它撿回來一起送（Fix 4）。
             raise
-        if not dry_run:
-            self._refresh_valuation_cache(result)
         self.store.finish_scan(
             started,
             result={

@@ -79,7 +79,6 @@ def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
 
 
-
 def _with_overhead(payload: dict) -> dict:
     """讓 payload 裡每一條 route 都帶著 `overhead_twd`／`overhead_ratio`。
 
@@ -103,6 +102,40 @@ def _route_dict(route: dict) -> dict:
         return RouteQuote.from_dict(route).to_dict()
     except (TypeError, KeyError):
         return route  # 欄位殘缺的舊列照原樣送出，不要讓一列壞掉的 payload 打掉整個清單
+
+
+def _valuation_lag_warning() -> str | None:
+    """快取落後偵測。回 None = 沒事；回字串 = 給 valuation_error 橫條的病名。
+
+    掃描在寫完 signals 之後、快取重算掛勾之前死掉（watchdog kill、_scan
+    後段例外）時，快取會停在上一輪而 meta 病名是空的——同一張卡「新的到手
+    成本」配「舊 comps 算的 P」，畫面上沒有任何東西說它是舊的。
+
+    比較基準用上一輪掃描的 `started_at`，不是 `finished_at`——掛勾跑在
+    `finish_scan` 之前，`cached_at` 永遠略早於 `finished_at` 幾毫秒到幾秒，
+    用 finished_at 每一輪正常掃描都會誤報（CLAUDE.md 第三節：先問零點在哪）。
+    正常輪：cached_at（掛勾時寫）> started_at → 不報。掛勾前死掉：cached_at
+    是上一輪的 < started_at → 報。掃描進行中（running）不比——掛勾本來就
+    還沒跑到。dry_run 不寫庫也不重算，跳過。時間戳解析失敗一律不報
+    （讀不到 ≠ 落後，與「讀不到錢 ≠ 錢虧光」同一條）。
+    """
+    from datetime import datetime
+
+    cached_at = store.get_meta(VALUATION_CACHE_AT_KEY)
+    st = store.scan_status()
+    started_at = st.get("started_at")
+    if not cached_at or not started_at or st.get("running") or st.get("dry_run"):
+        return None
+    try:
+        lagging = datetime.fromisoformat(cached_at) < datetime.fromisoformat(started_at)
+    except ValueError:
+        return None          # 讀不到 ≠ 落後：解析不了就不指控
+    if not lagging:
+        return None
+    return (
+        f"估價快取落後最後一輪掃描（掃描 {started_at} 起跑，快取仍是 {cached_at}）"
+        "——P 值可能與到手成本不同輪；等下一輪掃描，或跑 ygo-sniper revalue"
+    )
 
 
 @app.get("/api/signals")
@@ -149,7 +182,12 @@ def signals(
         r["fair_twd"] = r.pop("val_fair_twd", None)
         r["est_level_label"] = r.pop("val_level_label", None)
         raw_resale = r.pop("val_resale_json", None)
-        r["resale"] = json.loads(raw_resale) if raw_resale else None
+        try:
+            r["resale"] = json.loads(raw_resale) if raw_resale else None
+        except ValueError:
+            # 一列殘缺的快取（部分寫入、手動改庫）退化成「這列沒有轉賣答案」，
+            # 不打掉整個清單——與 _route_dict 對壞 payload 的立場一致。
+            r["resale"] = None
         r.pop("val_computed_at", None)
 
     return {
@@ -168,7 +206,8 @@ def signals(
         },
         # 快取重算的病名（掃描收尾若失敗才會有值）；沒有錯誤就是空字串，
         # 統一成 None 讓前端一條 `if` 就能判斷要不要亮橫條。
-        "valuation_error": store.get_meta(VALUATION_CACHE_ERROR_KEY) or None,
+        "valuation_error": store.get_meta(VALUATION_CACHE_ERROR_KEY)
+        or _valuation_lag_warning(),
         # 「你現在看到的 P 值是幾點算的」——凍結到下一輪掃描是刻意取捨
         # （見本函式 docstring），這個時間戳讓使用者自己判斷新不新鮮。
         "valuation_cached_at": store.get_meta(VALUATION_CACHE_AT_KEY),

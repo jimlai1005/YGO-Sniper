@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
 
 from .selling import (
     best_round_trip,

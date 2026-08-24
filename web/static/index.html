@@ -1328,6 +1328,7 @@ async function setBucket(key, bucket){
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({bucket: bucket || null}),
     });
+    signalsSeq++;   // 本地已經走在伺服器快照前面了，任何在飛的清單回應都過期
     // 後端回的是**寫完讀回來的值**（state 可能被 new→watching 連動改掉），
     // 照實更新本地，不重打整頁。
     const it = items.find(i => i.key === key);
@@ -1340,6 +1341,11 @@ async function setBucket(key, bucket){
       : `已標記 ${BUCKETS[bucket] || bucket}`
         + (r && r.state === "watching" ? "，並移入觀察中" : ""));
     renderSignals();
+    // 湊單籃總額與分頁計數的資料源在後端（bundle 即時重算、stats 是 db 計數），
+    // 本地不重算第二份（同源）。這兩支實測 <10ms，樂觀更新省的是 /api/signals
+    // 那一支，不是它們。fire-and-forget：失敗只影響側欄數字，下一次任何
+    // 重載都會補上，不值得為它擋住主流程。
+    loadBundle(); loadStats();
   }catch(e){ toast("失敗：" + e.message); }
 }
 
@@ -1348,6 +1354,7 @@ async function setBucket(key, bucket){
     /api/signals 全列重算＋MB 級回應，使用者被迫等卡片消失才敢按下一張。
     失敗路徑不樂觀：toast 病名＋loadSignals() 回去對帳，後端才是事實。 */
 async function setState(key, state){
+  signalsSeq++;   // 本地已經走在伺服器快照前面了，任何在飛的清單回應都過期
   const res = applyLocalState(items, key, state, currentState);
   items = res.items;
   const node = document.querySelector(`#grid [data-key="${CSS.escape(key)}"]`);
@@ -1364,6 +1371,11 @@ async function setState(key, state){
       body:JSON.stringify({state}),
     });
     toast("已更新");
+    // 湊單籃總額與分頁計數的資料源在後端（bundle 即時重算、stats 是 db 計數），
+    // 本地不重算第二份（同源）。這兩支實測 <10ms，樂觀更新省的是 /api/signals
+    // 那一支，不是它們。fire-and-forget：失敗只影響側欄數字，下一次任何
+    // 重載都會補上，不值得為它擋住主流程。
+    loadBundle(); loadStats();
   }catch(e){
     toast("失敗：" + e.message);
     loadSignals();   // 樂觀錯了就認：重抓後端的事實，卡片會自己回來
@@ -1648,8 +1660,11 @@ function renderSignals(res){
   // P 值這一輪算不出來時要說出病名，不能讓所有標的的 P 都顯示成「–」了事
   const pErr = res && res.valuation_error
     ? ` · <span class="hid">⚠️ P 值算不出來：${escapeHtml(res.valuation_error)}</span>` : "";
-  const noP = res && res.p_worth_known != null && res.p_worth_known < items.length
-    ? ` · <span class="hid">${items.length - res.p_worth_known} 筆無 P 值（不受 P 篩選影響）</span>` : "";
+  // 兩個數字必須同源：改用當下的 items 自己數，不要拿樂觀更新前的 res.p_worth_known
+  // 去減樂觀更新後的 items.length——略過一張有 P 的卡會讓兩者一新一舊、少報一筆。
+  const noPn = items.filter(i => i.p_worth_buying == null).length;
+  const noP = noPn
+    ? ` · <span class="hid">${noPn} 筆無 P 值（不受 P 篩選影響）</span>` : "";
   // P 值是掃描收尾算好落庫的快取（2026-08-24），不是即時算的——把「這是幾點
   // 算的」誠實放在使用者眼前，而不是讓他以為每次打開都是最新的。
   const cachedAt = res && res.valuation_cached_at

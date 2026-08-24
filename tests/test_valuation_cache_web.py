@@ -126,10 +126,59 @@ def test_signals_without_cache_shows_honest_nulls(client):
 
 def test_signals_surfaces_cache_error_and_timestamp(client):
     tc, app_mod = client
-    from ygo_sniper.valuation_cache import (
-        VALUATION_CACHE_AT_KEY, VALUATION_CACHE_ERROR_KEY)
+    from ygo_sniper.valuation_cache import VALUATION_CACHE_AT_KEY, VALUATION_CACHE_ERROR_KEY
+
     app_mod.store.set_meta(VALUATION_CACHE_ERROR_KEY, "3 列估價失敗（首例：x）")
     app_mod.store.set_meta(VALUATION_CACHE_AT_KEY, "2026-08-24T12:00:00+00:00")
     res = tc.get("/api/signals?state=all&limit=10").json()
     assert "估價失敗" in res["valuation_error"]
     assert res["valuation_cached_at"] == "2026-08-24T12:00:00+00:00"
+
+
+def test_signals_survives_one_corrupt_resale_row(client):
+    """一列殘缺的 resale_json 只犧牲那一列，不 500 整個清單（F3）。"""
+    tc, app_mod = client
+    app_mod.store.upsert_signal(_signal_for("buyee_yahoo:good"))
+    app_mod.store.upsert_signal(_signal_for("buyee_yahoo:bad"))
+    app_mod.store.upsert_valuations([
+        _val_row("buyee_yahoo:good"),
+        _val_row("buyee_yahoo:bad", resale_json="{truncated"),
+    ])
+    res = tc.get("/api/signals?state=all&limit=10")
+    assert res.status_code == 200
+    items = {i["key"]: i for i in res.json()["items"]}
+    assert items["buyee_yahoo:good"]["resale"] == {"ok": False, "reason": "stub"}
+    assert items["buyee_yahoo:bad"]["resale"] is None
+    assert items["buyee_yahoo:bad"]["p_worth_buying"] == 0.42  # 其他欄位不陪葬
+
+
+def test_signals_reports_cache_lagging_behind_last_scan(client):
+    """掃描起跑晚於快取＝掛勾沒跑到，要說出來（F5）。"""
+    tc, app_mod = client
+    from ygo_sniper.valuation_cache import VALUATION_CACHE_AT_KEY
+
+    app_mod.store.set_meta(VALUATION_CACHE_AT_KEY, "2026-08-24T00:00:00+00:00")
+    started = app_mod.store.begin_scan(trigger="cli", dry_run=False)
+    app_mod.store.finish_scan(started, result={})
+    res = tc.get("/api/signals?state=all&limit=10").json()
+    assert res["valuation_error"] and "落後" in res["valuation_error"]
+
+
+def test_signals_no_lag_warning_while_scan_running_or_fresh(client):
+    """掃描進行中不比（掛勾本來就還沒跑）；快取比掃描新也不報（F5）。"""
+    tc, app_mod = client
+    from ygo_sniper.valuation_cache import VALUATION_CACHE_AT_KEY
+
+    # 進行中：begin 之後不 finish
+    app_mod.store.set_meta(VALUATION_CACHE_AT_KEY, "2026-08-24T00:00:00+00:00")
+    app_mod.store.begin_scan(trigger="cli", dry_run=False)
+    assert tc.get("/api/signals?state=all&limit=10").json()["valuation_error"] is None
+    # 掃完且快取較新（正常輪的形狀：掛勾在 finish 之前寫）
+    started = app_mod.store.begin_scan(trigger="cli", dry_run=False)
+    from datetime import UTC, datetime, timedelta
+    app_mod.store.set_meta(
+        VALUATION_CACHE_AT_KEY,
+        (datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
+    )
+    app_mod.store.finish_scan(started, result={})
+    assert tc.get("/api/signals?state=all&limit=10").json()["valuation_error"] is None

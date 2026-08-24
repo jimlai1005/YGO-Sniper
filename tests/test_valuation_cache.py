@@ -125,6 +125,7 @@ def test_pipeline_hook_success_records_count(store, monkeypatch):
 def test_scan_source_contains_hook_call():
     """scan() 收尾必須掛快取重算。用原始碼釘：dry_run 守衛＋呼叫都在。"""
     import inspect
+
     from ygo_sniper.pipeline import Pipeline
 
     src = inspect.getsource(Pipeline.scan)
