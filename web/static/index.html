@@ -57,6 +57,9 @@
   /* 有觸發旗標的（白撿／折價／可丟 offer）挑出來；沒觸發的維持素色，
      它們是「符合條件、請你自己判斷」，不是系統在推薦。 */
   .card.trig{border-color:#4a5570}
+  /* 樂觀更新的淡出：略過的卡片本地先移除，動畫讓使用者看得出是哪張走了
+     （2026-08-24，見 setState）。 */
+  .leaving{opacity:0;transform:scale(.97);transition:opacity .15s ease,transform .15s ease;pointer-events:none}
 
   /* 圖用 contain 不用 cover：卡面被裁掉就失去預覽的意義（邊角與置中
      正是鑑定卡最該看的地方）。aspect-ratio 固定容器高度，避免圖片載入
@@ -1025,7 +1028,7 @@ function card(it){
   const xpBadge = badges.xp, backBadge = badges.back;
 
   return `
-  <article class="card ${hot?'hot':''} ${trig?'trig':''} ${gone?'expired':''}">
+  <article class="card ${hot?'hot':''} ${trig?'trig':''} ${gone?'expired':''}" data-key="${escapeHtml(it.key)}">
     ${shot(it.image_url, it.title)}
     <div class="body">
       <h3 class="title"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>${badge}${bucketChip(it)}${bandChip(it)}${xpBadge}${backBadge}${shelfAge(it)}</h3>
@@ -1298,6 +1301,23 @@ function bucketActs(it){
   }).join("");
 }
 
+/* ==== LOCAL-STATE-LOGIC:BEGIN ==== */
+/** 樂觀更新的**唯一**判定：狀態改成 newState 之後，這張卡片還屬於目前分頁嗎。
+    純函式、不碰 DOM——tests/test_optimistic_state.py 用 node 實跑這一段。
+    回傳新的 items 陣列（不就地改）＋ removed 旗標。 */
+function applyLocalState(items, key, newState, currentState){
+  const idx = items.findIndex(i => i.key === key);
+  if(idx < 0) return {items: items, removed: false};
+  const stays = currentState === "all" || newState === currentState;
+  if(stays){
+    const next = items.slice();
+    next[idx] = Object.assign({}, next[idx], {state: newState});
+    return {items: next, removed: false};
+  }
+  return {items: items.slice(0, idx).concat(items.slice(idx + 1)), removed: true};
+}
+/* ==== LOCAL-STATE-LOGIC:END ==== */
+
 /** 指派／清除分類。`bucket` 是空字串就送 null（清除）。
     回應帶著 db 讀回來的 state：new 會被連動升成 watching，要照實告訴使用者
     ——狀態被改掉卻沒說，下次他在「待處理」找不到這張卡會以為它消失了。 */
@@ -1308,14 +1328,35 @@ async function setBucket(key, bucket){
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({bucket: bucket || null}),
     });
+    // 後端回的是**寫完讀回來的值**（state 可能被 new→watching 連動改掉），
+    // 照實更新本地，不重打整頁。
+    const it = items.find(i => i.key === key);
+    if(it){ it.bucket = r.bucket; if(r.state) it.state = r.state; }
+    // 分類分頁：改完分類後不再屬於這一頁的，本地移除（與後端過濾同義）。
+    if(currentBucket && r.bucket !== currentBucket){
+      items = items.filter(i => i.key !== key);
+    }
     toast(!bucket ? "已清除分類"
       : `已標記 ${BUCKETS[bucket] || bucket}`
         + (r && r.state === "watching" ? "，並移入觀察中" : ""));
-    loadAll();
+    renderSignals();
   }catch(e){ toast("失敗：" + e.message); }
 }
 
+/** 樂觀更新（2026-08-24 使用者裁決）：先動畫面、再非同步告訴後端。
+    舊版是 POST 完呼叫 loadAll 整頁重載——實測每按一次略過要付一次
+    /api/signals 全列重算＋MB 級回應，使用者被迫等卡片消失才敢按下一張。
+    失敗路徑不樂觀：toast 病名＋loadSignals() 回去對帳，後端才是事實。 */
 async function setState(key, state){
+  const res = applyLocalState(items, key, state, currentState);
+  items = res.items;
+  const node = document.querySelector(`#grid [data-key="${CSS.escape(key)}"]`);
+  if(res.removed && node){
+    node.classList.add("leaving");                 // 150ms 淡出，看得出是哪張走了
+    setTimeout(renderSignals, 160);
+  }else{
+    renderSignals();
+  }
   try{
     await api(`/api/signals/${encodeURIComponent(key)}/state`, {
       method:"POST",
@@ -1323,8 +1364,10 @@ async function setState(key, state){
       body:JSON.stringify({state}),
     });
     toast("已更新");
-    loadAll();
-  }catch(e){ toast("失敗：" + e.message); }
+  }catch(e){
+    toast("失敗：" + e.message);
+    loadSignals();   // 樂觀錯了就認：重抓後端的事實，卡片會自己回來
+  }
 }
 
 /* 清除已離場：banner 的「清除」→ 確認框 → POST。判定與實際要清哪幾筆都在後端
@@ -1454,14 +1497,19 @@ async function clearExpired(){
 }
 
 let lastRes = null;    // 最近一次 /api/signals 的回應（truncated / 估價錯誤要用）
+let signalsSeq = 0;    // 競態守衛：兩個 loadSignals 併發時，晚到的舊回應要丟棄
+                        // ——沒有這條，略過剛送出、緊接著的重載若順序顛倒，
+                        // 舊回應會把剛才本地移除的卡片重新畫回來。
 
 async function loadSignals(){
+  const seq = ++signalsSeq;
   // limit 給大：keep_all 打開之後每輪落庫上百筆，而使用者要的正是「全部列出來」。
   // 篩選在前端做，切換視角是瞬間的，不必為了看一個旗標重打一次 API。
   // 分類是後端過濾（跟 state 同一支查詢，多一個 WHERE），不是前端 chip：
   // 分類分頁要的是**整顆 db 裡**的高價卡，不是「這一個狀態分頁裡」的高價卡。
   const bq = currentBucket ? `&bucket=${encodeURIComponent(currentBucket)}` : "";
   const res = await api(`/api/signals?state=${currentState}&limit=1000${bq}`);
+  if(seq !== signalsSeq) return;   // 已有更新的請求在飛，這份是過期事實
   lastRes = res;
   // 梯隊門檻與文案全部來自後端；拿不到就維持 null（退回純結標時間序）。
   aucView = res.auction_view || null;
@@ -1602,6 +1650,12 @@ function renderSignals(res){
     ? ` · <span class="hid">⚠️ P 值算不出來：${escapeHtml(res.valuation_error)}</span>` : "";
   const noP = res && res.p_worth_known != null && res.p_worth_known < items.length
     ? ` · <span class="hid">${items.length - res.p_worth_known} 筆無 P 值（不受 P 篩選影響）</span>` : "";
+  // P 值是掃描收尾算好落庫的快取（2026-08-24），不是即時算的——把「這是幾點
+  // 算的」誠實放在使用者眼前，而不是讓他以為每次打開都是最新的。
+  const cachedAt = res && res.valuation_cached_at
+    ? ` · 估價快取 ${new Date(res.valuation_cached_at)
+        .toLocaleTimeString("zh-TW", {hour: "2-digit", minute: "2-digit"})}`
+    : ` · <span class="hid">估價快取：無（先跑一次掃描或 ygo-sniper revalue）</span>`;
 
   // 待清筆數：數的是 `items`（整個分頁）而不是 `shown`——後端清的就是整個分頁。
   // 判斷本身在 expiryBanner()（純函式，有 node 測試）。
@@ -1626,7 +1680,7 @@ function renderSignals(res){
 
   document.getElementById("list-count").innerHTML =
     `顯示 <b>${shown.length}</b> / ${items.length} 筆 · 觸發 <b>${nTrig}</b>`
-    + ` · 競標 <b>${nAuc}</b>${endedNote}${hidNote}${pErr}${noP}${trunc}`;
+    + ` · 競標 <b>${nAuc}</b>${endedNote}${hidNote}${pErr}${noP}${trunc}${cachedAt}`;
 
   const active = filterMode !== "all" || flagFilter || pHide
     || quick.ceiling || quick.room || quick.noauction;
@@ -1740,7 +1794,7 @@ function auctionCard(it){
   const xpb = expiryBadges(it);
 
   return `
-  <article class="card ${canBid ? "hot" : ""} tier-${tier} ${isExpiredItem(it) ? "expired" : ""}">
+  <article class="card ${canBid ? "hot" : ""} tier-${tier} ${isExpiredItem(it) ? "expired" : ""}" data-key="${escapeHtml(it.key)}">
     ${shot(it.image_url, it.title)}
     <div class="body">
       <h3 class="title">
