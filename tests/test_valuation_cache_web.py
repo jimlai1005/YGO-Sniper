@@ -182,3 +182,17 @@ def test_signals_no_lag_warning_while_scan_running_or_fresh(client):
     )
     app_mod.store.finish_scan(started, result={})
     assert tc.get("/api/signals?state=all&limit=10").json()["valuation_error"] is None
+
+
+def test_lag_warning_survives_naive_timestamp(client):
+    """一邊帶時區一邊不帶時 fromisoformat 比較拋 TypeError——
+    壞時間戳只能讓偵測閉嘴（讀不到 ≠ 落後），不准 500 整個清單（Task 8）。"""
+    tc, app_mod = client
+    from ygo_sniper.valuation_cache import VALUATION_CACHE_AT_KEY
+
+    app_mod.store.set_meta(VALUATION_CACHE_AT_KEY, "2026-08-24T00:00:00")  # naive
+    started = app_mod.store.begin_scan(trigger="cli", dry_run=False)
+    app_mod.store.finish_scan(started, result={})  # started_at 帶時區（_now_iso）
+    res = tc.get("/api/signals?state=all&limit=10")
+    assert res.status_code == 200
+    assert res.json()["valuation_error"] is None

@@ -1328,6 +1328,7 @@ async function setBucket(key, bucket){
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({bucket: bucket || null}),
     });
+    const droppedLoad = signalsInFlight > 0;   // 作廢的是不是使用者要的一次載入
     signalsSeq++;   // 本地已經走在伺服器快照前面了，任何在飛的清單回應都過期
     // 後端回的是**寫完讀回來的值**（state 可能被 new→watching 連動改掉），
     // 照實更新本地，不重打整頁。
@@ -1341,11 +1342,15 @@ async function setBucket(key, bucket){
       : `已標記 ${BUCKETS[bucket] || bucket}`
         + (r && r.state === "watching" ? "，並移入觀察中" : ""));
     renderSignals();
+    // 被作廢的那次載入補打（此刻 POST 已落庫，重抓不會把變更洗掉）；
+    // 不補的話分頁切換會靜默失效——按鈕亮在新分頁、格子裡是舊清單。
+    if(droppedLoad) loadSignals().catch(e => toast("載入失敗：" + e.message));
     // 湊單籃總額與分頁計數的資料源在後端（bundle 即時重算、stats 是 db 計數），
     // 本地不重算第二份（同源）。這兩支實測 <10ms，樂觀更新省的是 /api/signals
     // 那一支，不是它們。fire-and-forget：失敗只影響側欄數字，下一次任何
-    // 重載都會補上，不值得為它擋住主流程。
-    loadBundle(); loadStats();
+    // 重載都會補上，不值得為它擋住主流程——但 rejection 要接住，不留 unhandled。
+    loadBundle().catch(e => console.warn("湊單籃補刷失敗", e));
+    loadStats().catch(e => console.warn("計數補刷失敗", e));
   }catch(e){ toast("失敗：" + e.message); }
 }
 
@@ -1354,6 +1359,7 @@ async function setBucket(key, bucket){
     /api/signals 全列重算＋MB 級回應，使用者被迫等卡片消失才敢按下一張。
     失敗路徑不樂觀：toast 病名＋loadSignals() 回去對帳，後端才是事實。 */
 async function setState(key, state){
+  const droppedLoad = signalsInFlight > 0;   // 作廢的是不是使用者要的一次載入
   signalsSeq++;   // 本地已經走在伺服器快照前面了，任何在飛的清單回應都過期
   const res = applyLocalState(items, key, state, currentState);
   items = res.items;
@@ -1371,14 +1377,19 @@ async function setState(key, state){
       body:JSON.stringify({state}),
     });
     toast("已更新");
+    // 被作廢的那次載入補打（此刻 POST 已落庫，重抓不會把略過的卡畫回來）；
+    // 不補的話分頁切換會靜默失效——按鈕亮在新分頁、格子裡是舊清單。
+    if(droppedLoad) loadSignals().catch(e => toast("載入失敗：" + e.message));
     // 湊單籃總額與分頁計數的資料源在後端（bundle 即時重算、stats 是 db 計數），
     // 本地不重算第二份（同源）。這兩支實測 <10ms，樂觀更新省的是 /api/signals
     // 那一支，不是它們。fire-and-forget：失敗只影響側欄數字，下一次任何
-    // 重載都會補上，不值得為它擋住主流程。
-    loadBundle(); loadStats();
+    // 重載都會補上，不值得為它擋住主流程——但 rejection 要接住，不留 unhandled。
+    loadBundle().catch(e => console.warn("湊單籃補刷失敗", e));
+    loadStats().catch(e => console.warn("計數補刷失敗", e));
   }catch(e){
     toast("失敗：" + e.message);
-    loadSignals();   // 樂觀錯了就認：重抓後端的事實，卡片會自己回來
+    // 樂觀錯了就認：重抓後端的事實，卡片會自己回來
+    loadSignals().catch(e2 => toast("載入失敗：" + e2.message));
   }
 }
 
@@ -1512,6 +1523,10 @@ let lastRes = null;    // 最近一次 /api/signals 的回應（truncated / 估�
 let signalsSeq = 0;    // 競態守衛：兩個 loadSignals 併發時，晚到的舊回應要丟棄
                         // ——沒有這條，略過剛送出、緊接著的重載若順序顛倒，
                         // 舊回應會把剛才本地移除的卡片重新畫回來。
+let signalsInFlight = 0; // 在飛的 /api/signals 請求數。setState／setBucket 作廢
+                         // 在飛回應時要看它：被作廢的那次載入可能是使用者要的
+                         // （例如剛切分頁），丟掉之後必須在 POST 落庫後補打一次，
+                         // 否則分頁按鈕亮在新分頁、格子裡卻是舊分頁的清單。
 
 async function loadSignals(){
   const seq = ++signalsSeq;
@@ -1520,7 +1535,13 @@ async function loadSignals(){
   // 分類是後端過濾（跟 state 同一支查詢，多一個 WHERE），不是前端 chip：
   // 分類分頁要的是**整顆 db 裡**的高價卡，不是「這一個狀態分頁裡」的高價卡。
   const bq = currentBucket ? `&bucket=${encodeURIComponent(currentBucket)}` : "";
-  const res = await api(`/api/signals?state=${currentState}&limit=1000${bq}`);
+  signalsInFlight++;
+  let res;
+  try{
+    res = await api(`/api/signals?state=${currentState}&limit=1000${bq}`);
+  }finally{
+    signalsInFlight--;
+  }
   if(seq !== signalsSeq) return;   // 已有更新的請求在飛，這份是過期事實
   lastRes = res;
   // 梯隊門檻與文案全部來自後端；拿不到就維持 null（退回純結標時間序）。

@@ -118,18 +118,27 @@ def _valuation_lag_warning() -> str | None:
     是上一輪的 < started_at → 報。掃描進行中（running）不比——掛勾本來就
     還沒跑到。dry_run 不寫庫也不重算，跳過。時間戳解析失敗一律不報
     （讀不到 ≠ 落後，與「讀不到錢 ≠ 錢虧光」同一條）。
+
+    已知取捨：`begin_scan` 會整份覆寫掃描狀態，所以「真掃描崩在掛勾前」
+    亮起的告警，會被之後跑的一次 `scan --dry-run` 蓋掉（基準變成 dry-run
+    那一輪、被本函式跳過）。要根治得另存「最後一次非 dry-run 的
+    started_at」；dry-run 是罕見的人工操作，先不為它加欄位。
     """
     from datetime import datetime
 
     cached_at = store.get_meta(VALUATION_CACHE_AT_KEY)
-    st = store.scan_status()
+    # timeout 跟其他三個呼叫點同一個來源（cfg）：偵測器對「上一輪算不算還在跑」
+    # 的答案必須與掃描按鈕一致，否則按鈕已放行說沒收尾、這裡卻還當它在跑而閉嘴。
+    st = store.scan_status(timeout_seconds=cfg.scan_timeout_seconds)
     started_at = st.get("started_at")
     if not cached_at or not started_at or st.get("running") or st.get("dry_run"):
         return None
     try:
         lagging = datetime.fromisoformat(cached_at) < datetime.fromisoformat(started_at)
-    except ValueError:
-        return None          # 讀不到 ≠ 落後：解析不了就不指控
+    except (ValueError, TypeError):
+        # 讀不到 ≠ 落後：解析不了就不指控。TypeError 是「一邊帶時區一邊不帶」
+        # ——兩個寫入端目前都帶，但這裡的承諾是任何壞時間戳都不炸整個清單。
+        return None
     if not lagging:
         return None
     return (

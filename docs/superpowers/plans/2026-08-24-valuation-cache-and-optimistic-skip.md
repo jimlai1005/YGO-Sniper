@@ -1012,6 +1012,28 @@ Run: `make lint` → 錯誤數回到改前基線（27）
 Run: `make test` → 全綠（基線 1908＋F7 新 3）
 Commit 一個：`fix: 審查修正回合——湊單籃補刷、清單競態、resale 防護、快取落後偵測`
 
+## 複審回合（Task 8，主線程親改，2026-08-24）
+
+複審結論：原 5 條 findings 全數已解、F5 的 `started_at` 裁決經 reviewer 查證
+「正確且優於原建議」（用 finished_at 會每輪誤報成狼來了）。剩 1 新 Warning
+＋4 Suggestion，全收，2 檔小修由主線程親改：
+
+- [x] **W-新（seq 過度作廢）**：`setState`／`setBucket` 的 `signalsSeq++` 會把
+  「使用者要的一次載入」（如剛切分頁）整份丟掉且沒人補打——分頁按鈕亮在
+  新分頁、格子裡是舊清單。修法：新增 `signalsInFlight` 計數；作廢時記下
+  `droppedLoad`，POST **落庫成功後**補打 `loadSignals()`（順序關鍵：先補打
+  會把還沒落庫的變更洗掉、卡片回魂）。
+- [x] **S1**：`_valuation_lag_warning` 的 fromisoformat 比較補 `TypeError`
+  （一邊帶時區一邊不帶時拋的是它不是 ValueError，reviewer 實測）＋回歸測試
+  `test_lag_warning_survives_naive_timestamp`。
+- [x] **S2**：`scan_status()` 補 `timeout_seconds=cfg.scan_timeout_seconds`，
+  與其他三個呼叫點同參數——否則調了 `scan.timeout_seconds` 後「按鈕已放行、
+  偵測還閉嘴」（第三節第八事故的形狀）。
+- [x] **S3**：dry-run 覆寫掃描狀態會蓋掉已亮起的落後告警——已知取捨寫進
+  docstring（根治需另存「最後一次非 dry-run 的 started_at」，暫不加欄位）。
+- [x] **S4**：`loadBundle()`／`loadStats()`／catch 路徑的 `loadSignals()`
+  補 `.catch(...)`，不留 unhandled rejection。
+
 ## Self-review 紀錄（寫完 plan 時檢查）
 
 - 使用者三項裁決 → Task 1-3（快取只在掃描更新）、Task 4（讀寫分離）、
