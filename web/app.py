@@ -55,7 +55,10 @@ from ygo_sniper.seller_links import seller_page_url  # noqa: E402
 from ygo_sniper.sources import CachedFetcher, build_sources  # noqa: E402
 from ygo_sniper.sources.base import BlockedError, FetchError  # noqa: E402
 from ygo_sniper.store import Store  # noqa: E402
-from ygo_sniper.valuation_cache import resale_for_row  # noqa: E402
+from ygo_sniper.valuation_cache import (  # noqa: E402
+    VALUATION_CACHE_AT_KEY,
+    VALUATION_CACHE_ERROR_KEY,
+)
 from ygo_sniper.venue_study import VENUE_STUDY_META_KEY, venue_study_label  # noqa: E402
 from ygo_sniper.verify_departed import build_page_verifier  # noqa: E402
 
@@ -77,11 +80,15 @@ def index() -> FileResponse:
 
 
 # ---------------------------------------------------------------------------
-#: 估價模型（給清單算 P(值得買) 用）跨請求共用。實測建一次 0.14 秒、193 列
-#: 估價 0.08 秒——不快取的話每次切分頁都重付一次。
-#: 失效判準是 **comps 的筆數**：comps 長了才有新的成交樣本，模型才會變。
-#: 用「筆數」而不是時間戳，因為時間到了資料沒變等於白重建，資料變了時間沒到
-#: 又會給出過期的機率（工程原則 1：判準要對著真正會變的那個東西）。
+#: 估價模型跨請求共用。實測建一次 0.14 秒、193 列估價 0.08 秒——不快取的話
+#: 每次都重付一次。失效判準是 **comps 的筆數**：comps 長了才有新的成交樣本，
+#: 模型才會變。用「筆數」而不是時間戳，因為時間到了資料沒變等於白重建，
+#: 資料變了時間沒到又會給出過期的機率（工程原則 1：判準要對著真正會變的
+#: 那個東西）。
+#: 2026-08-24：`/api/signals` 已改讀 `signal_valuations` 快取（Task 4），
+#: 這顆 valuator 只服務 `/api/bundle`、`/api/appraise`、`/api/search`
+#: 這些單發互動端點——湊單張數、鑑定單一 URL 都是使用者當下的操作，
+#: 沒有辦法預先算好落庫。
 _valuator = None
 _valuator_key: int | None = None
 _valuator_lock = threading.Lock()
@@ -134,11 +141,12 @@ def signals(
     共用它。前端自己維護一份旗標清單的話，哪天加了新的 trigger 旗標，
     dashboard 會安靜地把它顯示成「只是符合條件」（工程原則 1）。
 
-    `p_worth_buying`＝P(公允價 > 到手成本)，**現算不落庫**：它比較的是
-    「這一列上次掃描時的到手成本」與「現在這批 comps 撐出來的公允價」，
-    comps 每小時都在長，落庫等於把一個會過期的機率凍起來。算法完全重用
-    `valuation.estimate_signal_row`（CLI 的 `ygo-sniper value` 用的同一支），
-    dashboard 不自己開第二套估價。
+    `p_worth_buying`＝P(公允價 > 到手成本)，來自**掃描收尾算好落庫的估價快取**
+    （`signal_valuations`，見 `valuation_cache.py`）——這裡**只讀不算**，連
+    lazy 補算都不做：切分頁、略過這些讀取操作不可以改變資料（2026-08-24
+    使用者裁決）。凍結到下一輪掃描是刻意的取捨，不是 bug；理由與取捨全文見
+    `valuation_cache.py` 模組 docstring。沒有快取列的標的（例如剛掃到還沒
+    收尾）就誠實顯示 `None`，不補一個沒依據的數字。
 
     `shipping_alert` 走 `scoring.shipping_alert_for_row`，與掃描當下寫
     `Flag.HIGH_OVERHEAD` 的是同一個判準——舊資料沒有那個旗標也看得到告警。
@@ -152,13 +160,6 @@ def signals(
     rows = store.list_signals(
         state=state, limit=limit, min_score=min_score, bucket=bucket or None
     )
-    # 原始的 payload JSON **字串**要留著：`estimate_signal_row` 是拿字串
-    # `json.loads` 去取「掃描當下解析好的稀有度」的，餵它一個已經 parse 過的
-    # dict 會靜靜掉進「payload 壞掉」的 fallback（改從標題重抽稀有度）。
-    # 2026-08-02 實測目前這 193 筆兩條路徑的稀有度剛好一致（P 值零差異），
-    # 所以這不是在修一個看得見的 bug——是在修**同源**：稀有度的抽法一改，
-    # dashboard 的 P 值就會跟 CLI 的 `ygo-sniper value` 無聲分岔（工程原則 1）。
-    raw_payloads = [r.get("payload") for r in rows]
     for r in rows:
         r["flags"] = json.loads(r.get("flags") or "[]")
         r["payload"] = _with_overhead(json.loads(r.get("payload") or "{}"))
@@ -167,28 +168,15 @@ def signals(
         r["expiry"] = expiry_status(r, gone_confidence=_GONE_CONFIDENCE).to_dict()
         r["triggered"] = is_triggered(r["flags"])
         r["shipping_alert"] = shipping_alert_for_row(r, cfg)
-        r["p_worth_buying"] = None
-        r["fair_twd"] = None
-        r["resale"] = None
-
-    # 估價炸掉不該讓整個清單開不出來，但也**不准安靜地當作沒事**（工程原則 3）：
-    # 病名回到前端，畫面上會出現「P 值這一輪算不出來」的告警，
-    # 而不是所有標的的 P 都顯示成「–」讓人以為模型說了什麼。
-    valuation_error = None
-    try:
-        from ygo_sniper.valuation import estimate_signal_row
-
-        valuator = _shared_valuator()
-        for r, raw in zip(rows, raw_payloads, strict=True):
-            est = estimate_signal_row(valuator, {**r, "payload": raw})
-            r["p_worth_buying"] = est.p_worth_buying
-            r["fair_twd"] = est.fair_twd
-            r["est_level_label"] = est.level_label
-            # 「若要轉賣」與 P 值共用同一個 valuator（同一批 comps、同一份
-            # 卡片屬性）。分開建的話畫面上的兩個數字會來自兩個模型。
-            r["resale"] = resale_for_row(valuator, cfg, fx, r, raw)
-    except Exception as exc:  # noqa: BLE001 - 清單本身比 P 值重要，但要說出病名
-        valuation_error = f"{type(exc).__name__}: {exc}"
+        # 估價一律來自掃描時算好的快取（signal_valuations），這裡**只讀不算**
+        # ——連 lazy 補算都不做：讀取不可以改資料（2026-08-24 使用者裁決，
+        # 詳見 valuation_cache.py 模組 docstring）。沒有快取列就誠實顯示無 P。
+        r["p_worth_buying"] = r.pop("val_p_worth_buying", None)
+        r["fair_twd"] = r.pop("val_fair_twd", None)
+        r["est_level_label"] = r.pop("val_level_label", None)
+        raw_resale = r.pop("val_resale_json", None)
+        r["resale"] = json.loads(raw_resale) if raw_resale else None
+        r.pop("val_computed_at", None)
 
     return {
         "count": len(rows),
@@ -204,7 +192,12 @@ def signals(
             ),
             "overhead_threshold": overhead_threshold(cfg),
         },
-        "valuation_error": valuation_error,
+        # 快取重算的病名（掃描收尾若失敗才會有值）；沒有錯誤就是空字串，
+        # 統一成 None 讓前端一條 `if` 就能判斷要不要亮橫條。
+        "valuation_error": store.get_meta(VALUATION_CACHE_ERROR_KEY) or None,
+        # 「你現在看到的 P 值是幾點算的」——凍結到下一輪掃描是刻意取捨
+        # （見本函式 docstring），這個時間戳讓使用者自己判斷新不新鮮。
+        "valuation_cached_at": store.get_meta(VALUATION_CACHE_AT_KEY),
         "p_worth_known": sum(1 for r in rows if r.get("p_worth_buying") is not None),
         # 競標視圖的梯隊門檻與文案（bidding.auction_view_config）。**跟著清單一起送**
         # 的理由：前端每次 render 都要用它排序，而 render 只在清單載入後才發生——
