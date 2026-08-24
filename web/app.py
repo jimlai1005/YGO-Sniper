@@ -52,16 +52,10 @@ from ygo_sniper.scoring import (  # noqa: E402
     shipping_alert_for_row,
 )
 from ygo_sniper.seller_links import seller_page_url  # noqa: E402
-from ygo_sniper.selling import (  # noqa: E402
-    best_round_trip,
-    listing_from_signal_row,
-    location_label,
-    round_trips_for,
-    venue_estimator_for_row,
-)
 from ygo_sniper.sources import CachedFetcher, build_sources  # noqa: E402
 from ygo_sniper.sources.base import BlockedError, FetchError  # noqa: E402
 from ygo_sniper.store import Store  # noqa: E402
+from ygo_sniper.valuation_cache import resale_for_row  # noqa: E402
 from ygo_sniper.venue_study import VENUE_STUDY_META_KEY, venue_study_label  # noqa: E402
 from ygo_sniper.verify_departed import build_page_verifier  # noqa: E402
 
@@ -130,46 +124,6 @@ def _shared_valuator():
         return _valuator
 
 
-def _resale_for_row(valuator, row: dict, raw_payload: str | None) -> dict:
-    """這一列「若要轉賣」的答案。**不可行時明確寫不可行，不給數字。**
-
-    這裡不自己開估價模型、也不自己算費率——全部走 `selling`，與 CLI 的
-    `ygo-sniper spread` 是同一支。dashboard 自己再算一份的話，畫面上的
-    淨利與指令跑出來的淨利會安靜地分岔（工程原則 1）。
-    """
-    lst = listing_from_signal_row({**row, "payload": raw_payload})
-    if lst is None:
-        return {"ok": False, "reason": "payload 殘缺，無法還原標的，拒絕估轉賣淨利"}
-
-    trips = round_trips_for(
-        lst, cfg, fx, estimate_for=venue_estimator_for_row(valuator, {**row, "payload": raw_payload})
-    )
-    best = best_round_trip(trips)
-    # 不可行的理由要去重（同一個原因會在每條買進路徑各出現一次），
-    # 但**必須留著**：「Mercari JP 賣得比較貴」的正確下文是「但你到不了那裡，
-    # 因為 X」，把它濾掉使用者只會反覆自己重新想一次。
-    seen: set[str] = set()
-    blocked = []
-    for t in trips:
-        if t.ok or t.reason in seen:
-            continue
-        seen.add(t.reason)
-        blocked.append({"venue_label": t.sell_venue_label, "route_label": t.buy_route_label,
-                        "reason": t.reason})
-    out = {
-        "ok": best is not None,
-        "blocked": blocked[:6],
-        "tax_note": cfg.resale.tax_note,
-        "jp_presence": cfg.resale.jp_presence,
-    }
-    if best is not None:
-        out["best"] = best.to_dict()
-        out["best"]["holding_label"] = location_label(best.holding)
-    else:
-        out["reason"] = "沒有任何可行的轉賣組合（原因見下）"
-    return out
-
-
 @app.get("/api/signals")
 def signals(
     state: str = "new", min_score: float = 0, limit: int = 1000, bucket: str = ""
@@ -232,7 +186,7 @@ def signals(
             r["est_level_label"] = est.level_label
             # 「若要轉賣」與 P 值共用同一個 valuator（同一批 comps、同一份
             # 卡片屬性）。分開建的話畫面上的兩個數字會來自兩個模型。
-            r["resale"] = _resale_for_row(valuator, r, raw)
+            r["resale"] = resale_for_row(valuator, cfg, fx, r, raw)
     except Exception as exc:  # noqa: BLE001 - 清單本身比 P 值重要，但要說出病名
         valuation_error = f"{type(exc).__name__}: {exc}"
 
