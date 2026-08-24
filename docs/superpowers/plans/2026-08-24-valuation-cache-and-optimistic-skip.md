@@ -54,7 +54,7 @@
 - Modify: `src/ygo_sniper/store.py`（`_SCHEMA` 約 :24 起；`list_signals` :836-874）
 - Test: `tests/test_valuation_cache_store.py`（新檔）
 
-- [ ] **Step 1: 寫紅燈測試**
+- [x] **Step 1: 寫紅燈測試**
 
 ```python
 """signal_valuations 快取表：整批 upsert、list_signals 帶回 val_ 欄位。
@@ -118,12 +118,12 @@ def test_signal_without_cache_row_yields_nulls(store):
     assert r["val_resale_json"] is None
 ```
 
-- [ ] **Step 2: 跑一次確認紅**（`upsert_valuations` 不存在）
+- [x] **Step 2: 跑一次確認紅**（`upsert_valuations` 不存在）
 
 Run: `.venv/bin/pytest tests/test_valuation_cache_store.py -v`
 Expected: FAIL（AttributeError: upsert_valuations）
 
-- [ ] **Step 3: 實作**
+- [x] **Step 3: 實作**
 
 `_SCHEMA` 追加（放在既有表定義後面，慣例是 `CREATE TABLE IF NOT EXISTS`，
 新表不需要 `_migrate_*`）：
@@ -179,12 +179,12 @@ FROM 子句改成
 "LEFT JOIN signal_valuations v ON v.key = s.key "
 ```
 
-- [ ] **Step 4: 跑綠**
+- [x] **Step 4: 跑綠**
 
 Run: `.venv/bin/pytest tests/test_valuation_cache_store.py -v`
 Expected: 3 passed
 
-- [ ] **Step 5: 全量回歸＋commit**
+- [x] **Step 5: 全量回歸＋commit**
 
 Run: `make test`（`list_signals` 的既有使用者不少，JOIN 不能弄壞任何一個）
 Expected: 全綠（基線 1855 passed 起跳）
@@ -206,7 +206,7 @@ git commit -m "feat(store): signal_valuations 估價快取表＋list_signals 帶
   `resale_for_row(valuator, cfg, fx, r, raw)`）
 - Test: `tests/test_valuation_cache.py`（新檔）
 
-- [ ] **Step 1: 建模組（先搬 resale，一字不改邏輯）**
+- [x] **Step 1: 建模組（先搬 resale，一字不改邏輯）**
 
 ```python
 """掃描後的估價快取。
@@ -298,7 +298,7 @@ def refresh_valuation_cache(cfg, store, fx, index=None, *, valuator=None) -> dic
 注意：`datetime` 時間戳若與 store 既有慣例（看 `begin_scan` 怎麼寫 `started_at`）
 不同形，**以既有慣例為準**改這裡，不要讓同一顆 db 出現兩種時間格式。
 
-- [ ] **Step 2: web/app.py 改 import（行為不變）**
+- [x] **Step 2: web/app.py 改 import（行為不變）**
 
 刪 `_resale_for_row`（web/app.py:133-170），檔頭 import 加
 `from ygo_sniper.valuation_cache import resale_for_row`，
@@ -306,7 +306,7 @@ def refresh_valuation_cache(cfg, store, fx, index=None, *, valuator=None) -> dic
 `r["resale"] = resale_for_row(valuator, cfg, fx, r, raw)`。
 驗證只有一份定義：`grep -c "_resale_for_row" web/app.py` 應為 0。
 
-- [ ] **Step 3: 寫測試（monkeypatch 掉重物）**
+- [x] **Step 3: 寫測試（monkeypatch 掉重物）**
 
 ```python
 """refresh_valuation_cache：整批落庫、逐列失敗不中斷、meta 誠實。"""
@@ -373,7 +373,7 @@ def test_per_row_failure_writes_nulls_and_error_meta(store, monkeypatch):
 的區域 import 而打不中，改成 patch `ygo_sniper.valuation` 模組屬性即可——上面
 寫的就是這個形；實作時保持區域 import 以免 web 啟動變慢。）
 
-- [ ] **Step 4: 跑綠＋全量回歸＋commit**
+- [x] **Step 4: 跑綠＋全量回歸＋commit**
 
 Run: `.venv/bin/pytest tests/test_valuation_cache.py -v` → 2 passed
 Run: `make test` → 全綠（web 的 import 搬家不能弄壞既有 web 測試）
@@ -396,7 +396,7 @@ git commit -m "feat(valuation): 估價快取模組——resale 搬出 web、整�
 - Modify: `CLAUDE.md` 第九節指令表加一行 `ygo-sniper revalue`
 - Test: `tests/test_valuation_cache.py` 追加
 
-- [ ] **Step 1: pipeline 掛勾**
+- [x] **Step 1: pipeline 掛勾**
 
 `Pipeline` 加方法：
 
@@ -438,7 +438,7 @@ if not dry_run:
 valuator 或 CardIndex，透過 `refresh_valuation_cache(..., valuator=...)` 或
 `index=...` 重用，不要建第二份；沒有就照上面原樣（自建）。
 
-- [ ] **Step 2: CLI `revalue`**
+- [x] **Step 2: CLI `revalue`**
 
 ```python
 @app.command()
@@ -463,7 +463,7 @@ CLAUDE.md 第九節指令表（`backfill-sale-kind` 那行附近）加：
 ygo-sniper revalue             # 手動重算估價快取（掃描收尾會自動跑；首次部署回填用）
 ```
 
-- [ ] **Step 3: 測試**
+- [x] **Step 3: 測試**
 
 `tests/test_valuation_cache.py` 追加（不建完整 Pipeline——它的 ctor 會建 sources；
 測掛勾方法本體，用 stub self）：
@@ -514,7 +514,7 @@ def test_scan_source_contains_hook_call():
     assert "if not dry_run" in src
 ```
 
-- [ ] **Step 4: 跑綠＋回歸＋commit**
+- [x] **Step 4: 跑綠＋回歸＋commit**
 
 Run: `.venv/bin/pytest tests/test_valuation_cache.py -v` → 全綠
 Run: `make test` → 全綠
@@ -533,7 +533,7 @@ git commit -m "feat(pipeline): 掃描收尾重算估價快取＋ygo-sniper reval
 - Test: `tests/test_valuation_cache_web.py`（新檔；client fixture 照抄
   `tests/test_expiry_clear.py:970-1000`，含「不准開正式庫」承重斷言）
 
-- [ ] **Step 1: 紅燈測試**
+- [x] **Step 1: 紅燈測試**
 
 ```python
 def test_signals_reads_cache_and_never_builds_valuator(client):
@@ -576,7 +576,7 @@ def test_signals_surfaces_cache_error_and_timestamp(client):
 
 Run: `.venv/bin/pytest tests/test_valuation_cache_web.py -v` → FAIL（現行端點會去建 valuator）
 
-- [ ] **Step 2: 改端點**
+- [x] **Step 2: 改端點**
 
 `/api/signals` 的估價段（:223-237 的 try/except 整段＋前面的
 `raw_payloads` 準備）整個換成讀 JOIN 欄位：
@@ -620,14 +620,14 @@ Run: `.venv/bin/pytest tests/test_valuation_cache_web.py -v` → FAIL（現行�
 `_shared_valuator`、`_with_overhead` 都**保留**（bundle/appraise/search 還在用
 前者；payload 的 route 序列化仍走後者）。
 
-- [ ] **Step 3: 跑綠＋全量回歸**
+- [x] **Step 3: 跑綠＋全量回歸**
 
 Run: `.venv/bin/pytest tests/test_valuation_cache_web.py -v` → 3 passed
 Run: `make test` → 全綠。**預期會紅的既有測試**：任何斷言 `/api/signals` 回
 `p_worth_buying` 有值、或斷言 `valuation_error` 語意的舊測試。修法是把測試改成
 「先 `upsert_valuations` 塞快取再打端點」——**不是**在端點裡偷偷補算。
 
-- [ ] **Step 4: commit**
+- [x] **Step 4: commit**
 
 ```bash
 git add web/app.py tests/test_valuation_cache_web.py tests/<被修的既有測試>
@@ -644,7 +644,7 @@ git commit -m "feat(web): /api/signals 改讀估價快取——只讀不算，�
 - Test: `tests/test_optimistic_state.py`（新檔，抽標記區塊丟 node 實跑，
   模式照抄 `tests/test_expiry_banner.py`）
 
-- [ ] **Step 1: 純函式（含標記，供 node 測試抽取）**
+- [x] **Step 1: 純函式（含標記，供 node 測試抽取）**
 
 放在 `setState` 上方：
 
@@ -667,7 +667,7 @@ function applyLocalState(items, key, newState, currentState){
 /* ==== LOCAL-STATE-LOGIC:END ==== */
 ```
 
-- [ ] **Step 2: node 測試**
+- [x] **Step 2: node 測試**
 
 `tests/test_optimistic_state.py`（HARNESS 讀 stdin 的
 `{items, key, newState, currentState}`，印 `applyLocalState(...)` 的 JSON；
@@ -703,7 +703,7 @@ def test_unknown_key_is_noop():
 Run: `.venv/bin/pytest tests/test_optimistic_state.py -v` → 先 FAIL（區塊不存在），
 Step 1 落了之後轉綠。
 
-- [ ] **Step 3: `setState` 改樂觀更新**
+- [x] **Step 3: `setState` 改樂觀更新**
 
 ```js
 /** 樂觀更新（2026-08-24 使用者裁決）：先動畫面、再非同步告訴後端。
@@ -743,7 +743,7 @@ CSS（放既有卡片樣式附近）：
 .leaving{opacity:0;transform:scale(.97);transition:opacity .15s ease,transform .15s ease;pointer-events:none}
 ```
 
-- [ ] **Step 4: `setBucket` 改局部更新（不再 loadAll）**
+- [x] **Step 4: `setBucket` 改局部更新（不再 loadAll）**
 
 ```js
 async function setBucket(key, bucket){
@@ -769,7 +769,7 @@ async function setBucket(key, bucket){
 }
 ```
 
-- [ ] **Step 5: `loadSignals` 競態守衛＋快取時間顯示**
+- [x] **Step 5: `loadSignals` 競態守衛＋快取時間顯示**
 
 序號守衛（兩個併發 loadSignals 時，過期回應直接丟棄——沒有這條，慢的舊回應
 晚到會把新狀態蓋掉，畫面上出現「略過的又回來了」）：
@@ -795,7 +795,7 @@ const cachedAt = lastRes && lastRes.valuation_cached_at
   : ` · <span class="hid">估價快取：無（先跑一次掃描或 ygo-sniper revalue）</span>`;
 ```
 
-- [ ] **Step 6: 跑綠＋回歸＋commit**
+- [x] **Step 6: 跑綠＋回歸＋commit**
 
 Run: `.venv/bin/pytest tests/test_optimistic_state.py -v` → 4 passed
 Run: `make test` → 全綠（`test_auction_view.py`／`test_expiry_banner.py` 抽的
@@ -810,16 +810,16 @@ git commit -m "feat(web): 略過改樂觀更新——本地先消失、非同步
 
 ### Task 6：主線程親驗（不派工）
 
-- [ ] `make test` 全綠（主線程親跑，看到 `N passed` 那行）。
-- [ ] `ygo-sniper revalue` 實跑：`[value-cache]` 行印出列數與秒數；
+- [x] `make test` 全綠（主線程親跑，看到 `N passed` 那行）。
+- [x] `ygo-sniper revalue` 實跑：`[value-cache]` 行印出列數與秒數；
       `sqlite3 data/sniper.db "select count(*) from signal_valuations"` 應等於
       signals 總列數。
-- [ ] TestClient 計時複測：暖機後 `/api/signals?state=skipped&limit=1000` 應從
+- [x] TestClient 計時複測：暖機後 `/api/signals?state=skipped&limit=1000` 應從
       3.0s 降到 <0.5s（不再逐列估價）；`_shared_valuator` monkeypatch 成炸彈時
       端點仍 200。
-- [ ] `ygo-sniper serve` 起來，手動按一次略過：卡片 150ms 內消失、無整頁閃動；
+- [x] `ygo-sniper serve` 起來，手動按一次略過：卡片 150ms 內消失、無整頁閃動；
       清單 meta 行顯示估價快取時間。
-- [ ] `git log` 確認每個 task 一個 commit、無 plan 外改動（`git status` 乾淨）。
+- [x] `git log` 確認每個 task 一個 commit、無 plan 外改動（`git status` 乾淨）。
 
 ## 審查修正回合（Task 7 @inline，2026-08-24 reviewer findings 主線程裁決）
 
@@ -834,7 +834,7 @@ Reviewer 判定「需修正後複審」。主線程逐條複驗後裁決如下�
 - Modify: `tests/test_valuation_cache.py`、`tests/test_valuation_cache_web.py`（I001 import 排序）
 - Test: `tests/test_valuation_cache_web.py` 追加 F3／F5 案例
 
-- [ ] **F1（Critical）：setState／setBucket 成功後補刷湊單籃與計數**
+- [x] **F1（Critical）：setState／setBucket 成功後補刷湊單籃與計數**
 
 「加入湊單」過去靠 `loadAll()` 連帶刷 `loadBundle()`（湊單籃總額）與
 `loadStats()`（分頁計數）；樂觀更新拿掉 `loadAll()` 後這兩塊變成舊值且畫面
@@ -849,7 +849,7 @@ Reviewer 判定「需修正後複審」。主線程逐條複驗後裁決如下�
     loadBundle(); loadStats();
 ```
 
-- [ ] **F2（Warning）：本地變更必須作廢在飛的清單回應**
+- [x] **F2（Warning）：本地變更必須作廢在飛的清單回應**
 
 `signalsSeq` 只在新的 `loadSignals` 起飛時遞增；`pollScanStatus` 掃完自動
 `loadAll()` 的 0.4s 飛行期間按「略過」，舊回應晚到會把剛略過的卡畫回來——
@@ -862,7 +862,7 @@ Reviewer 判定「需修正後複審」。主線程逐條複驗後裁決如下�
 
 （被作廢的那次刷新不補跑：正確性 > 新鮮度，下一次任何重載都會補上。）
 
-- [ ] **F3（Warning）：一列壞掉的 resale_json 不准 500 整個清單**
+- [x] **F3（Warning）：一列壞掉的 resale_json 不准 500 整個清單**
 
 `web/app.py` `/api/signals` 的 `json.loads(raw_resale)` 裸奔；同檔
 `_route_dict` 對壞 payload 的既有立場是「一列壞掉不打掉整個清單」。改成：
@@ -877,7 +877,7 @@ Reviewer 判定「需修正後複審」。主線程逐條複驗後裁決如下�
             r["resale"] = None
 ```
 
-- [ ] **F4（Warning）：掛勾移進 scan() 的 try 內**
+- [x] **F4（Warning）：掛勾移進 scan() 的 try 內**
 
 `_refresh_valuation_cache` 在 try/except BaseException 之外，重算要跑幾秒，
 期間 Ctrl-C 會讓 `finish_scan` 不執行、scan_status 卡 running 直到逾時兜底，
@@ -894,7 +894,7 @@ Reviewer 判定「需修正後複審」。主線程逐條複驗後裁決如下�
 `tests/test_valuation_cache.py` 的 `test_scan_source_contains_hook_call` 不用改
 （inspect.getsource 仍找得到兩個字串）。
 
-- [ ] **F5（Warning）：快取落後最後一輪掃描要說出來**
+- [x] **F5（Warning）：快取落後最後一輪掃描要說出來**
 
 掃描在寫完 signals 之後、掛勾之前死掉（watchdog kill、_scan 後段例外），
 快取會停在上一輪而 meta 病名是空的——同一張卡「新的到手成本」配「舊 comps
@@ -939,7 +939,7 @@ def _valuation_lag_warning() -> str | None:
 
 （注意既有的 `or None` 語意要保住：meta 空字串＋無落後 → 仍是 None。）
 
-- [ ] **F6（Suggestions，全收）**
+- [x] **F6（Suggestions，全收）**
 
 1. `src/ygo_sniper/valuation_cache.py` 刪未使用的 `from typing import Any`；
    `tests/test_valuation_cache.py`、`tests/test_valuation_cache_web.py` 修 I001
@@ -955,7 +955,7 @@ def _valuation_lag_warning() -> str | None:
     ? ` · <span class="hid">${noPn} 筆無 P 值（不受 P 篩選影響）</span>` : "";
 ```
 
-- [ ] **F7：測試（追加到 tests/test_valuation_cache_web.py）**
+- [x] **F7：測試（追加到 tests/test_valuation_cache_web.py）**
 
 ```python
 def test_signals_survives_one_corrupt_resale_row(client):
@@ -1005,7 +1005,7 @@ def test_signals_no_lag_warning_while_scan_running_or_fresh(client):
     assert tc.get("/api/signals?state=all&limit=10").json()["valuation_error"] is None
 ```
 
-- [ ] **F8：驗收**
+- [x] **F8：驗收**
 
 Run: `.venv/bin/pytest tests/test_valuation_cache_web.py tests/test_valuation_cache.py tests/test_optimistic_state.py -v` → 全綠
 Run: `make lint` → 錯誤數回到改前基線（27）
