@@ -277,10 +277,10 @@ def test_spec_id_roundtrips_through_pop_url():
     assert spec_id_from_pop_url("") is None
 ```
 
-- [ ] **Step 2: 紅**：`.venv/bin/pytest tests/test_psa_census.py -v` → FAIL（模組不存在）
-- [ ] **Step 3: 實作**上面骨架
-- [ ] **Step 4: 綠**：`.venv/bin/pytest tests/test_psa_census.py -v` 全 PASS
-- [ ] **Step 5: Commit** `feat(snipe): psa_census 模組——官方 API cert→spec→population`
+- [x] **Step 2: 紅**：`.venv/bin/pytest tests/test_psa_census.py -v` → FAIL（模組不存在）
+- [x] **Step 3: 實作**上面骨架
+- [x] **Step 4: 綠**：`.venv/bin/pytest tests/test_psa_census.py -v` 全 PASS
+- [x] **Step 5: Commit** `feat(snipe): psa_census 模組——官方 API cert→spec→population`
 
 ---
 
