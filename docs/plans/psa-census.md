@@ -440,6 +440,14 @@ PSA_API_TOKEN=
 
 ---
 
+**審查回合（2026-08-24）**：reviewer（sonnet 代跑——opus 端連三次 529 Overloaded）
+對 `73fec87..HEAD` 全 diff 審查。1 條 Critical：數值欄位 `int()` 轉型沒防守，
+`"Grade9": "N/A"` 這類「值合法但型別不對」的回應會讓裸 ValueError 炸穿
+`except (FetchError, CensusParseError)`。主線程親跑重現屬實 → 修於 `3f01ad2`
+（`_as_int` 統一轉型→CensusParseError，三條紅燈測試釘住）→ 複審 PASS。
+token 安全經查安全：httpx cross-origin redirect 會自動 strip Authorization、
+log 不記 headers。若要補一次 opus 級複審，等伺服器恢復後對同一 diff 重跑即可。
+
 ### Task 5（使用者拿到 token 後的實測回合，本次不做）
 
 - [ ] 使用者：註冊 https://www.psacard.com/publicapi 、`.env` 加 `PSA_API_TOKEN=…`
