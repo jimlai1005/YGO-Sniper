@@ -72,6 +72,31 @@ def test_population_without_grade_fields_raises():
         fetch_spec_population(1, fetcher=f, token="T")
 
 
+def test_population_with_non_numeric_count_raises_parse_error():
+    """型別不符 swagger 假設（"Grade9": "N/A"）必須落回 CensusParseError，
+    不准讓裸 ValueError 炸穿呼叫端的失敗處理（審查 finding，2026-08-24）。"""
+    body = json.dumps({"SpecID": 1, "Description": "x",
+                       "PSAPop": {"Total": 5, "Grade9": "N/A"}})
+    f = FakeFetcher({"GetPSASpecPopulation": body})
+    with pytest.raises(CensusParseError):
+        fetch_spec_population(1, fetcher=f, token="T")
+
+
+def test_population_with_non_numeric_total_raises_parse_error():
+    body = json.dumps({"SpecID": 1, "Description": "x",
+                       "PSAPop": {"Total": "many", "Grade9": 3}})
+    f = FakeFetcher({"GetPSASpecPopulation": body})
+    with pytest.raises(CensusParseError):
+        fetch_spec_population(1, fetcher=f, token="T")
+
+
+def test_cert_with_non_numeric_specid_raises_parse_error():
+    body = json.dumps({"PSACert": {"CertNumber": "1", "SpecID": "abc"}})
+    f = FakeFetcher({"GetByCertNumber": body})
+    with pytest.raises(CensusParseError):
+        fetch_cert("1", fetcher=f, token="T")
+
+
 def test_quota_429_translated_to_readable_message():
     err = FetchError("HTTP 429", url="u", status=429, transient=True)
     f = FakeFetcher({"GetPSASpecPopulation": err})

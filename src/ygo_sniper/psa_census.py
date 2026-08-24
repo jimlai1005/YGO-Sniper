@@ -47,6 +47,18 @@ def spec_id_from_pop_url(url: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _as_int(value: object, *, what: str) -> int:
+    """數值欄位的統一轉型。欄位型別是假設不是事實（swagger 未對過真實 payload）——
+    轉不動就拋 CensusParseError，讓它落回呼叫端「URL 照存、舊資料不動」的失敗
+    路徑，而不是讓裸 ValueError 炸穿 `except (FetchError, CensusParseError)`。"""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise CensusParseError(
+            f"{what} 不是數字（拿到 {value!r}）——API 回應型別與 swagger 假設不符"
+        ) from exc
+
+
 def _get_json(url: str, *, fetcher, token: str) -> dict:
     """帶 bearer token 抓 JSON。429（額度用完）翻成看得懂的訊息再拋。
 
@@ -78,6 +90,8 @@ def fetch_cert(cert_number: str, *, fetcher, token: str) -> dict:
         raise CensusParseError(
             f"cert {cert_number} 查不到 SpecID——編號打錯、或 API 形狀改了"
             f"（回應 keys：{sorted(data)}）")
+    # 呼叫端會拿 SpecID 去組 URL，這裡就把型別釘死，壞值走同一條解析失敗路徑
+    cert["SpecID"] = _as_int(cert["SpecID"], what=f"cert {cert_number} 的 SpecID")
     return cert
 
 
@@ -94,13 +108,13 @@ def _counts_from_pop(pop: dict) -> dict[str, int]:
     """PSAPop → ARS census 同形的 {級別: 張數}。key 例：AU / 1 / 1Q / 1.5 / 10。"""
     counts: dict[str, int] = {}
     if "Auth" in pop:
-        counts["AU"] = int(pop.get("Auth") or 0)
+        counts["AU"] = _as_int(pop.get("Auth") or 0, what="PSAPop.Auth")
     for key, val in pop.items():
         m = _GRADE_KEY_RE.match(key)
         if not m:
             continue
         label = m.group(1) + (".5" if m.group(2) else "") + ("Q" if m.group(3) else "")
-        counts[label] = int(val or 0)
+        counts[label] = _as_int(val or 0, what=f"PSAPop.{key}")
     if not any(_GRADE_KEY_RE.match(k) for k in pop):
         raise CensusParseError(
             f"PSAPop 裡沒有任何 GradeN 欄位——API 形狀可能改了（keys：{sorted(pop)}）")
@@ -116,5 +130,6 @@ def fetch_spec_population(spec_id: int, *, fetcher, token: str
         raise CensusParseError(
             f"spec {spec_id} 的回應沒有 PSAPop——API 形狀可能改了（keys：{sorted(data)}）")
     total = pop.get("Total")
-    return _counts_from_pop(pop), (int(total) if total is not None else None), \
-        str(data.get("Description") or "")
+    return (_counts_from_pop(pop),
+            _as_int(total, what="PSAPop.Total") if total is not None else None,
+            str(data.get("Description") or ""))
