@@ -429,14 +429,14 @@ test_add_list_report_remove_roundtrip`（~1105 行）斷言 PSA 會印「PSA 的
 PSA_API_TOKEN=
 ```
 
-- [ ] **Step 1:** 改 CLI／web／.env.example（此 task 無新單元測試；行為已在 Task 3 蓋住，
+- [x] **Step 1:** 改 CLI／web／.env.example（此 task 無新單元測試；行為已在 Task 3 蓋住，
   CLI 只是傳參。若 `tests/test_card_snipe_web.py` 有打 add 端點的測試，跑一次確認沒壞）
 - [ ] **Step 2: 驗收（主線程親跑）**：
   - `.venv/bin/ygo-sniper snipe add --help` 與 `snipe report --help` 看得到 `--psa-cert`
   - `.venv/bin/ygo-sniper snipe report 5 --refresh-census`（**不給 cert、不設 token**）→
     輸出教你 `--psa-cert` 與 token 註冊，**不再是**「未支援」
   - `make test` 全綠
-- [ ] **Step 3: Commit** `feat(cli): snipe --psa-cert——PSA 存世量入口＋dossier 文案`
+- [x] **Step 3: Commit** `feat(cli): snipe --psa-cert——PSA 存世量入口＋dossier 文案`
 
 ---
 

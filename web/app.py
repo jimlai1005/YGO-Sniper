@@ -1099,6 +1099,7 @@ class SnipeAddRequest(BaseModel):
     census_url: str = ""
     evidence_urls: list[str] = []
     note: str = ""
+    psa_cert: str = ""
     #: 預設登錄當下就挖市場成交檔案（那是檔案的主要內容——我們自己的庫只有
     #: 181 天且是碰巧掃到的）。測試傳 False 免網路。
     mine: bool = True
@@ -1177,6 +1178,7 @@ def snipe_add_api(body: SnipeAddRequest):
                 name_en=body.name_en, code=body.code, census_url=body.census_url,
                 evidence_urls=body.evidence_urls, note=body.note,
                 sources=build_sources(cfg, fetcher) if body.mine else None,
+                psa_cert=body.psa_cert,
             )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

@@ -1616,9 +1616,15 @@ def _print_dossier(store: Store, watch_id: int) -> None:
     )
     if d.census:
         parts = "、".join(f"{k}: {v} 張" for k, v in d.census.items() if v)
-        console.print(f"存世量（ARS census）：{parts}（鑑定總數 {d.census_total}）")
+        console.print(f"存世量（{w['grader']} census）：{parts}（鑑定總數 {d.census_total}）")
     else:
-        console.print("存世量：未抓到（snipe report --refresh-census 重試）")
+        if w["grader"] == "PSA":
+            console.print(
+                "存世量：未抓到（snipe report --refresh-census --psa-cert "
+                "<卡磚憑證編號> 重試；需 .env 設 PSA_API_TOKEN）"
+            )
+        else:
+            console.print("存世量：未抓到（snipe report --refresh-census 重試）")
     if d.evidence:
         console.print("\n[bold]實證紀錄（你提供的結標頁快照）[/bold]")
         for e in d.evidence:
@@ -1702,11 +1708,17 @@ def snipe_add(
     grade: str = typer.Option(..., help="目標分數，如 10 或 10+（10+ 與 10 比對同分）"),
     name_en: str = typer.Option("", help="英文卡名（主檔有就自動補）"),
     code: str = typer.Option("", help="卡號，如 P4-06"),
-    census_url: str = typer.Option("", help="ARS census 頁 URL；ARS 不給會用卡名自動搜"),
+    census_url: str = typer.Option(
+        "", help="ARS census 頁 URL 或 PSA pop API URL；ARS 不給會用卡名自動搜"
+    ),
     evidence: list[str] | None = _EVIDENCE_OPTION,
     pin_seller: str = typer.Option("", help="順手釘選賣家（貼賣家頁 URL 或 site:id）"),
     no_mine: bool = typer.Option(False, "--no-mine", help="不挖市場成交檔案（離線登錄）"),
     note: str = typer.Option("", help="備註"),
+    psa_cert: str = typer.Option(
+        "", "--psa-cert",
+        help="PSA 卡磚憑證編號（PSA 的 census 用它換 SpecID；需 .env 設 PSA_API_TOKEN）",
+    ),
 ):
     """登錄狙擊卡 → 挖市場成交檔案、抓 census、抓證據頁快照、輸出完整檔案。"""
     from .card_snipe import add_card_watch
@@ -1723,6 +1735,7 @@ def snipe_add(
                 name_en=name_en, code=code, census_url=census_url,
                 evidence_urls=list(evidence or []), note=note,
                 sources=None if no_mine else build_sources(cfg, fetcher),
+                psa_cert=psa_cert,
             )
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -1787,8 +1800,14 @@ def snipe_list():
 @snipe_app.command("report")
 def snipe_report(
     watch_id: int = typer.Argument(..., help="狙擊編號（snipe list 的 #）"),
-    refresh_census: bool = typer.Option(False, "--refresh-census",
-                                        help="重抓 ARS 鑑定量"),
+    refresh_census: bool = typer.Option(
+        False, "--refresh-census",
+        help="重抓鑑定量（ARS 用卡名自動搜；PSA 配 --psa-cert）",
+    ),
+    psa_cert: str = typer.Option(
+        "", "--psa-cert",
+        help="PSA 卡磚憑證編號（PSA 的 census 用它換 SpecID；需 .env 設 PSA_API_TOKEN）",
+    ),
 ):
     """單張狙擊卡的完整檔案：census、實證、本地歷史、命中帳、等待建議。"""
     from .card_snipe import refresh_watch_census
@@ -1802,7 +1821,7 @@ def snipe_report(
         raise typer.Exit(1)
     if refresh_census:
         with CachedFetcher(cfg) as fetcher:
-            for line in refresh_watch_census(store, fetcher, w):
+            for line in refresh_watch_census(store, fetcher, w, psa_cert=psa_cert):
                 console.print(line)
     _print_dossier(store, watch_id)
 
