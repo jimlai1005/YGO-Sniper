@@ -96,16 +96,17 @@ def _val_row(key: str, **over):
     return row
 
 
-def test_signals_reads_cache_and_never_builds_valuator(client):
-    """/api/signals 只讀快取。_shared_valuator 被打到就代表又在現算。"""
+def test_signals_reads_cache_and_never_builds_valuator(client, monkeypatch):
+    """/api/signals 只讀快取。`build_valuator` 被打到就代表又在現算——
+    守在源頭而不是 web 端的包裝函式（那個包裝已在 2026-08-24 確認為死碼並移除）。"""
     tc, app_mod = client
     app_mod.store.upsert_signal(_signal_for("buyee_yahoo:a1"))
     app_mod.store.upsert_valuations([_val_row("buyee_yahoo:a1")])
 
-    def _boom():
+    def _boom(*a, **kw):
         raise AssertionError("/api/signals 不准建 valuator")
 
-    app_mod._shared_valuator = _boom
+    monkeypatch.setattr("ygo_sniper.valuation.build_valuator", _boom)
     res = tc.get("/api/signals?state=all&limit=10").json()
     it = res["items"][0]
     assert it["p_worth_buying"] == 0.42

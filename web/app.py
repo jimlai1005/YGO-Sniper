@@ -79,20 +79,6 @@ def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
 
 
-# ---------------------------------------------------------------------------
-#: 估價模型跨請求共用。實測建一次 0.14 秒、193 列估價 0.08 秒——不快取的話
-#: 每次都重付一次。失效判準是 **comps 的筆數**：comps 長了才有新的成交樣本，
-#: 模型才會變。用「筆數」而不是時間戳，因為時間到了資料沒變等於白重建，
-#: 資料變了時間沒到又會給出過期的機率（工程原則 1：判準要對著真正會變的
-#: 那個東西）。
-#: 2026-08-24：`/api/signals` 已改讀 `signal_valuations` 快取（Task 4），
-#: 這顆 valuator 只服務 `/api/bundle`、`/api/appraise`、`/api/search`
-#: 這些單發互動端點——湊單張數、鑑定單一 URL 都是使用者當下的操作，
-#: 沒有辦法預先算好落庫。
-_valuator = None
-_valuator_key: int | None = None
-_valuator_lock = threading.Lock()
-
 
 def _with_overhead(payload: dict) -> dict:
     """讓 payload 裡每一條 route 都帶著 `overhead_twd`／`overhead_ratio`。
@@ -117,18 +103,6 @@ def _route_dict(route: dict) -> dict:
         return RouteQuote.from_dict(route).to_dict()
     except (TypeError, KeyError):
         return route  # 欄位殘缺的舊列照原樣送出，不要讓一列壞掉的 payload 打掉整個清單
-
-
-def _shared_valuator():
-    from ygo_sniper.valuation import build_valuator
-
-    global _valuator, _valuator_key
-    comps_n = int(store.stats().get("comps") or 0)
-    with _valuator_lock:
-        if _valuator is None or _valuator_key != comps_n:
-            _valuator = build_valuator(cfg, store, _shared_card_index())
-            _valuator_key = comps_n
-        return _valuator
 
 
 @app.get("/api/signals")
@@ -685,8 +659,8 @@ async def api_search(body: SearchRequest):
 # 賣家（Seller Alpha）：排行榜、監控名單、drill-down、一鍵加入／移出
 # ---------------------------------------------------------------------------
 #: 全量分析要掃 listing_obs ＋ comps（實測本庫約 2.6k 列、0.3 秒）並建卡名索引。
-#: 切分頁／點 drill-down 每次重算會讓畫面卡住，所以跟 `_shared_valuator` 同一套
-#: 快取策略：失效判準是**資料真的變了**（comps 筆數 ＋ listing_obs 筆數），
+#: 切分頁／點 drill-down 每次重算會讓畫面卡住，所以跨請求快取：
+#: 失效判準是**資料真的變了**（comps 筆數 ＋ listing_obs 筆數），
 #: 不是時間到了（時間到而資料沒變等於白重算，資料變了時間沒到又會給過期的排行）。
 _alpha_report_cache = None
 _alpha_report_key: tuple[int, int] | None = None
