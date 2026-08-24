@@ -92,3 +92,41 @@ def test_per_row_failure_writes_nulls_and_error_meta(store, monkeypatch):
     assert rows["buyee_yahoo:boom"]["val_p_worth_buying"] is None   # 誠實留白
     assert rows["buyee_yahoo:ok"]["val_p_worth_buying"] == 0.4      # 好的照寫
     assert "估價失敗" in store.get_meta(vc.VALUATION_CACHE_ERROR_KEY)
+
+
+def test_pipeline_hook_swallows_failure_but_writes_meta(store, monkeypatch):
+    """快取炸掉不准毀掉掃描，但病名必須落 meta（dashboard 橫條要看得到）。"""
+    from ygo_sniper.pipeline import Pipeline
+
+    stub = SimpleNamespace(cfg=None, store=store, fx=None, valuator=lambda: object())
+    monkeypatch.setattr(
+        "ygo_sniper.valuation_cache.refresh_valuation_cache",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("model 炸了")),
+    )
+    result: dict = {}
+    Pipeline._refresh_valuation_cache(stub, result)   # 不能 raise
+    assert "model 炸了" in store.get_meta(vc.VALUATION_CACHE_ERROR_KEY)
+    assert "model 炸了" in result["valuation_cache_error"]
+
+
+def test_pipeline_hook_success_records_count(store, monkeypatch):
+    from ygo_sniper.pipeline import Pipeline
+
+    stub = SimpleNamespace(cfg=None, store=store, fx=None, valuator=lambda: object())
+    monkeypatch.setattr(
+        "ygo_sniper.valuation_cache.refresh_valuation_cache",
+        lambda *a, **kw: {"rows": 5, "errors": 0, "seconds": 0.1, "comps_n": 42},
+    )
+    result: dict = {}
+    Pipeline._refresh_valuation_cache(stub, result)
+    assert result["valuation_cached"] == 5
+
+
+def test_scan_source_contains_hook_call():
+    """scan() 收尾必須掛快取重算。用原始碼釘：dry_run 守衛＋呼叫都在。"""
+    import inspect
+    from ygo_sniper.pipeline import Pipeline
+
+    src = inspect.getsource(Pipeline.scan)
+    assert "_refresh_valuation_cache" in src
+    assert "if not dry_run" in src

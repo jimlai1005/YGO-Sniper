@@ -867,6 +867,8 @@ class Pipeline:
             # `_run_notifications`（本輪崩潰），那則告警也不會跟著丟失——
             # 下一輪成功收尾時會把它撿回來一起送（Fix 4）。
             raise
+        if not dry_run:
+            self._refresh_valuation_cache(result)
         self.store.finish_scan(
             started,
             result={
@@ -879,6 +881,32 @@ class Pipeline:
         # except 分支已經 raise 出去，這行不會執行，基準保持舊值。
         self._finish_schedule_state(dry_run=dry_run, watch_only=watch_only, high_band=high_band)
         return result
+
+    def _refresh_valuation_cache(self, result: dict) -> None:
+        """掃描收尾的估價快取重算（2026-08-24 plan，estimate 快取）。
+
+        壞掉**不可以**毀掉整輪掃描——推播與排程基準都在後面；但也絕不靜默
+        （CLAUDE.md 第五節）：console 大聲印＋寫 meta，dashboard 的
+        valuation_error 橫條會把病名顯示給使用者。
+
+        重用 `self.valuator()`（若這一輪掃到競標標的，_scan 已經建過一份、
+        快取在 `self._valuator`；沒有的話這裡第一次呼叫才會建）——不建第二份
+        valuator，維持 comps 之後才建的既有不變式（見 `valuator()` docstring）。
+        """
+        from .valuation_cache import VALUATION_CACHE_ERROR_KEY, refresh_valuation_cache
+
+        try:
+            summary = refresh_valuation_cache(self.cfg, self.store, self.fx, valuator=self.valuator())
+            result["valuation_cached"] = summary["rows"]
+            print(
+                f"[value-cache] {summary['rows']} 列 {summary['seconds']:.1f}s"
+                f"（{summary['errors']} 列失敗，comps={summary['comps_n']}）"
+            )
+        except Exception as exc:  # noqa: BLE001 - 大聲落 meta 後放行，理由見 docstring
+            msg = f"{type(exc).__name__}: {exc}"
+            print(f"[value-cache] 快取重算失敗：{msg}")
+            self.store.set_meta(VALUATION_CACHE_ERROR_KEY, msg)
+            result["valuation_cache_error"] = msg
 
     def _update_schedule_state(
         self, *, dry_run: bool, watch_only: bool, high_band: bool = False

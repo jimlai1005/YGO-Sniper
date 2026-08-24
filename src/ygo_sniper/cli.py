@@ -857,6 +857,27 @@ def backfill_sale_kind(
 
 
 @app.command()
+def revalue():
+    """手動重算估價快取（首次部署回填、或想立刻反映最新 comps 時用）。
+
+    正常情況不需要跑：每一輪掃描（daily／daily-high／dashboard 按鈕）
+    收尾都會自動重算（`Pipeline._refresh_valuation_cache`）。這裡是給
+    「還沒跑過掃描、dashboard 想看到 P 值」或「comps 剛回填完想立刻反映」
+    這兩種情境的手動出口。
+    """
+    from .valuation_cache import refresh_valuation_cache
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    fx = FxRates(cfg)
+    summary = refresh_valuation_cache(cfg, store, fx)
+    console.print(
+        f"[green]{summary['rows']} 列 {summary['seconds']:.1f}s[/green]"
+        f"（{summary['errors']} 列失敗，comps={summary['comps_n']}）"
+    )
+
+
+@app.command()
 def dedupe_comps(
     dry_run: bool = typer.Option(False, help="只算不寫，也不受先前的標記影響"),
 ):

@@ -355,6 +355,7 @@ ygo-sniper snipe mine [<id>]   # 重挖市場成交檔案（省略 id ＝ 全部
 ygo-sniper snipe remove <id>   # 移出（軟刪除，成交檔案與命中帳留著）
 ygo-sniper coverage-groups     # 分群覆蓋率（調門檻前必跑）
 ygo-sniper backfill-sale-kind  # 回填 comps 成交型態（競標結標／定價成交），冪等
+ygo-sniper revalue             # 手動重算估價快取（掃描收尾會自動跑；首次部署回填用）
 ygo-sniper corpus-diff         # 全語料雙向比對（改過濾／解析規則前後必跑，見第一節）
 ygo-sniper venue-study         # 平台價差研究
 ygo-sniper revive-rate         # 離場判定的復活率（調 gone_confidence 前必跑）
