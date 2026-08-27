@@ -267,7 +267,7 @@ JSON：這一輪的 exit code、結束時間、失敗通知有沒有送達。下
 
 ## 六、測試路徑必須等於生產路徑
 
-兩次出事：
+三次出事：
 
 1. **fixture 用 Playwright 抓（JS 執行完），生產用 httpx 抓（JS 不跑）**
    → parser 在測試裡完美運作，線上只抓得到 `loading-spinner.gif`。
@@ -276,9 +276,17 @@ JSON：這一輪的 exit code、結束時間、失敗通知有沒有送達。下
 2. **`serve` 指令從來沒被端到端跑過**：`uvicorn.run("web.app:app")` 需要
    `web` 在 `sys.path`，但 console script 的 `sys.path[0]` 是 `.venv/bin`。
    我驗證時手動加了 `sys.path.insert(0,'.')`，那行正好掩蓋了真正的問題。
+3. **固定日期的 fixture × 真實牆上時鐘 = 定時炸彈**（2026-08-26 引爆）：
+   eBay 實抓 fixture 上架日固定在 2026-07-27 又開著議價，scoring 的議價
+   時效拿 `datetime.now()` 去比——fixture 被日曆養到滿 30 天的那一天，
+   `OFFER_CHANCE` 自己冒出來，測試無人改動開始紅（git 可證：測試、fixture、
+   邏輯自 08-05 之後零改動）。修法：`evaluate(now=...)` 注入時間，測試釘
+   `listed_at + 60 天`。**時效類判斷（幾天前、多久沒動）一律要能注入
+   「現在」**；順帶暴露的產品缺口（不寄台灣的標的議價變陳就掛 🔥）已在
+   同一修裡結構性壓掉（scoring.py 的 TRIGGER_FLAGS 剔除，keep 閘門前單一出口）。
 
 **規則**：驗證「使用者實際會打的那個指令」，不是「元件會不會動」。
-fixture 一律用生產路徑抓取。
+fixture 一律用生產路徑抓取；比對「經過多久」的邏輯要能注入時鐘。
 
 ---
 
@@ -320,7 +328,7 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 1855 passed，2026-08-22 實測）
+make test                      # pytest（目前 1932 passed，2026-08-28 實測）
                                #   ⚠️ 別自己再加 `-q`：pyproject 的 addopts 已有一個，
                                #   疊成 `-qq` 會**吃掉最後那行 `N passed`**，而 exit code
                                #   仍是 0——「測試沒跑」與「跑了但看不到綠字」外顯一樣。
