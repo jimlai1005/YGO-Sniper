@@ -302,17 +302,34 @@ def test_evaluate_gives_ebay_auction_a_native_ceiling(cfg, fx):
 
 
 def test_ships_to_tw_false_is_kept_flagged_and_not_bid_worthy(cfg, fx):
-    """D 的掃描端合約：不丟掉、標旗標、不給上限（→ 也進不了推播規則 1）。"""
+    """D 的掃描端合約：不丟掉、標旗標、不給上限（→ 也進不了推播規則 1）。
+
+    `now` 固定釘在上架 60 天後——fixture 開了 BEST_OFFER，60 天必然跨過
+    `offer_stale_days`，OFFER_CHANCE 的成立條件被**刻意打開**，據此釘住
+    「ships_to_tw=False 壓掉觸發類旗標」的守衛。不注入 now 的話這個測試
+    比的是真實牆上時鐘：fixture 上架日固定（2026-07-27），滿 30 天的那一天
+    （2026-08-26）OFFER_CHANCE 自己冒出來，測試就開始紅——實際發生過。
+    """
+    from datetime import timedelta
+
     from ygo_sniper.scoring import evaluate, is_triggered
 
     lst = listing_of("item_auction")
     lst.ships_to_tw = False
-    sig = evaluate(lst, _card(), _comps(), cfg, fx, keep_all=True, estimate=est(lo=20000))
+    assert lst.best_offer_enabled and lst.listed_at is not None, (
+        "fixture 前提變了：這個測試需要一筆開議價、有上架日的標的"
+    )
+    stale_now = lst.listed_at + timedelta(days=60)
+    sig = evaluate(lst, _card(), _comps(), cfg, fx, keep_all=True,
+                   estimate=est(lo=20000), now=stale_now)
     assert sig is not None, "ships_to_tw=False 的標的不可以被丟掉"
     assert Flag.US_SHIP_OPTION in sig.flags
     assert "91762" in sig.reason
     assert sig.bid is not None and sig.bid.ok is False
     assert Flag.BID_WORTH not in sig.flags
+    assert Flag.OFFER_CHANCE not in sig.flags, (
+        "議價時效成立也一樣：不寄台灣的標的不掛觸發類旗標"
+    )
     assert not is_triggered(sig.flags), "US 路徑只是資訊，不是出手理由"
 
 

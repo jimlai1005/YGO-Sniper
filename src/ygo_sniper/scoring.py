@@ -151,6 +151,7 @@ def evaluate(
     bundle_size: int | None = None,
     keep_all: bool = False,
     estimate: Any = None,
+    now: datetime | None = None,
 ) -> Signal | None:
     """把一筆候選變成 Signal，或 None（＝不值得留）。
 
@@ -248,7 +249,10 @@ def evaluate(
     if listing.best_offer_enabled:
         stale_days = None
         if listing.listed_at:
-            stale_days = (datetime.now(UTC) - listing.listed_at).days
+            # `now` 可注入：時效判斷比的是「上架多久」，拿真實牆上時鐘去比
+            # 固定日期的測試 fixture，測試會在 fixture 滿 30 天的那一天開始紅
+            # （2026-08-26 test_bidding_ebay 實際發生過）。生產路徑不傳，行為不變。
+            stale_days = ((now or datetime.now(UTC)) - listing.listed_at).days
         if stale_days is None or stale_days >= int(sc["offer_stale_days"]):
             flags.append(Flag.OFFER_CHANCE)
             age = f"上架 {stale_days} 天" if stale_days is not None else "接受議價"
@@ -278,6 +282,15 @@ def evaluate(
             flags.append(Flag.BID_NO_CEILING)
         elif ceiling.is_actionable(listing.price):
             flags.append(Flag.BID_WORTH)
+
+    # 賣家明確不寄台灣（ships_to_tw=False）：這筆「僅供人工評估」，觸發類
+    # 旗標一律壓掉——US 後路不是出手理由（美→台轉運成本未建模，FREE_CARD／
+    # DISCOUNT 引用的到手成本本來就少算了一段運費）。在單一出口整組剔除而
+    # 不是各分支自己判 ships_to_tw：靠每個分支記得判的話，下一個新增的
+    # trigger 旗標一定會漏（工程原則 5）。reason 與資訊旗標（US_SHIP_OPTION、
+    # OFFER_CHANCE 的文字說明）保留——dashboard 要看得到這條後路。
+    if listing.ships_to_tw is False:
+        flags = [f for f in flags if f not in TRIGGER_FLAGS]
 
     # 沒有任何值得看的理由就不要推播（keep_all 時改成留下來讓你自己看）
     if not keep_all and not is_triggered(flags):
