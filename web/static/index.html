@@ -691,6 +691,19 @@ const FLAG_META = {
   us_ship_option:   ["🇺🇸 可寄美國地址", "warn"],
 };
 
+/* 卡片「到手 · ○○」顯示的賣場名。key 是 signals.site，不是 route——
+   三個 Buyee 賣場共用同一條 buyee_consolidated 成本路徑，顯示 route
+   會讓 Auction／Mercari／PayPay 長得一模一樣。site 不在表裡時退回
+   顯示 route 原字串，新 site 上線不會讓這一格變空白。 */
+const SITE_VENUE = {
+  buyee_yahoo:   "Auction",
+  buyee_mercari: "Mercari",
+  buyee_paypay:  "PayPay Fleamarket",
+  mercari_tw:    "Mercari 台灣",
+  ruten:         "露天",
+  ebay:          "eBay",
+};
+
 /* ==== SIGNAL-FILTER-LOGIC:BEGIN ===================================== *
  * 「哪些標的會被隱藏」的純函式。不碰 DOM、不讀全域狀態，開關由參數傳進來
  * ——因為它被 tests/test_signal_filters.py 抽出來丟進 node 直接跑。
@@ -1033,7 +1046,7 @@ function card(it){
     ${shot(it.image_url, it.title)}
     <div class="body">
       <h3 class="title"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>${badge}${bucketChip(it)}${bandChip(it)}${xpBadge}${backBadge}${shelfAge(it)}</h3>
-      <div class="money">${nt(it.landed_twd)}<small>到手 · ${escapeHtml(it.route || "")}</small></div>
+      <div class="money">${nt(it.landed_twd)}<small>到手 · ${escapeHtml(SITE_VENUE[it.site] || it.route || "")}</small></div>
       <div class="cmp">${comps} · ${pWorth(it)}</div>
       <div class="cmp">${escapeHtml(it.grader || "")} ${it.grade ?? ""} ${escapeHtml(it.set_code || "")}</div>
       ${overheadBar(it)}

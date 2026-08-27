@@ -55,6 +55,28 @@ _FLAG_ICON = {
     "us_ship_option": "🇺🇸 可寄美國地址",
 }
 
+#: 訊息裡「via ○○」的賣場名。key 是 `signals.site`，**不是** route——
+#: 三個 Buyee 賣場共用同一條 buyee_consolidated 成本路徑，印 route 會讓
+#: Auction／Mercari／PayPay 長得一模一樣。與 `valuation.VENUE_LABEL` 是
+#: 兩份刻意分開的表：那份標的是**成交價的市場結構**（拍賣出清 vs 零售定價，
+#: 括號是重點），這份只回答「這筆要去哪個賣場買」。
+#: dashboard 卡片有一份同義的 JS 對照表（web/static/index.html 的
+#: SITE_VENUE），由 tests/test_notify_format.py 釘住兩份不許漂移。
+SITE_VENUE = {
+    "buyee_yahoo": "Auction",
+    "buyee_mercari": "Mercari",
+    "buyee_paypay": "PayPay Fleamarket",
+    "mercari_tw": "Mercari 台灣",
+    "ruten": "露天",
+    "ebay": "eBay",
+}
+
+
+def _venue_of(row: dict) -> str:
+    """site 缺席或不在表裡時退回 route 原字串——寧可醜也不要空一格
+    （空一格與「這筆沒有路徑」外顯相同，見 CLAUDE.md 第五節）。"""
+    return SITE_VENUE.get(str(row.get("site") or "")) or str(row.get("route") or "")
+
 
 def _interval_setting(notify: dict | None) -> float:
     """`notify.send_interval_seconds`。非法值印警告並退回預設（不靜默）：
@@ -166,7 +188,7 @@ def format_signal(row: dict, dashboard_url: str, valuation=None) -> str:
     lines = [
         f"<b>{_esc(title)}</b>",
         f"到手 <b>NT${row['landed_twd']:,.0f}</b>"
-        f"（{row['price_native']:,.0f} {row['currency']} via {row['route']}）",
+        f"（{row['price_native']:,.0f} {row['currency']} via {_esc(_venue_of(row))}）",
     ]
 
     if valuation is not None:
@@ -305,8 +327,7 @@ def format_high_p(match, dashboard_url: str) -> str:
 
     row, est = match.row, match.estimate
     title = textwrap.shorten(row["title"], width=64, placeholder="…")
-    payload = _payload_of(row)
-    route_label = ((payload.get("best_route") or {}).get("label")) or row["route"]
+    route_label = _venue_of(row)
     venue_tail = (
         f" ｜ {venue_label(est.venue)} 水準" if est.venue_adjusted
         else " ｜ ⚠️ 混合平台水準（未校正）"
@@ -357,8 +378,8 @@ def _seller_head(match) -> list[str]:
 def _landed_line(row: dict) -> str:
     return (
         f"到手 <b>NT${row['landed_twd']:,.0f}</b>"
-        + (f"（{row['price_native']:,.0f} {row['currency']} via {row['route']}）"
-           if row.get("price_native") and row.get("currency") and row.get("route") else "")
+        + (f"（{row['price_native']:,.0f} {row['currency']} via {_esc(_venue_of(row))}）"
+           if row.get("price_native") and row.get("currency") and _venue_of(row) else "")
     )
 
 
@@ -540,7 +561,7 @@ def format_high_band(match, dashboard_url: str) -> str:
         f"{match.price_band_label} <b>{_esc(title)}</b>",
         f"到手 <b>NT${row['landed_twd']:,.0f}</b>"
         f"（{row.get('price_native', 0):,.0f} {row.get('currency', '')} via "
-        f"{_esc(str(row.get('route') or ''))}）",
+        f"{_esc(_venue_of(row))}）",
         f"估值公允價 NT${match.fair_twd:,.0f}（標價市價比 {match.price_ratio:.0%}）",
         _esc(str(match.high_band_source_note or "")),
         f'<a href="{row["url"]}">看標的</a> ｜ <a href="{dashboard_url}">開 dashboard</a>',

@@ -75,3 +75,43 @@ def test_no_comps_says_so_explicitly():
     msg = format_signal(_row(comps_median=None, comps_n=0, payload="{}"), DASH)
     assert "無足夠樣本" in msg
     assert "只根據到手成本" in msg
+
+
+# --- via ○○：賣場名，不是 route key ---------------------------------------
+
+
+def test_via_shows_venue_name_not_route_key():
+    """三個 Buyee 賣場共用 buyee_consolidated，印 route 分不出是哪個賣場。
+
+    使用者要的是「這筆要去哪裡買」——Auction／Mercari／PayPay Fleamarket。
+    """
+    msg = format_signal(_row(site="buyee_paypay"), DASH)
+    assert "via PayPay Fleamarket" in msg
+    assert "buyee_consolidated" not in msg
+
+
+def test_via_falls_back_to_route_when_site_missing_or_unknown():
+    """site 缺席（舊資料）或不認得（新賣場上線）時退回 route 原字串——
+    寧可醜也不要空一格：空一格與「這筆沒有路徑」外顯相同。"""
+    assert "via buyee_consolidated" in format_signal(_row(), DASH)
+    assert "via buyee_consolidated" in format_signal(_row(site="novel_site"), DASH)
+
+
+def test_site_venue_map_matches_dashboard_js():
+    """Python（Telegram）與 JS（dashboard 卡片）各有一份 SITE_VENUE。
+
+    兩份漂移的症狀是「手機上叫 Auction、網頁上叫 buyee_yahoo」——不會壞，
+    只會無聲地退化，所以要釘住。JS 那份直接從 index.html 抽出來比對。
+    """
+    import re
+    from pathlib import Path
+
+    from ygo_sniper.notify import SITE_VENUE
+
+    html = (Path(__file__).resolve().parents[1] / "web" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    m = re.search(r"const SITE_VENUE = \{(.*?)\};", html, re.S)
+    assert m, "index.html 找不到 const SITE_VENUE——改名或移除時要同步改這裡"
+    js_map = dict(re.findall(r'(\w+):\s*"([^"]+)"', m.group(1)))
+    assert js_map == SITE_VENUE
