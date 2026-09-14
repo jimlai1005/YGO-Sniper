@@ -1979,12 +1979,13 @@ async function loadStats(){
     if (!loc) { el.innerHTML = "漂移 <b>未算</b>"; }
     else {
       const by = Object.fromEntries((loc.latest || []).map(p => [p.band, p]));
-      const fmt = b => (by[b] && by[b].ratio != null) ? `×${by[b].ratio.toFixed(2)}` : "—";
+      const fmt = b => (by[b] && by[b].ratio != null)
+        ? `×${by[b].ratio.toFixed(2)}<small style="opacity:.7">(n=${by[b].n_pairs})</small>` : "—";
       const alert = (loc.alert_bands || []).length > 0;
       el.innerHTML = `漂移 <b>全體 ${fmt("ALL")} ｜ PSA10 ${fmt("PSA10")} ｜ PSA9 ${fmt("PSA9")}</b>`
         + (alert ? ` <span style="color:var(--bad,#c33)">📉 ${loc.alert_bands.join(", ")}</span>` : "");
     }
-  } catch (e) { /* 漂移 pill 壞了不能影響其他統計 */ }
+  } catch (e) { console.warn("market-drift pill", e); }
 }
 
 /* ------------------------------------------------------------ 掃描狀態
