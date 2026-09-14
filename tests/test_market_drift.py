@@ -510,9 +510,36 @@ class TestDailyCommandWiring:
         monkeypatch.setattr(cli_mod, "_print_scan", lambda result: None)
         monkeypatch.setattr(cli_mod, "_mine_snipes_daily", lambda pipe: None)
         monkeypatch.setattr(cli_mod, "_run_notifications", lambda pipe, result, band=None: 0)
+        monkeypatch.setattr(cli_mod, "_backfill_comps_daily", lambda pipe, **kw: seen.setdefault("backfill_pipe", pipe))
         monkeypatch.setattr(cli_mod, "_refresh_market_drift_daily",
                             lambda pipe, **kw: seen.setdefault("drift_pipe", pipe))
         result = CliRunner().invoke(cli_mod.app, ["daily", "--no-notify"])
         assert result.exit_code == 0, result.output
+        assert seen.get("backfill_pipe") is seen["pipe"]
         assert seen.get("drift_pipe") is seen["pipe"]
         assert seen.get("closed") is True
+
+
+class TestDailyBackfillHook:
+    def test_daily_calls_backfill_slice_once_per_day(self, store, monkeypatch):
+        calls = []
+        monkeypatch.setattr(cli_mod, "run_backfill", lambda **kw: calls.append(kw) or type("R", (), {
+            "summary": lambda self: "ok", "blocked": False, "problems": [], "cards_done": 0})())
+        monkeypatch.setattr(cli_mod, "known_card_names", lambda store, index: ["a", "b"])
+        pipe = _Pipe(store)
+        pipe.cfg.market_drift.update({"backfill_daily_limit": 5, "backfill_cooldown_days": 21})
+        pipe.sources = {}
+        pipe.comps = object()
+        cli_mod._backfill_comps_daily(pipe, now=datetime(2026, 9, 14, tzinfo=UTC))
+        cli_mod._backfill_comps_daily(pipe, now=datetime(2026, 9, 14, tzinfo=UTC))
+        assert len(calls) == 1
+        assert calls[0]["limit"] == 5 and calls[0]["cooldown_days"] == 21
+        assert calls[0]["pages"] == {"yahoo_closed": 1, "paypay_direct": 1}
+
+    def test_daily_backfill_disabled_by_zero_limit(self, store, monkeypatch):
+        calls = []
+        monkeypatch.setattr(cli_mod, "run_backfill", lambda **kw: calls.append(kw))
+        pipe = _Pipe(store)
+        pipe.cfg.market_drift.update({"backfill_daily_limit": 0})
+        cli_mod._backfill_comps_daily(pipe, now=datetime(2026, 9, 14, tzinfo=UTC))
+        assert calls == []

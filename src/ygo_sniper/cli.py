@@ -67,6 +67,7 @@ def daily(
         result = pipe.scan(skip_comps=skip_comps)
         _print_scan(result)
         _mine_snipes_daily(pipe)
+        _backfill_comps_daily(pipe)
         _refresh_market_drift_daily(pipe)
         if not no_notify:
             _run_notifications(pipe, result, band="std")
@@ -179,6 +180,42 @@ def _mine_snipes_daily(pipe) -> None:
     # 只有全部成功才記帳：有管道被擋就讓下一輪再試（否則今天就再也不挖了）
     if not problems:
         pipe.store.set_meta(_SNIPE_MINE_META_KEY, today)
+
+
+_BACKFILL_DATE_KEY = "comps_backfill_date"
+
+
+def _backfill_comps_daily(pipe, *, now: "datetime | None" = None) -> None:
+    """每天輪一小片行情回補（預設 30 張卡、只翻第 1 頁），讓漂移指數與估價的 comps 保鮮。
+    **失敗只警告，絕不影響掃描與推播；BLOCKED 當天就停。** `backfill_daily_limit: 0` 關閉。"""
+    from datetime import UTC, datetime
+
+    md = dict(getattr(pipe.cfg, "market_drift", None) or {})
+    limit = int(md.get("backfill_daily_limit", 30))
+    if limit <= 0:
+        return
+    now = now or datetime.now(UTC)
+    today = now.date().isoformat()
+    if pipe.store.get_meta(_BACKFILL_DATE_KEY) == today:
+        return
+    try:
+        from .cards import CardIndex
+
+        index = getattr(pipe, "index", None) or CardIndex.load()
+        names = known_card_names(pipe.store, index)
+        report = run_backfill(
+            store=pipe.store, sources=pipe.sources, comps=pipe.comps, names=names,
+            cooldown_days=float(md.get("backfill_cooldown_days", 21)), limit=limit,
+            pages={"yahoo_closed": 1, "paypay_direct": 1},
+            log=lambda s: None,
+        )
+    except Exception as exc:  # noqa: BLE001 - 回補失敗不能拖垮 daily，但要大聲
+        print(f"[warn] 行情回補失敗：{type(exc).__name__}: {exc}")
+        return
+    pipe.store.set_meta(_BACKFILL_DATE_KEY, today)
+    console.print(f"[dim]行情回補：{report.summary()}[/dim]")
+    for p in report.problems[:5]:
+        print(f"[warn] 行情回補 {p}")
 
 
 def _refresh_market_drift_daily(pipe, *, now: "datetime | None" = None) -> None:

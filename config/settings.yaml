@@ -403,6 +403,10 @@ market_drift:
   # 外部對照：yugioh-relief.com 的週次 PSA 浮雕指數（只涵蓋浮雕、只有 PSA/ARS，與本庫不同基準）。
   external_enabled: true
   external_url: "https://yugioh-relief.com/psa-market-daily-trends/"
+  # daily 每天輪一小片行情回補（只翻第 1 頁）：30 張 × 2 來源 ≈ 60 請求 ≈ 2-3 分鐘，
+  # 21 天冷卻 → 約 630 張卡一輪。0 = 關閉。首次全量回補用 `ygo-sniper comps-backfill`。
+  backfill_daily_limit: 30
+  backfill_cooldown_days: 21
 
 # ---------------------------------------------------------------------------
 # 抓取行為。請不要調快，我們是每小時看一次，不是壓測人家。
