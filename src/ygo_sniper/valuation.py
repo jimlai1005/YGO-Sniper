@@ -161,6 +161,7 @@ import math
 import random
 import statistics
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from .cards import CardIndex
@@ -264,6 +265,10 @@ class Params:
     rarity_premium_prior: dict[str, float] = field(default_factory=dict)
     #: 各平台的相對價格水準（任選一個平台當 1.0，實際只用比值）。
     venue_premium_prior: dict[str, float] = field(default_factory=dict)
+    #: 成交時間衰減的半衰期（天）。None ＝ 等權（與 2026-09 之前的行為逐位元相同）。
+    #: 只影響 predict_log 的池中位數與截距，不影響分數／稀有度／平台溢價曲線。
+    #: ⚠️ Mercari／部分 PayPay 的 sold_at 是入庫日，加權對它們量到的是「我們何時抓到」。
+    half_life_days: float | None = None
 
     @classmethod
     def from_config(cls, cfg: Any) -> Params:
@@ -285,6 +290,9 @@ class Params:
             venue_premium_prior={
                 str(k): float(x) for k, x in (v.get("venue_premium_prior") or {}).items()
             },
+            half_life_days=(
+                float(v["half_life_days"]) if v.get("half_life_days") not in (None, "", 0) else None
+            ),
         )
 
 
@@ -397,6 +405,51 @@ class Estimate:
 # ---------------------------------------------------------------------------
 def _median(xs: list[float]) -> float:
     return statistics.median(xs)
+
+
+def _wmedian(vals: list[float], weights: list[float]) -> float:
+    """加權中位數。**所有權重相等時直接回 `_median`**（等權路徑與舊行為逐位元相同）。
+    累積權重剛好落在一半時取相鄰兩值平均（與 statistics.median 對偶數 n 的精神一致）。"""
+    if not vals:
+        raise ValueError("_wmedian: 空樣本")
+    if len(set(weights)) == 1:
+        return _median(vals)
+    pairs = sorted(zip(vals, weights))
+    half = sum(w for _, w in pairs) / 2.0
+    acc = 0.0
+    for i, (v, w) in enumerate(pairs):
+        acc += w
+        if acc > half:
+            return v
+        if acc == half:
+            return (v + pairs[i + 1][0]) / 2.0 if i + 1 < len(pairs) else v
+    return pairs[-1][0]
+
+
+def _parse_obs_date(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        d = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo is not None else d.replace(tzinfo=UTC)
+
+
+def _weights(rows: list[Obs], half_life_days: float | None, as_of: datetime) -> list[float]:
+    """2^(−年齡/半衰期)。半衰期 None → 全 1.0。沒有 sold_at 的樣本給 1.0（沒資訊不懲罰）；
+    未來日期（時鐘偏差）夾到 1.0。"""
+    if not half_life_days or half_life_days <= 0:
+        return [1.0] * len(rows)
+    out: list[float] = []
+    for r in rows:
+        d = _parse_obs_date(r.sold_at)
+        if d is None:
+            out.append(1.0)
+            continue
+        age = max(0.0, (as_of - d).total_seconds() / 86400.0)
+        out.append(2.0 ** (-age / half_life_days))
+    return out
 
 
 def _shrink(layer_value: float, parent: float, n: int, k: float) -> float:

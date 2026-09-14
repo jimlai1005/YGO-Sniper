@@ -382,6 +382,11 @@ valuation:
     rare: 1.2
     normal_rare: 1.2
     normal: 1.0
+  # 成交時間衰減權重的半衰期（天）。null ＝ 等權（現況）。**改成數字之前必須跑**
+  # `ygo-sniper coverage-time --real-time-only --test-fraction 0.11 --half-life 45 --half-life 60 --half-life 90`
+  # 且通過 docs/plans/market-drift-recency.md Task 11 的預註冊判準（下尾違反率 ≤10% 且不劣於等權）。
+  # 只影響 L1/L2/L3 池中位數與截距，不影響溢價曲線。Mercari 的 sold_at 是入庫日（已知限制）。
+  half_life_days: null
 
 # ---------------------------------------------------------------------------
 # 市場漂移監視器（market_drift.py）。只顯示、只告警，**永遠不進估價**。
