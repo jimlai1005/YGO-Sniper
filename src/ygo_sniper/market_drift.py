@@ -78,7 +78,8 @@ def repeat_sale_ratio(
 
     同一個 signature 兩個視窗都有成交才配成一對；每對取「近期中位對數價 − 基期中位對數價」，
     再取所有配對的中位數。同卡對同卡，而且**同機制對同機制**：競標落札價與定價成交是兩種價格形成機制
-    （第三節事故 #7），同一張卡的 auction 配 auction、fixed 配 fixed，各算一對。
+    （第三節事故 #7），同一張卡的 auction 配 auction、fixed 配 fixed，各算一對。同站對同站：
+    fixed 同時來自 PayPay 與ヤフオク即決，價格水準不同（第三節事故 #2），配對鍵含 `site`。
     只吃 JPY 且價格 > 0 的列（三個 Buyee 系來源都是 JPY；別的幣別混進來就是混源）。
     """
     recent_start = as_of - timedelta(days=recent_days)
@@ -110,7 +111,7 @@ def repeat_sale_ratio(
         kind = r.get("sale_kind")
         if kind not in ("auction", "fixed"):
             continue
-        sig = f"{sig}|{kind}"
+        sig = f"{sig}|{kind}|{r.get('site') or ''}"
         for b in (band, ALL_BAND):
             buckets[b].setdefault(sig, {"recent": [], "base": []})[window].append(price)
             counts[b][window] += 1
@@ -152,7 +153,7 @@ _ALERT_FOOTER = "只顯示、不進估價；出價上限仍由區間下緣反推
 
 
 def _band_line(p: DriftPoint) -> str:
-    return f"{p.band} ×{p.ratio:.2f}（n={p.n_pairs}）"
+    return f"{p.band} ×{p.ratio:.2f}（n={p.n_pairs}，截至 {p.as_of}）"
 
 
 def _compose_alert(lines: dict[str, str]) -> str:
@@ -283,16 +284,20 @@ def refresh_market_drift(store: Any, fetcher: Any, cfg: Any, *, now: datetime) -
     wk = _week_key(now)
     fresh = [b for b in alert_bands if sent.get(b) != wk]
     existing = json.loads(store.get_meta(DRIFT_PENDING_KEY) or "null") or {}
+    if existing and not existing.get("lines"):
+        existing = {}   # 舊格式（沒有逐行內容）無法合併，丟棄；不能送出沒有任何帶的空身告警
     bands: dict[str, str] = dict(existing.get("bands") or {})
     lines: dict[str, str] = dict(existing.get("lines") or {})
     for p in latest:
         if p.band in fresh:
             bands[p.band] = wk
             lines[p.band] = _band_line(p)
-    if bands:
+    if bands and lines:
         store.set_meta(DRIFT_PENDING_KEY, json.dumps(
             {"text": _compose_alert(lines), "bands": bands, "lines": lines}, ensure_ascii=False
         ))
+    else:
+        store.set_meta(DRIFT_PENDING_KEY, "")
     return {"alert_text": _compose_alert(lines) if fresh else None, "alert_bands": fresh, "latest": latest}
 
 

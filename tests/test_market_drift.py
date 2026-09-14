@@ -154,6 +154,12 @@ class TestRepeatSaleRatio:
         pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
         assert pts["PSA10"].n_pairs == 0 and pts["PSA10"].n_recent == 0
 
+    def test_same_card_same_kind_different_sites_are_not_paired(self):
+        a = _row("a", "07-10", 1000, sale_kind="fixed"); a["site"] = "buyee_paypay"
+        b = _row("a", "09-01", 800, sale_kind="fixed"); b["site"] = "buyee_yahoo"
+        pts = {p.band: p for p in repeat_sale_ratio([a, b], as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0
+
 
 class TestDriftSeries:
     def test_series_is_weekly_ascending_and_ends_at_as_of(self):
@@ -174,6 +180,7 @@ class TestEvaluateAlert:
         text, bands = evaluate_alert(pts, alert_ratio=0.90, min_pairs=8)
         assert bands == ["PSA10"]
         assert "PSA10" in text and "×0.85" in text and "n=9" in text
+        assert "2026-09-14" in text
         assert "PSA9" not in text
 
     def test_insufficient_pairs_never_alerts(self):
@@ -374,6 +381,16 @@ class TestPendingMerge:
         assert pending["bands"] == {"PSA10": "2026-09-14"}
         assert pending["text"].count("PSA10") == 1
 
+    def test_old_format_pending_without_lines_is_discarded(self, store):
+        store.set_meta(DRIFT_PENDING_KEY, json.dumps({"text": "old", "bands": {"PSA10": "2026-09-01"}}))
+        refresh_market_drift(store, _FetcherDown(), _Cfg(external_enabled=False),
+                             now=datetime(2026, 9, 14, tzinfo=UTC))
+        assert store.get_meta(DRIFT_PENDING_KEY, "") in ("", None) or \
+            json.loads(store.get_meta(DRIFT_PENDING_KEY))["lines"]
+        n = _Notifier(ok=True)
+        deliver_drift_alert(store, n)
+        assert all("PSA10" in t for t in n.sent)   # 不會送出沒有任何帶的空身告警
+
 
 from ygo_sniper.cli import _drift_table_rows  # noqa: E402
 
@@ -433,13 +450,8 @@ class TestDailyHook:
         _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
         _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
         pipe = _Pipe(store)
-        cli_mod._refresh_market_drift_daily(pipe)
-        # 這筆成交若已超出「近 28 天」視窗（測試在 2026-09-29 之後跑），告警不該響——用 as_of 判斷
-        latest = json.loads(store.get_meta(DRIFT_LATEST_KEY))
-        if "PSA10" in latest["alert_bands"]:
-            assert any("PSA10" in t for t in pipe.notifier.sent)
-        else:
-            assert pipe.notifier.sent == []
+        cli_mod._refresh_market_drift_daily(pipe, now=datetime(2026, 9, 14, tzinfo=UTC))
+        assert any("PSA10" in t for t in pipe.notifier.sent)
 
     def test_daily_never_raises_when_refresh_explodes(self, store, monkeypatch):
         def boom(*a, **kw):
@@ -447,3 +459,32 @@ class TestDailyHook:
         monkeypatch.setattr(cli_mod, "refresh_market_drift", boom)
         cli_mod._refresh_market_drift_daily(_Pipe(store))   # 不拋就是通過
         assert store.get_meta(DRIFT_COMPUTED_DATE_KEY) is None
+
+
+class TestDailyCommandWiring:
+    def test_daily_command_calls_market_drift_hook(self, monkeypatch, tmp_path):
+        """拿掉 cli.daily() 裡的 `_refresh_market_drift_daily(pipe)` 這一行，這條要紅。"""
+        from typer.testing import CliRunner
+
+        seen = {}
+
+        class FakePipe:
+            def __init__(self):
+                seen["pipe"] = self
+
+            def scan(self, **kw):
+                return {"scanned": 0, "candidates": 0, "signals": 0}
+
+            def close(self):
+                seen["closed"] = True
+
+        monkeypatch.setattr(cli_mod, "Pipeline", FakePipe)
+        monkeypatch.setattr(cli_mod, "_print_scan", lambda result: None)
+        monkeypatch.setattr(cli_mod, "_mine_snipes_daily", lambda pipe: None)
+        monkeypatch.setattr(cli_mod, "_run_notifications", lambda pipe, result, band=None: 0)
+        monkeypatch.setattr(cli_mod, "_refresh_market_drift_daily",
+                            lambda pipe, **kw: seen.setdefault("drift_pipe", pipe))
+        result = CliRunner().invoke(cli_mod.app, ["daily", "--no-notify"])
+        assert result.exit_code == 0, result.output
+        assert seen.get("drift_pipe") is seen["pipe"]
+        assert seen.get("closed") is True

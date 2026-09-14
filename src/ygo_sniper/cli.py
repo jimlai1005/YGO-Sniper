@@ -180,7 +180,7 @@ def _mine_snipes_daily(pipe) -> None:
         pipe.store.set_meta(_SNIPE_MINE_META_KEY, today)
 
 
-def _refresh_market_drift_daily(pipe) -> None:
+def _refresh_market_drift_daily(pipe, *, now: "datetime | None" = None) -> None:
     """每天算一次市場漂移指數並送（或重送）告警。**失敗只警告，絕不影響掃描與推播。**
 
     計算一天一次（meta `DRIFT_COMPUTED_DATE_KEY`），但**每一輪都嘗試送 pending**：
@@ -188,7 +188,7 @@ def _refresh_market_drift_daily(pipe) -> None:
     """
     from datetime import UTC, datetime
 
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
     today = now.date().isoformat()
     if pipe.store.get_meta(DRIFT_COMPUTED_DATE_KEY) != today:
         try:
@@ -2268,7 +2268,7 @@ def _print_market_drift(store: Store) -> None:
     latest = json.loads(raw)
     t = Table(
         title=f"市場漂移（同卡重複成交：近 {latest['recent_days']} 天 vs 前 {latest['base_days']} 天"
-              f"｜as_of {latest['as_of']}｜樣本 {latest.get('n_rows', '?')} 筆真實成交日）"
+              f"｜as_of {latest['as_of']}｜樣本 {latest.get('n_rows', '?')} 筆真實成交日、有卡號且機制已知）"
     )
     for col in ("帶", "倍率", "配對", "近期/基期筆數", "判讀"):
         t.add_column(col, justify="right" if col in ("倍率", "配對") else "left")

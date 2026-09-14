@@ -1979,8 +1979,9 @@ async function loadStats(){
     if (!loc) { el.innerHTML = "漂移 <b>未算</b>"; }
     else {
       const by = Object.fromEntries((loc.latest || []).map(p => [p.band, p]));
+      const minPairs = loc.min_pairs || 8;
       const fmt = b => (by[b] && by[b].ratio != null)
-        ? `×${by[b].ratio.toFixed(2)}<small style="opacity:.7">(n=${by[b].n_pairs})</small>` : "—";
+        ? `×${by[b].ratio.toFixed(2)}<small style="opacity:.7">(n=${by[b].n_pairs}${by[b].n_pairs < minPairs ? "，參考" : ""})</small>` : "—";
       const alert = (loc.alert_bands || []).length > 0;
       el.innerHTML = `漂移 <b>全體 ${fmt("ALL")} ｜ PSA10 ${fmt("PSA10")} ｜ PSA9 ${fmt("PSA9")}</b>`
         + (alert ? ` <span style="color:var(--bad,#c33)">📉 ${loc.alert_bands.join(", ")}</span>` : "");
