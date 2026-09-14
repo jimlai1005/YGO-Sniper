@@ -452,7 +452,7 @@ def _weights(rows: list[Obs], half_life_days: float | None, as_of: datetime) -> 
     return out
 
 
-def _shrink(layer_value: float, parent: float, n: int, k: float) -> float:
+def _shrink(layer_value: float, parent: float, n: float, k: float) -> float:
     """部分池化。n=0 → 完全用上層；k=0 → 完全不收縮（只要本層有樣本就全信）。"""
     if n <= 0:
         return parent
@@ -467,9 +467,13 @@ class ValuationModel:
     四倍），一筆離群值就能把平均拉到沒有意義的地方。
     """
 
-    def __init__(self, rows: list[Obs], params: Params) -> None:
+    def __init__(self, rows: list[Obs], params: Params, as_of: datetime | None = None) -> None:
         self.params = params
         self.rows = [r for r in rows if r.price_twd > 0]
+        #: 權重的「現在」。時間切分驗證要傳訓練集的最後成交日，不能用牆上時鐘（否則未來洩漏）。
+        self.as_of = as_of or datetime.now(UTC)
+        #: 與 self.rows 對齊的權重；半衰期 None 時全是 1.0。
+        self.w = _weights(self.rows, params.half_life_days, self.as_of)
         self.grade_delta: dict[float | None, float] = {}
         self.rarity_delta: dict[str | None, float] = {}
         self.venue_delta: dict[str, float] = {}
@@ -523,10 +527,11 @@ class ValuationModel:
             self._fit_grade_curve()      # backfit：扣掉平台效應後重估分數溢價
         self._fit_rarity_curve()
         if self.rows:
-            self.base = _median([self._residual_base(r) for r in self.rows])
-            venued = [r for r in self.rows if r.venue]
+            self.base = _wmedian([self._residual_base(r) for r in self.rows], self.w)
+            venued = [(r, w) for r, w in zip(self.rows, self.w) if r.venue]
             self.base_venue = (
-                _median([self._residual_base(r) - self.v(r.venue) for r in venued])
+                _wmedian([self._residual_base(r) - self.v(r.venue) for r, _ in venued],
+                         [w for _, w in venued])
                 if venued else self.base
             )
 
@@ -751,28 +756,31 @@ class ValuationModel:
         level, n_eff = "L0", 0
 
         # L3：同稀有度（任何卡、任何分數），把分數換算到目標分數
-        pool3 = [r for r in self.rows if r.rarity == rarity]
+        pool3 = [(r, w) for r, w in zip(self.rows, self.w) if r.rarity == rarity]
         if pool3:
-            est = _shrink(_median([conv(r) for r in pool3]), est, len(pool3), k)
-            level, n_eff = "L3", len(pool3)
+            n3 = sum(w for _, w in pool3)
+            est = _shrink(_wmedian([conv(r) for r, _ in pool3], [w for _, w in pool3]), est, n3, k)
+            level, n_eff = "L3", int(round(n3))
 
         if not card_name:
             return est, level, n_eff
 
         # L2：同卡同稀有度，跨分數換算
-        pool2 = [r for r in self.rows if r.card_name == card_name and r.rarity == rarity]
+        pool2 = [(r, w) for r, w in pool3 if r.card_name == card_name]
         if pool2:
-            est = _shrink(_median([conv(r) for r in pool2]), est, len(pool2), k)
-            level, n_eff = "L2", len(pool2)
+            n2 = sum(w for _, w in pool2)
+            est = _shrink(_wmedian([conv(r) for r, _ in pool2], [w for _, w in pool2]), est, n2, k)
+            level, n_eff = "L2", int(round(n2))
 
         # L1：同卡同稀有度同分數，只剩平台需要換算
-        pool1 = [r for r in pool2 if r.grade == grade]
+        pool1 = [(r, w) for r, w in pool2 if r.grade == grade]
         if pool1:
+            n1 = sum(w for _, w in pool1)
             vals = [
-                (r.logp - self.v(r.venue) + target_v) if adjust else r.logp for r in pool1
+                (r.logp - self.v(r.venue) + target_v) if adjust else r.logp for r, _ in pool1
             ]
-            est = _shrink(_median(vals), est, len(pool1), k)
-            level, n_eff = "L1", len(pool1)
+            est = _shrink(_wmedian(vals, [w for _, w in pool1]), est, n1, k)
+            level, n_eff = "L1", int(round(n1))
 
         return est, level, n_eff
 
@@ -829,12 +837,13 @@ class Valuator:
     """
 
     def __init__(
-        self, rows: list[Obs], params: Params | None = None, index: CardIndex | None = None
+        self, rows: list[Obs], params: Params | None = None, index: CardIndex | None = None,
+        as_of: datetime | None = None
     ) -> None:
         self.params = params or Params()
         self.index = index
         self.rows = [r for r in rows if r.price_twd and r.price_twd > 0]
-        self.model = ValuationModel(self.rows, self.params)
+        self.model = ValuationModel(self.rows, self.params, as_of=as_of)
 
         fit, cal = _split(self.rows, self.params.calibration_fraction)
         self.calibration_n = len(cal)
@@ -850,7 +859,7 @@ class Valuator:
         self.residual_groups: dict[str, list[float]] = {}
         self.residual_groups_venue: dict[str, list[float]] = {}
         if fit and cal:
-            self.cal_model = ValuationModel(fit, self.params)
+            self.cal_model = ValuationModel(fit, self.params, as_of=self.model.as_of)
             for r in cal:
                 for venue, bag, groups in (
                     (None, self.residuals, self.residual_groups),
