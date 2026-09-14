@@ -210,3 +210,85 @@ def fetch_relief_index(fetcher: Any, url: str, *, keep_weeks: int = 12) -> dict[
         "weeks": parsed["weeks"][-keep_weeks:],
         "meta": parsed["meta"],
     }
+
+
+# ---------------------------------------------------------------------------
+# refresh 入口與告警帳本
+# ---------------------------------------------------------------------------
+def _week_key(as_of: datetime) -> str:
+    """告警去重的粒度：as_of 的日期（每天算一次，同一 as_of 同一帶只推一次）。"""
+    return as_of.date().isoformat()
+
+
+def refresh_market_drift(store: Any, fetcher: Any, cfg: Any, *, now: datetime) -> dict[str, Any]:
+    """算本地指數、抓外部指數、判告警並記進 pending 帳本。**不送 Telegram**——送與清帳
+    在 `deliver_drift_alert`，分開是為了讓「送達才消耗」有單一出口。
+
+    外部抓取失敗只記 `RELIEF_ERROR_KEY`、保留上一份好的 `RELIEF_LATEST_KEY`，不拋：
+    對方站掛了不該讓 daily 或本地指數一起掛。本地部分任何例外照拋（那是我們自己的 bug）。
+    """
+    md = dict(getattr(cfg, "market_drift", None) or {})
+    recent_days = int(md.get("recent_days", 28))
+    base_days = int(md.get("base_days", 56))
+    alert_ratio = float(md.get("alert_ratio", 0.90))
+    min_pairs = int(md.get("min_pairs", 8))
+
+    rows = store.comps_for_drift()
+    series = drift_series(rows, as_of=now, weeks=12, recent_days=recent_days, base_days=base_days)
+    latest = [p for p in series if p.as_of == now.date().isoformat()]
+    alert_text, alert_bands = evaluate_alert(latest, alert_ratio=alert_ratio, min_pairs=min_pairs)
+
+    store.set_meta(DRIFT_LATEST_KEY, json.dumps({
+        "computed_at": now.isoformat(),
+        "as_of": now.date().isoformat(),
+        "recent_days": recent_days,
+        "base_days": base_days,
+        "alert_ratio": alert_ratio,
+        "min_pairs": min_pairs,
+        "n_rows": len(rows),
+        "latest": [asdict(p) for p in latest],
+        "series": [asdict(p) for p in series],
+        "alert_bands": alert_bands,
+    }, ensure_ascii=False))
+
+    if bool(md.get("external_enabled", True)):
+        url = str(md.get("external_url") or "https://yugioh-relief.com/psa-market-daily-trends/")
+        try:
+            ext = fetch_relief_index(fetcher, url)
+        except Exception as exc:  # noqa: BLE001 - 外站失敗要記錄、不能拖垮本地指數
+            store.set_meta(RELIEF_ERROR_KEY, f"{now.isoformat()} {type(exc).__name__}: {exc}")
+        else:
+            store.set_meta(RELIEF_LATEST_KEY, json.dumps(ext, ensure_ascii=False))
+            store.set_meta(RELIEF_ERROR_KEY, "")
+
+    # 去重：同一帶同一 as_of 已送達過就不再排 pending
+    sent = json.loads(store.get_meta(DRIFT_SENT_KEY) or "{}")
+    wk = _week_key(now)
+    fresh = [b for b in alert_bands if sent.get(b) != wk]
+    if fresh:
+        text, _ = evaluate_alert(
+            [p for p in latest if p.band in fresh], alert_ratio=alert_ratio, min_pairs=min_pairs
+        )
+        store.set_meta(DRIFT_PENDING_KEY, json.dumps(
+            {"text": text, "bands": {b: wk for b in fresh}}, ensure_ascii=False
+        ))
+        alert_text = text
+    else:
+        alert_text = None
+    return {"alert_text": alert_text, "alert_bands": fresh, "latest": latest}
+
+
+def deliver_drift_alert(store: Any, notifier: Any) -> bool:
+    """送 pending 告警；**送達才清 pending、才記 sent**。沒有 pending 回 True。
+    送失敗回 False 並原樣留著，下一輪 daily 再送（與 cli._send_schedule_alert 同規則）。"""
+    raw = store.get_meta(DRIFT_PENDING_KEY) or ""
+    if not raw:
+        return True
+    pending = json.loads(raw)
+    if not notifier.send_alert(pending["text"]):
+        return False
+    sent = json.loads(store.get_meta(DRIFT_SENT_KEY) or "{}")
+    sent.update(pending.get("bands") or {})
+    store.set_meta(DRIFT_SENT_KEY, json.dumps(sent))
+    store.set_meta(DRIFT_PENDING_KEY, "")
+    return True

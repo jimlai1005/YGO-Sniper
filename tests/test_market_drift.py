@@ -200,3 +200,117 @@ class TestReliefIndex:
         assert len(out["weeks"]) == 12
         assert out["weeks"][-1]["week_start"] == "2026-09-07"
         assert "fetched_at" in out
+
+
+from ygo_sniper.market_drift import (  # noqa: E402
+    DRIFT_LATEST_KEY,
+    DRIFT_PENDING_KEY,
+    DRIFT_SENT_KEY,
+    RELIEF_ERROR_KEY,
+    RELIEF_LATEST_KEY,
+    deliver_drift_alert,
+    refresh_market_drift,
+)
+from ygo_sniper.sources.base import FetchError  # noqa: E402
+
+
+class _Cfg:
+    def __init__(self, external_enabled=True):
+        self.market_drift = {
+            "recent_days": 28, "base_days": 56, "alert_ratio": 0.90, "min_pairs": 1,
+            "external_enabled": external_enabled,
+            "external_url": "https://yugioh-relief.com/psa-market-daily-trends/",
+        }
+
+
+class _FetcherOK:
+    def get(self, url, **kw):
+        return (FIXTURES / "relief_trends_snippet.html").read_text(encoding="utf-8")
+
+
+class _FetcherDown:
+    def get(self, url, **kw):
+        raise FetchError("boom", url=url, status=503)
+
+
+class _Notifier:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.sent = []
+
+    def send_alert(self, text):
+        self.sent.append(text)
+        return self.ok
+
+
+def _seed_drop(store):
+    """PSA10：a、b 兩張卡各跌到 0.8 → 帶倍率 0.8，配對 2。"""
+    for sig in ("a", "b"):
+        _insert_comp(store, signature=sig, sold_at="2026-07-20T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature=sig, sold_at="2026-09-01T00:00:00+00:00", price=800)
+
+
+class TestRefreshMarketDrift:
+    def test_persists_local_series_and_external(self, store):
+        _seed_drop(store)
+        res = refresh_market_drift(store, _FetcherOK(), _Cfg(), now=AS_OF)
+        latest = json.loads(store.get_meta(DRIFT_LATEST_KEY))
+        assert latest["as_of"] == "2026-09-14"
+        assert latest["recent_days"] == 28 and latest["base_days"] == 56
+        psa10 = [p for p in latest["latest"] if p["band"] == "PSA10"][0]
+        assert psa10["ratio"] == pytest.approx(0.8) and psa10["n_pairs"] == 2
+        assert len(latest["series"]) == 12 * 7
+        assert latest["alert_bands"] == ["PSA10"]
+        ext = json.loads(store.get_meta(RELIEF_LATEST_KEY))
+        assert ext["weeks"][-1]["week_start"] == "2026-09-07"
+        assert store.get_meta(RELIEF_ERROR_KEY, "") == ""
+        assert res["alert_text"] is not None and "PSA10" in res["alert_text"]
+        pending = json.loads(store.get_meta(DRIFT_PENDING_KEY))
+        assert pending["bands"] == {"PSA10": "2026-09-14"}
+
+    def test_external_failure_is_recorded_not_raised(self, store):
+        _seed_drop(store)
+        refresh_market_drift(store, _FetcherDown(), _Cfg(), now=AS_OF)
+        assert store.get_meta(RELIEF_LATEST_KEY) is None
+        assert "boom" in store.get_meta(RELIEF_ERROR_KEY)
+        assert store.get_meta(DRIFT_LATEST_KEY) is not None  # 本地指數不受外部失敗影響
+
+    def test_external_disabled_skips_fetch(self, store):
+        _seed_drop(store)
+        refresh_market_drift(store, _FetcherDown(), _Cfg(external_enabled=False), now=AS_OF)
+        assert store.get_meta(RELIEF_ERROR_KEY, "") == ""
+
+    def test_already_sent_this_week_does_not_re_pend(self, store):
+        _seed_drop(store)
+        store.set_meta(DRIFT_SENT_KEY, json.dumps({"PSA10": "2026-09-14"}))
+        res = refresh_market_drift(store, _FetcherOK(), _Cfg(), now=AS_OF)
+        assert res["alert_text"] is None
+        assert store.get_meta(DRIFT_PENDING_KEY, "") == ""
+
+
+class TestDeliverDriftAlert:
+    def test_nothing_pending_is_noop_true(self, store):
+        n = _Notifier()
+        assert deliver_drift_alert(store, n) is True
+        assert n.sent == []
+
+    def test_delivered_clears_pending_and_records_sent(self, store):
+        _seed_drop(store)
+        refresh_market_drift(store, _FetcherOK(), _Cfg(), now=AS_OF)
+        n = _Notifier(ok=True)
+        assert deliver_drift_alert(store, n) is True
+        assert len(n.sent) == 1 and "PSA10" in n.sent[0]
+        assert store.get_meta(DRIFT_PENDING_KEY, "") == ""
+        assert json.loads(store.get_meta(DRIFT_SENT_KEY)) == {"PSA10": "2026-09-14"}
+
+    def test_failed_send_keeps_pending(self, store):
+        _seed_drop(store)
+        refresh_market_drift(store, _FetcherOK(), _Cfg(), now=AS_OF)
+        n = _Notifier(ok=False)
+        assert deliver_drift_alert(store, n) is False
+        assert store.get_meta(DRIFT_PENDING_KEY, "") != ""
+        assert store.get_meta(DRIFT_SENT_KEY) is None
+        # 下一輪重送成功才清
+        n2 = _Notifier(ok=True)
+        assert deliver_drift_alert(store, n2) is True
+        assert store.get_meta(DRIFT_PENDING_KEY, "") == ""
