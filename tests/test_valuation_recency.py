@@ -151,3 +151,11 @@ class TestCoverageTimeSplitTails:
                                  test_fraction=0.25)
         assert wt["n_tested"] == base["n_tested"] and wt["train_until"] == base["train_until"]
         assert wt["half_life_days"] == 30.0 and base["half_life_days"] is None
+
+    def test_unparseable_train_until_raises(self):
+        # 創建行，其 sold_at 都是無法解析的字符串；train_until 會被設成最大的那個，
+        # _parse_obs_date 無法解析之，觸發 ValueError。
+        rows = [Obs(1000.0 + i*10, "A", "ultra", 9.0, key=f"invalid{i}", sold_at=f"bad-{i:02d}")
+                for i in range(25)]
+        with pytest.raises(ValueError, match="as_of"):
+            coverage_time_split(rows, PRIOR, test_fraction=0.25)

@@ -1686,6 +1686,11 @@ def coverage_time_split(
     out["test_venue_mix"] = _venue_mix(test)
 
     as_of = _parse_obs_date(out["train_until"])
+    if as_of is None:
+        raise ValueError(
+            f"coverage_time_split: 訓練截止 sold_at 解析不出 as_of（{out['train_until']!r}）——"
+            "時間權重的錨點不能靜默退回牆上時鐘（會讓預註冊判準的輸入換基準）"
+        )
     out["as_of"] = out["train_until"]
     v = Valuator(train, params, as_of=as_of)
     residuals = v.residuals_venue if venue_aware else v.residuals
