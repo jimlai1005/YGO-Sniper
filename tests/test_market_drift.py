@@ -159,3 +159,44 @@ class TestEvaluateAlert:
     def test_all_band_is_not_used_for_alert(self):
         pts = [self._pt(ALL_BAND, 0.5, 50)]
         assert evaluate_alert(pts, alert_ratio=0.90, min_pairs=8) == (None, [])
+
+
+from ygo_sniper.market_drift import fetch_relief_index, parse_relief_weekly_index  # noqa: E402
+
+
+class TestReliefIndex:
+    def test_parse_real_snippet(self):
+        html = (FIXTURES / "relief_trends_snippet.html").read_text(encoding="utf-8")
+        parsed = parse_relief_weekly_index(html)
+        weeks = parsed["weeks"]
+        assert len(weeks) == 37
+        assert weeks[0]["week_start"] == "2025-12-29" and weeks[0]["all"] == 100.0
+        last = weeks[-1]
+        assert last["week_start"] == "2026-09-07"
+        assert last["all"] == 124.43 and last["psa10"] == 138.12
+        assert last["psa9"] == 125.46 and last["psa8_below"] == 109.7
+        assert last["updated"] == 72 and last["components"] == 1205
+        assert parsed["meta"]["representativePrice"] == "weekly_median_carry_forward"
+
+    def test_missing_block_raises(self):
+        with pytest.raises(ValueError):
+            parse_relief_weekly_index("<html><body>nothing</body></html>")
+
+    def test_fetch_uses_fetcher_and_returns_last_12_weeks(self):
+        html = (FIXTURES / "relief_trends_snippet.html").read_text(encoding="utf-8")
+
+        class FakeFetcher:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kw):
+                self.calls.append((url, kw))
+                return html
+
+        f = FakeFetcher()
+        out = fetch_relief_index(f, "https://yugioh-relief.com/psa-market-daily-trends/")
+        assert f.calls[0][0] == "https://yugioh-relief.com/psa-market-daily-trends/"
+        assert f.calls[0][1] == {"use_cache": False}
+        assert len(out["weeks"]) == 12
+        assert out["weeks"][-1]["week_start"] == "2026-09-07"
+        assert "fetched_at" in out

@@ -158,3 +158,55 @@ def evaluate_alert(
         lines.append(f"{p.band} ×{p.ratio:.2f}（n={p.n_pairs}）")
     lines.append("只顯示、不進估價；出價上限仍由區間下緣反推，請人工留意估價可能偏高。")
     return "\n".join(lines), [p.band for p in hits]
+
+
+# ---------------------------------------------------------------------------
+# 外部對照：yugioh-relief.com 週次 PSA 浮雕指數
+# ---------------------------------------------------------------------------
+_RELIEF_DATA_RE = re.compile(
+    r'<script type="application/json" class="yra-psa-market-data">(.*?)</script>', re.S
+)
+
+
+def parse_relief_weekly_index(html: str) -> dict[str, Any]:
+    """從趨勢頁 HTML 抽內嵌 JSON 的 `weeklyIndexRecords`。
+
+    鍵名 2026-09-14 對過真實 payload（tests/fixtures/relief_trends_snippet.html 就是那份）。
+    找不到資料塊或鍵名變了 → 拋 ValueError（對方改版要大聲，不能回空清單假裝沒事）。
+    """
+    m = _RELIEF_DATA_RE.search(html)
+    if not m:
+        raise ValueError("relief trends page: 找不到 yra-psa-market-data 資料塊（對方改版？）")
+    try:
+        data = json.loads(m.group(1))
+    except ValueError as exc:
+        raise ValueError(f"relief trends page: 資料塊不是合法 JSON：{exc}") from exc
+    records = data.get("weeklyIndexRecords")
+    if not isinstance(records, list) or not records:
+        raise ValueError("relief trends page: weeklyIndexRecords 缺失或為空（鍵名改了？）")
+    weeks = []
+    for r in records:
+        weeks.append({
+            "week_start": r["weekStart"],
+            "week_end": r["weekEnd"],
+            "all": float(r["allIndex"]),
+            "psa10": float(r["psa10Index"]),
+            "psa9": float(r["psa9Index"]),
+            "psa8_below": float(r["psa8BelowIndex"]),
+            "updated": int(r["allUpdatedCount"]),
+            "components": int(r["allComponentCount"]),
+        })
+    return {"weeks": weeks, "meta": data.get("weeklyIndexMeta") or {}}
+
+
+def fetch_relief_index(fetcher: Any, url: str, *, keep_weeks: int = 12) -> dict[str, Any]:
+    """抓外部指數。一律 `use_cache=False`（要的是今天的頁，不是 cache_ttl 內的舊頁）。
+    抓取失敗由 fetcher 拋 FetchError，這裡不吞。"""
+    html = fetcher.get(url, use_cache=False)
+    parsed = parse_relief_weekly_index(html)
+    return {
+        "fetched_at": datetime.now(UTC).isoformat(),
+        "source": url,
+        "weeks": parsed["weeks"][-keep_weeks:],
+        "meta": parsed["meta"],
+    }
