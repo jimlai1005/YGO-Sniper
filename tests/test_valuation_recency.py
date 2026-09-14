@@ -125,3 +125,29 @@ class TestModelWeighting:
         assert v1.model.predict_log("A", "ultra", 9.0) == v2.model.predict_log("A", "ultra", 9.0)
         assert v1.model.as_of == AS_OF
         assert v1.cal_model is None or v1.cal_model.as_of == AS_OF
+
+
+from ygo_sniper.valuation import coverage_time_split  # noqa: E402
+
+
+class TestCoverageTimeSplitTails:
+    def _rows(self):
+        out = []
+        for i in range(60):
+            out.append(_obs(1000.0 + (i % 7) * 50, 200 - i * 3, "A", key=f"a{i}"))
+            out.append(_obs(600.0 + (i % 5) * 40, 200 - i * 3, "B", key=f"b{i}"))
+        return out
+
+    def test_reports_lower_and_upper_tail_and_as_of(self):
+        res = coverage_time_split(self._rows(), PRIOR, test_fraction=0.25)
+        assert 0.0 <= res["lower_tail"] <= 1.0 and 0.0 <= res["upper_tail"] <= 1.0
+        assert res["empirical"] == pytest.approx(1.0 - res["lower_tail"] - res["upper_tail"])
+        assert res["as_of"] == res["train_until"]
+
+    def test_half_life_changes_result_but_not_split(self):
+        import dataclasses
+        base = coverage_time_split(self._rows(), PRIOR, test_fraction=0.25)
+        wt = coverage_time_split(self._rows(), dataclasses.replace(PRIOR, half_life_days=30.0),
+                                 test_fraction=0.25)
+        assert wt["n_tested"] == base["n_tested"] and wt["train_until"] == base["train_until"]
+        assert wt["half_life_days"] == 30.0 and base["half_life_days"] is None

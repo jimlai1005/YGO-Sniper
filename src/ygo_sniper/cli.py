@@ -3088,6 +3088,9 @@ def coverage_time(
     real_time_only: bool = typer.Option(
         False, help="只用有**真實成交時間**的樣本（排除 sold_at 是入庫時間的）"
     ),
+    half_life: list[float] = typer.Option(
+        [], "--half-life", help="時間衰減半衰期（天），可重複；一律附等權對照。例：--half-life 45 --half-life 60"
+    ),
 ):
     """**時間切分**的區間覆蓋率自檢：早期成交訓練＋校準、晚期成交當測試。
 
@@ -3177,6 +3180,32 @@ def coverage_time(
     )
     if ref.get("note"):
         console.print(f"[yellow]{ref['note']}[/yellow]")
+
+    if half_life:
+        import dataclasses
+
+        t3 = Table(title="時間加權對照（平台內切早晚；權重的「現在」＝訓練集最後成交日）")
+        for col in ("半衰期", "平台校正", "覆蓋率", "下尾違反", "上尾", "點估計中位誤差", "區間中位寬度", "校準集"):
+            t3.add_column(col, justify="left" if col in ("半衰期", "平台校正") else "right")
+        for h in [None, *half_life]:
+            p = dataclasses.replace(params, half_life_days=h)
+            for label, aware in (("無", False), ("有", True)):
+                res = coverage_time_split(obs, p, test_fraction=test_fraction,
+                                          venue_aware=aware, stratify_by_venue=True)
+                t3.add_row(
+                    "等權" if h is None else f"{h:g} 天", label,
+                    "—" if res["empirical"] is None else f"{res['empirical']:.1%}",
+                    "—" if res["lower_tail"] is None else f"{res['lower_tail']:.1%}",
+                    "—" if res["upper_tail"] is None else f"{res['upper_tail']:.1%}",
+                    "—" if not res["median_error_ratio"] else f"×{res['median_error_ratio']:.2f}",
+                    "—" if not res["median_width_twd"] else f"NT${res['median_width_twd']:,.0f}",
+                    str(res["calibration_n"]),
+                )
+        console.print(t3)
+        console.print(
+            "[dim]下尾違反＝真實成交低於區間下緣的比例（名目 10%）——出價上限由下緣反推，"
+            "這一欄才是會賠錢的那一欄。上線判準見 docs/plans/market-drift-recency.md Task 11。[/dim]"
+        )
 
 
 @app.command()

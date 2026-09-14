@@ -1668,6 +1668,10 @@ def coverage_time_split(
         "train_venue_mix": {},
         "test_venue_mix": {},
         "n_undated": len(rows) - len(dated),
+        "lower_tail": None,
+        "upper_tail": None,
+        "as_of": None,
+        "half_life_days": params.half_life_days,
         "note": "",
     }
     if len(dated) < 20:
@@ -1681,7 +1685,9 @@ def coverage_time_split(
     out["train_venue_mix"] = _venue_mix(train)
     out["test_venue_mix"] = _venue_mix(test)
 
-    v = Valuator(train, params)
+    as_of = _parse_obs_date(out["train_until"])
+    out["as_of"] = out["train_until"]
+    v = Valuator(train, params, as_of=as_of)
     residuals = v.residuals_venue if venue_aware else v.residuals
     out["calibration_n"] = len(residuals)
     q = _conformal_quantiles(residuals, params.confidence)
@@ -1690,6 +1696,8 @@ def coverage_time_split(
         return out
 
     covered = 0
+    below = 0
+    above = 0
     widths: list[float] = []
     abs_errors: list[float] = []
     for t in test:
@@ -1698,11 +1706,15 @@ def coverage_time_split(
         )
         lo, hi = log_est + q[0], log_est + q[1]
         covered += int(lo <= t.logp <= hi)
+        below += int(t.logp < lo)
+        above += int(t.logp > hi)
         widths.append(math.exp(hi) - math.exp(lo))
         abs_errors.append(abs(t.logp - log_est))
 
     out["n_tested"] = len(test)
     out["empirical"] = covered / len(test) if test else None
+    out["lower_tail"] = below / len(test) if test else None
+    out["upper_tail"] = above / len(test) if test else None
     out["median_width_twd"] = _median(widths) if widths else None
     out["median_abs_log_error"] = _median(abs_errors) if abs_errors else None
     if abs_errors:
