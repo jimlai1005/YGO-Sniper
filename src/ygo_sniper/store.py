@@ -1174,6 +1174,23 @@ class Store:
         with self._conn() as c:
             return [dict(r) for r in c.execute(q, params).fetchall()]
 
+    def comps_for_drift(self) -> list[dict[str, Any]]:
+        """漂移指數的樣本：**只要真實成交日**（`sold_at_is_ingest = 0`）。
+
+        Mercari／部分 PayPay 的 `sold_at` 是入庫時間（見 `load_comps` 警告），拿它們算
+        「近 4 週 vs 前 8 週」量到的是我們的抓取順序，不是市場——所以一律排除，
+        寧可指數樣本薄，也不要一個看起來正常但全部是錯的數字。
+        同時排除去重副本（`dup_of_id`）與無年代證據列（與估價取樣同判準）。
+        """
+        q = (
+            "SELECT signature, sold_at, price_native, currency, grader, grade, site "
+            "FROM comps WHERE COALESCE(sold_at_is_ingest, 0) = 0 AND dup_of_id IS NULL "
+            "AND price_native > 0 AND COALESCE(era_evidence, '') <> '' "
+            "ORDER BY sold_at"
+        )
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(q).fetchall()]
+
     # ------------------------------------------------------------------
     def backfill_sold_at_provenance(self) -> int:
         """把既有 comps 的 `sold_at_is_ingest` 補起來，回傳實際改動的列數。
