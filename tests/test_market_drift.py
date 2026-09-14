@@ -344,6 +344,37 @@ class TestDeliverDriftAlert:
         assert store.get_meta(DRIFT_PENDING_KEY, "") == ""
 
 
+class TestPendingMerge:
+    def test_undelivered_band_survives_next_days_refresh(self, store):
+        cfg = _Cfg(external_enabled=False)
+        # day 1：PSA10 跌 → pending，送失敗
+        _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
+        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 13, tzinfo=UTC))
+        assert deliver_drift_alert(store, _Notifier(ok=False)) is False
+        # day 2：PSA10 回升、PSA9 跌
+        _insert_comp(store, signature="a", sold_at="2026-09-12T00:00:00+00:00", price=1300)
+        _insert_comp(store, signature="b", sold_at="2026-07-20T00:00:00+00:00", price=1000, grade=9.0)
+        _insert_comp(store, signature="b", sold_at="2026-09-10T00:00:00+00:00", price=700, grade=9.0)
+        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 14, tzinfo=UTC))
+        pending = json.loads(store.get_meta(DRIFT_PENDING_KEY))
+        assert pending["bands"] == {"PSA10": "2026-09-13", "PSA9": "2026-09-14"}
+        n = _Notifier(ok=True)
+        assert deliver_drift_alert(store, n) is True
+        assert "PSA10" in n.sent[0] and "PSA9" in n.sent[0]
+        assert json.loads(store.get_meta(DRIFT_SENT_KEY)) == {"PSA10": "2026-09-13", "PSA9": "2026-09-14"}
+
+    def test_same_band_newer_day_replaces_its_own_line(self, store):
+        cfg = _Cfg(external_enabled=False)
+        _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
+        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 13, tzinfo=UTC))
+        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 14, tzinfo=UTC))
+        pending = json.loads(store.get_meta(DRIFT_PENDING_KEY))
+        assert pending["bands"] == {"PSA10": "2026-09-14"}
+        assert pending["text"].count("PSA10") == 1
+
+
 from ygo_sniper.cli import _drift_table_rows  # noqa: E402
 
 

@@ -147,6 +147,20 @@ def drift_series(
     return out
 
 
+_ALERT_HEADER = "📉 市場漂移告警（同卡重複成交，近 4 週 vs 前 8 週）"
+_ALERT_FOOTER = "只顯示、不進估價；出價上限仍由區間下緣反推，請人工留意估價可能偏高。"
+
+
+def _band_line(p: DriftPoint) -> str:
+    return f"{p.band} ×{p.ratio:.2f}（n={p.n_pairs}）"
+
+
+def _compose_alert(lines: dict[str, str]) -> str:
+    """依 BANDS 順序組告警文字；`lines` 是 帶 → 那一行。"""
+    body = [lines[b] for b in BANDS if b in lines]
+    return "\n".join([_ALERT_HEADER, *body, _ALERT_FOOTER])
+
+
 def evaluate_alert(
     points: list[DriftPoint], *, alert_ratio: float, min_pairs: int,
 ) -> tuple[str | None, list[str]]:
@@ -158,11 +172,7 @@ def evaluate_alert(
     ]
     if not hits:
         return None, []
-    lines = ["📉 市場漂移告警（同卡重複成交，近 4 週 vs 前 8 週）"]
-    for p in hits:
-        lines.append(f"{p.band} ×{p.ratio:.2f}（n={p.n_pairs}）")
-    lines.append("只顯示、不進估價；出價上限仍由區間下緣反推，請人工留意估價可能偏高。")
-    return "\n".join(lines), [p.band for p in hits]
+    return _compose_alert({p.band: _band_line(p) for p in hits}), [p.band for p in hits]
 
 
 # ---------------------------------------------------------------------------
@@ -266,21 +276,24 @@ def refresh_market_drift(store: Any, fetcher: Any, cfg: Any, *, now: datetime) -
             store.set_meta(RELIEF_LATEST_KEY, json.dumps(ext, ensure_ascii=False))
             store.set_meta(RELIEF_ERROR_KEY, "")
 
-    # 去重：同一帶同一 as_of 已送達過就不再排 pending
+    # 去重：同一帶同一 as_of 已送達過就不再排 pending。
+    # **pending 是合併不是覆寫**（2026-09-14 審查回合 Critical 2）：昨天沒送出去的帶要留著，
+    # 今天新增的帶加進去；同一帶以較新的 as_of 那一行取代自己的舊行。送達才整批清。
     sent = json.loads(store.get_meta(DRIFT_SENT_KEY) or "{}")
     wk = _week_key(now)
     fresh = [b for b in alert_bands if sent.get(b) != wk]
-    if fresh:
-        text, _ = evaluate_alert(
-            [p for p in latest if p.band in fresh], alert_ratio=alert_ratio, min_pairs=min_pairs
-        )
+    existing = json.loads(store.get_meta(DRIFT_PENDING_KEY) or "null") or {}
+    bands: dict[str, str] = dict(existing.get("bands") or {})
+    lines: dict[str, str] = dict(existing.get("lines") or {})
+    for p in latest:
+        if p.band in fresh:
+            bands[p.band] = wk
+            lines[p.band] = _band_line(p)
+    if bands:
         store.set_meta(DRIFT_PENDING_KEY, json.dumps(
-            {"text": text, "bands": {b: wk for b in fresh}}, ensure_ascii=False
+            {"text": _compose_alert(lines), "bands": bands, "lines": lines}, ensure_ascii=False
         ))
-        alert_text = text
-    else:
-        alert_text = None
-    return {"alert_text": alert_text, "alert_bands": fresh, "latest": latest}
+    return {"alert_text": _compose_alert(lines) if fresh else None, "alert_bands": fresh, "latest": latest}
 
 
 def deliver_drift_alert(store: Any, notifier: Any) -> bool:
