@@ -2239,3 +2239,8 @@ git commit -m "fix(market-drift): 配對鍵含 site、告警行帶截至日期�
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
+
+**Task 17 結案（主線程親跑）**：`tests/test_market_drift.py` 36 passed；變異測試——把 `cli.daily()` 的
+`_refresh_market_drift_daily(pipe)` 換成 `pass`，`TestDailyCommandWiring` 立刻紅（1 failed）；全量 `make test` 1985 passed。
+複審的 5 條 Warning 全部處理（配對鍵含 site／告警行帶截至日期／daily 呼叫點釘住／`now` 注入／標題與 pill 補註）。
+未做：Warning 1 的 `reject_n_buckets` 重量測（休眠，`half_life_days: null`）與 Warning 5 的 `min_pairs`／視窗調整（使用者決定）。
