@@ -34,6 +34,7 @@ from .schedule_watch import PENDING_ALERT_KEY
 from .seller_alpha import SALE_AUCTION, SALE_FIXED, SALE_KIND_LABEL, SALE_UNKNOWN
 from .seller_links import seller_page_url
 from .store import Store
+from .comps_backfill import known_card_names, run_backfill
 
 app = typer.Typer(add_completion=False, help="遊戲王 1998-2004 鑑定卡撿漏掃描器")
 console = Console()
@@ -2290,6 +2291,45 @@ def _print_market_drift(store: Store) -> None:
         console.print(t2)
     if err:
         console.print(f"[red]外部指數最近一次抓取失敗：{err}[/red]")
+
+
+@app.command(name="comps-backfill")
+def comps_backfill(
+    limit: int = typer.Option(None, help="本輪最多查幾張卡（不給＝全部未在冷卻中的卡）"),
+    cooldown_days: float = typer.Option(21.0, help="同一張卡幾天內不重查（與 refill 共用 comps_refill 帳）"),
+    pages_yahoo: int = typer.Option(3, help="yahoo_closed 每卡頁數（3 頁≈300 筆≈180 天）"),
+    pages_paypay: int = typer.Option(1, help="paypay_direct 每卡頁數"),
+    dry_run: bool = typer.Option(False, help="只列卡名清單與統計，不打外網、不入庫、不記帳"),
+):
+    """行情回補：對卡名主檔比對得到的每一張卡，挖 Yahoo 落札相場（約 180 天）與 PayPay 已售出，
+    填進 comps。漂移指數（market-drift）與估價都吃這張表。BLOCKED 立刻中止（exit 2）。"""
+    from .cards import CardIndex
+    from .comps import CompsEngine
+    from .sources.base import CachedFetcher
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    index = CardIndex.load()
+    if not index.available:
+        console.print("[red]卡名主檔不可用，無法列出要回補的卡[/red]")
+        raise typer.Exit(1)
+    names = known_card_names(store, index)
+    console.print(f"[dim]已知 in_era 卡名 {len(names)} 張；冷卻 {cooldown_days:g} 天；"
+                  f"頁數 yahoo_closed={pages_yahoo} paypay_direct={pages_paypay}[/dim]")
+    from .pipeline import build_sources
+    sources = build_sources(cfg, CachedFetcher(cfg))
+    comps_engine = CompsEngine(cfg, FxRates(cfg), store)
+    report = run_backfill(
+        store=store, sources=sources, comps=comps_engine, names=names,
+        cooldown_days=cooldown_days, limit=limit,
+        pages={"yahoo_closed": pages_yahoo, "paypay_direct": pages_paypay},
+        dry_run=dry_run, log=lambda s: console.print(f"[dim]{s}[/dim]"),
+    )
+    console.print(report.summary())
+    for p in report.problems[:20]:
+        console.print(f"[yellow]{p}[/yellow]")
+    if report.blocked:
+        raise typer.Exit(2)
 
 
 @app.command(name="market-drift")
