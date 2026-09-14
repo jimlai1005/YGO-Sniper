@@ -1728,3 +1728,380 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - 重跑本實驗的方式：本節開頭那兩條指令；資料每天在變，數字會漂，判準不變。
 - 若 3 個月後市場繼續下跌、`coverage-time --test-fraction 0.11` 的等權下尾違反率明顯 >10%，再重開此案；
   屆時候選應包含「指數校正法」（用重複成交指數把舊成交換算到今天再入池），本輪未做。
+
+---
+
+## 審查回合（2026-09-14，reviewer＝opus；主線程已親自重現 Critical 1、2）
+
+Critical 1：`comps_for_drift`／`repeat_sale_ratio` 沒分 `sale_kind`，把ヤフオク落札價對上フリマ一口價（CLAUDE.md 第三節事故 #7 同型）；
+生產庫實測 13 個配對 5 個跨機制。Critical 2：pending 單槽覆寫，週一未送達的 PSA10 告警被週二的 PSA9 覆寫後永遠消失（實跑重現）。
+Warning 2：`signature` 無卡號時是 token fallback，會把不同卡配成一對（1,806 筆裡只有 350 筆有 `set_code`）。
+Warning 3：`coverage_time_split` 的 `as_of` 解析失敗會靜默退回牆上時鐘。Warning 4：daily 掛鉤零測試。
+Warning 1／5、Suggestion 見 Task 16 與 Verdict 補記。plan Task 3 的偏離（取價格中位再取 log，而非 log 的中位）是實作者修正 plan 的自相矛盾，**採實作版本**：偶數 n 時價格中位是算術平均，與 `statistics.median` 一致。
+
+### Task 12 @sdd：配對只在「同卡×同成交機制×有卡號」之內
+
+**Files:** `src/ygo_sniper/store.py`（`comps_for_drift`）、`src/ygo_sniper/market_drift.py`（`repeat_sale_ratio`）、`tests/test_market_drift.py`
+
+- [ ] **Step 1: 改測試（紅燈）**
+
+`tests/test_market_drift.py` 的 `_insert_comp` 簽名加兩個參數並寫進 INSERT：
+
+```python
+def _insert_comp(store, *, signature, sold_at, price, grader="PSA", grade=10.0,
+                 ingest=0, era="1999", dup_of=None, currency="JPY", site="buyee_yahoo",
+                 sale_kind="auction", set_code="LOB-001"):
+    with store._conn() as c:
+        c.execute(
+            "INSERT INTO comps (signature, title, price_twd, price_native, currency, site, "
+            "sold_at, grader, grade, era_evidence, sold_at_is_ingest, dup_of_id, sale_kind, set_code) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (signature, f"t {signature}", price * 0.22, price, currency, site,
+             sold_at, grader, grade, era, ingest, dup_of, sale_kind, set_code),
+        )
+```
+
+`TestCompsForDrift` 加一個測試：
+
+```python
+    def test_requires_set_code_and_known_sale_kind(self, store):
+        _insert_comp(store, signature="ok", sold_at="2026-09-01T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature="nocode", sold_at="2026-09-01T00:00:00+00:00", price=1000, set_code="")
+        _insert_comp(store, signature="nokind", sold_at="2026-09-01T00:00:00+00:00", price=1000, sale_kind="unknown")
+        rows = store.comps_for_drift()
+        assert [r["signature"] for r in rows] == ["ok"]
+        assert rows[0]["sale_kind"] == "auction" and rows[0]["set_code"] == "LOB-001"
+```
+
+`_row` helper 改為（加 `sale_kind` 參數，預設 auction）：
+
+```python
+def _row(sig, day, price, grader="PSA", grade=10.0, sale_kind="auction"):
+    return {"signature": sig, "sold_at": f"2026-{day}T12:00:00+00:00", "price_native": price,
+            "currency": "JPY", "grader": grader, "grade": grade, "site": "buyee_yahoo",
+            "sale_kind": sale_kind}
+```
+
+`TestRepeatSaleRatio` 加兩個測試：
+
+```python
+    def test_cross_mechanism_sales_are_not_paired(self):
+        rows = [_row("a", "07-10", 1000, sale_kind="auction"), _row("a", "09-01", 800, sale_kind="fixed")]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0
+        assert pts["PSA10"].n_recent == 1 and pts["PSA10"].n_base == 1
+
+    def test_same_card_two_mechanisms_give_two_pairs(self):
+        rows = [_row("a", "07-10", 1000, sale_kind="auction"), _row("a", "09-01", 800, sale_kind="auction"),
+                _row("a", "07-12", 2000, sale_kind="fixed"), _row("a", "09-02", 2000, sale_kind="fixed")]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 2
+        assert pts["PSA10"].ratio == pytest.approx(math.exp((math.log(0.8) + 0.0) / 2))
+
+    def test_unknown_sale_kind_rows_are_skipped(self):
+        rows = [_row("a", "07-10", 1000, sale_kind="unknown"), _row("a", "09-01", 800, sale_kind="unknown")]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0 and pts["PSA10"].n_recent == 0
+```
+
+Run: `.venv/bin/pytest tests/test_market_drift.py -v` → 期望 4 個新測試紅（其餘綠）。
+
+- [ ] **Step 2: 實作**
+
+`store.py` 的 `comps_for_drift` SQL 換成：
+
+```python
+        q = (
+            "SELECT signature, sold_at, price_native, currency, grader, grade, site, "
+            "sale_kind, set_code "
+            "FROM comps WHERE COALESCE(sold_at_is_ingest, 0) = 0 AND dup_of_id IS NULL "
+            "AND price_native > 0 AND COALESCE(era_evidence, '') <> '' "
+            "AND COALESCE(set_code, '') <> '' AND sale_kind IN ('auction', 'fixed') "
+            "ORDER BY sold_at"
+        )
+```
+
+docstring 末尾加一段：
+
+```
+        **只取有卡號、且成交機制已知的列**（2026-09-14 審查回合）：`signature` 沒卡號時是
+        標題 token 的 fallback，會把不同卡配成一對；`sale_kind` 不分則是拿ヤフオク落札價
+        對フリマ一口價（第三節事故 #7）。兩者都會在配對數只有個位數時決定整帶的答案。
+```
+
+`market_drift.py` 的 `repeat_sale_ratio`：迴圈裡 `sig = str(r.get("signature") or "")` 之後改成
+
+```python
+        kind = r.get("sale_kind")
+        if kind not in ("auction", "fixed"):
+            continue
+        sig = f"{sig}|{kind}"
+```
+
+（放在 `if not sig: continue` 之後、`for b in (band, ALL_BAND):` 之前。）docstring 的「同卡對同卡」那句後面補：
+「而且**同機制對同機制**：競標落札價與定價成交是兩種價格形成機制（第三節事故 #7），同一張卡的
+auction 配 auction、fixed 配 fixed，各算一對。」
+
+Run: `.venv/bin/pytest tests/test_market_drift.py -v` → 全綠（28 passed）。
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/ygo_sniper/store.py src/ygo_sniper/market_drift.py tests/test_market_drift.py
+git commit -m "fix(market-drift): 配對限同卡×同成交機制×有卡號——不拿落札價對一口價、不讓 token fallback 配錯卡
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+### Task 13 @sdd：pending 帳本改「合併」，未送達的帶不會被覆寫
+
+**Files:** `src/ygo_sniper/market_drift.py`、`tests/test_market_drift.py`
+
+- [ ] **Step 1: 紅燈測試**（append 到 `TestDeliverDriftAlert` 類之後）
+
+```python
+class TestPendingMerge:
+    def test_undelivered_band_survives_next_days_refresh(self, store):
+        cfg = _Cfg(external_enabled=False)
+        # day 1：PSA10 跌 → pending，送失敗
+        _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
+        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 13, tzinfo=UTC))
+        assert deliver_drift_alert(store, _Notifier(ok=False)) is False
+        # day 2：PSA10 回升、PSA9 跌
+        _insert_comp(store, signature="a", sold_at="2026-09-12T00:00:00+00:00", price=1300)
+        _insert_comp(store, signature="b", sold_at="2026-07-20T00:00:00+00:00", price=1000, grade=9.0)
+        _insert_comp(store, signature="b", sold_at="2026-09-10T00:00:00+00:00", price=700, grade=9.0)
+        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 14, tzinfo=UTC))
+        pending = json.loads(store.get_meta(DRIFT_PENDING_KEY))
+        assert pending["bands"] == {"PSA10": "2026-09-13", "PSA9": "2026-09-14"}
+        n = _Notifier(ok=True)
+        assert deliver_drift_alert(store, n) is True
+        assert "PSA10" in n.sent[0] and "PSA9" in n.sent[0]
+        assert json.loads(store.get_meta(DRIFT_SENT_KEY)) == {"PSA10": "2026-09-13", "PSA9": "2026-09-14"}
+
+    def test_same_band_newer_day_replaces_its_own_line(self, store):
+        cfg = _Cfg(external_enabled=False)
+        _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
+        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 13, tzinfo=UTC))
+        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 14, tzinfo=UTC))
+        pending = json.loads(store.get_meta(DRIFT_PENDING_KEY))
+        assert pending["bands"] == {"PSA10": "2026-09-14"}
+        assert pending["text"].count("PSA10") == 1
+```
+
+Run: `.venv/bin/pytest tests/test_market_drift.py -v -k PendingMerge` → 紅。
+
+- [ ] **Step 2: 實作**
+
+`market_drift.py`：把 `evaluate_alert` 改成用兩個小函式組文字（行為不變）：
+
+```python
+_ALERT_HEADER = "📉 市場漂移告警（同卡重複成交，近 4 週 vs 前 8 週）"
+_ALERT_FOOTER = "只顯示、不進估價；出價上限仍由區間下緣反推，請人工留意估價可能偏高。"
+
+
+def _band_line(p: DriftPoint) -> str:
+    return f"{p.band} ×{p.ratio:.2f}（n={p.n_pairs}）"
+
+
+def _compose_alert(lines: dict[str, str]) -> str:
+    """依 BANDS 順序組告警文字；`lines` 是 帶 → 那一行。"""
+    body = [lines[b] for b in BANDS if b in lines]
+    return "\n".join([_ALERT_HEADER, *body, _ALERT_FOOTER])
+
+
+def evaluate_alert(
+    points: list[DriftPoint], *, alert_ratio: float, min_pairs: int,
+) -> tuple[str | None, list[str]]:
+    """哪些帶該告警。回 (告警文字或 None, 觸發的帶)。ALL 帶不告警（只當總覽）。"""
+    hits = [
+        p for p in points
+        if p.band in BANDS and p.ratio is not None and p.n_pairs >= min_pairs
+        and p.ratio <= alert_ratio
+    ]
+    if not hits:
+        return None, []
+    return _compose_alert({p.band: _band_line(p) for p in hits}), [p.band for p in hits]
+```
+
+`refresh_market_drift` 最後那段（從 `# 去重：` 到 `return`）換成：
+
+```python
+    # 去重：同一帶同一 as_of 已送達過就不再排 pending。
+    # **pending 是合併不是覆寫**（2026-09-14 審查回合 Critical 2）：昨天沒送出去的帶要留著，
+    # 今天新增的帶加進去；同一帶以較新的 as_of 那一行取代自己的舊行。送達才整批清。
+    sent = json.loads(store.get_meta(DRIFT_SENT_KEY) or "{}")
+    wk = _week_key(now)
+    fresh = [b for b in alert_bands if sent.get(b) != wk]
+    existing = json.loads(store.get_meta(DRIFT_PENDING_KEY) or "null") or {}
+    bands: dict[str, str] = dict(existing.get("bands") or {})
+    lines: dict[str, str] = dict(existing.get("lines") or {})
+    for p in latest:
+        if p.band in fresh:
+            bands[p.band] = wk
+            lines[p.band] = _band_line(p)
+    if bands:
+        store.set_meta(DRIFT_PENDING_KEY, json.dumps(
+            {"text": _compose_alert(lines), "bands": bands, "lines": lines}, ensure_ascii=False
+        ))
+    return {"alert_text": _compose_alert(lines) if fresh else None, "alert_bands": fresh, "latest": latest}
+```
+
+Run: `.venv/bin/pytest tests/test_market_drift.py -v` → 全綠（30 passed）。
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/ygo_sniper/market_drift.py tests/test_market_drift.py
+git commit -m "fix(market-drift): pending 帳本改合併——未送達的告警不會被隔天別的帶覆寫
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+### Task 14 @sdd：`coverage_time_split` 的 `as_of` 解析失敗要大聲
+
+**Files:** `src/ygo_sniper/valuation.py`、`tests/test_valuation_recency.py`
+
+- [ ] **Step 1: 紅燈測試**（append 到 `TestCoverageTimeSplitTails`）
+
+```python
+    def test_unparseable_train_until_raises(self):
+        rows = self._rows()
+        bad = Obs(1000.0, "A", "ultra", 9.0, key="bad", sold_at="9999-99-99T00:00:00+00:00")
+        with pytest.raises(ValueError, match="as_of"):
+            coverage_time_split([*rows, bad], PRIOR, test_fraction=0.25)
+```
+
+- [ ] **Step 2: 實作**：`coverage_time_split` 裡
+
+```python
+    as_of = _parse_obs_date(out["train_until"])
+```
+
+之後加：
+
+```python
+    if as_of is None:
+        raise ValueError(
+            f"coverage_time_split: 訓練截止 sold_at 解析不出 as_of（{out['train_until']!r}）——"
+            "時間權重的錨點不能靜默退回牆上時鐘（會讓預註冊判準的輸入換基準）"
+        )
+```
+
+Run: `.venv/bin/pytest tests/test_valuation_recency.py tests/test_valuation.py -v` → 全綠（74 passed）。
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/ygo_sniper/valuation.py tests/test_valuation_recency.py
+git commit -m "fix(coverage-time): as_of 解析失敗改拋錯，不靜默退回牆上時鐘
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+### Task 15 @sdd：daily 掛鉤的接線測試
+
+**Files:** `tests/test_market_drift.py`
+
+- [ ] **Step 1: 測試**（append 到檔尾；`_refresh_market_drift_daily` 已存在於 cli.py，這個測試一開始就應該綠——它的價值是把接線釘住）
+
+```python
+from ygo_sniper import cli as cli_mod  # noqa: E402
+from ygo_sniper.market_drift import DRIFT_COMPUTED_DATE_KEY  # noqa: E402
+
+
+class _Pipe:
+    def __init__(self, store):
+        self.store = store
+        self.fetcher = _FetcherDown()
+        self.cfg = _Cfg(external_enabled=False)
+        self.notifier = _Notifier(ok=True)
+
+
+class TestDailyHook:
+    def test_daily_refreshes_once_per_day_but_delivers_every_run(self, store, monkeypatch):
+        calls = {"refresh": 0, "deliver": 0}
+        real_refresh = cli_mod.refresh_market_drift
+        real_deliver = cli_mod.deliver_drift_alert
+
+        def spy_refresh(*a, **kw):
+            calls["refresh"] += 1
+            return real_refresh(*a, **kw)
+
+        def spy_deliver(*a, **kw):
+            calls["deliver"] += 1
+            return real_deliver(*a, **kw)
+
+        monkeypatch.setattr(cli_mod, "refresh_market_drift", spy_refresh)
+        monkeypatch.setattr(cli_mod, "deliver_drift_alert", spy_deliver)
+        pipe = _Pipe(store)
+        cli_mod._refresh_market_drift_daily(pipe)
+        cli_mod._refresh_market_drift_daily(pipe)
+        assert calls == {"refresh": 1, "deliver": 2}
+        assert store.get_meta(DRIFT_COMPUTED_DATE_KEY) is not None
+
+    def test_daily_sends_alert_when_band_drops(self, store):
+        _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
+        pipe = _Pipe(store)
+        cli_mod._refresh_market_drift_daily(pipe)
+        # 這筆成交若已超出「近 28 天」視窗（測試在 2026-09-29 之後跑），告警不該響——用 as_of 判斷
+        latest = json.loads(store.get_meta(DRIFT_LATEST_KEY))
+        if "PSA10" in latest["alert_bands"]:
+            assert any("PSA10" in t for t in pipe.notifier.sent)
+        else:
+            assert pipe.notifier.sent == []
+
+    def test_daily_never_raises_when_refresh_explodes(self, store, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("db on fire")
+        monkeypatch.setattr(cli_mod, "refresh_market_drift", boom)
+        cli_mod._refresh_market_drift_daily(_Pipe(store))   # 不拋就是通過
+        assert store.get_meta(DRIFT_COMPUTED_DATE_KEY) is None
+```
+
+Run: `.venv/bin/pytest tests/test_market_drift.py -v` → 全綠（33 passed）。
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add tests/test_market_drift.py
+git commit -m "test(market-drift): 釘住 daily 掛鉤——一天算一次、每輪都送 pending、refresh 炸掉不拖垮
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+### Task 16 @sdd：dashboard pill 顯示配對數、失敗不靜默
+
+**Files:** `web/static/index.html`（`loadStats()` 裡 Task 7 加的那段）
+
+- [ ] **Step 1: 改**：把那段 try 內的 `fmt` 與 `catch` 改成
+
+```javascript
+      const fmt = b => (by[b] && by[b].ratio != null)
+        ? `×${by[b].ratio.toFixed(2)}<small style="opacity:.7">(n=${by[b].n_pairs})</small>` : "—";
+```
+
+```javascript
+  } catch (e) { console.warn("market-drift pill", e); }
+```
+
+- [ ] **Step 2: 驗收**：`grep -c 'n_pairs' web/static/index.html` → `1`；`grep -c 'console.warn("market-drift' web/static/index.html` → `1`。
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add web/static/index.html
+git commit -m "fix(web): 漂移 pill 帶配對數，API 失敗寫 console.warn 不靜默
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+### Verdict 補記（Warning 1、5）
+
+- **Warning 1**：`n_eff` 在 `half_life_days` 非 null 時是權重和，`bidding.DEFAULT_REJECT_N_BUCKETS=("10-49",)` 那道閘門是在筆數基準下實測的。
+  目前 null → 休眠。**若日後開啟半衰期，`reject_n_buckets` 必須連帶用 `coverage-groups` 重量測**（已寫進 CLAUDE.md 第七節）。
+- **Warning 5**：`min_pairs: 8` 在現有資料密度（且 Task 12 之後只剩同機制×有卡號的配對，更少）下不可達，本地告警實質不會觸發。
+  這是資料事實，由使用者決定要不要拉長視窗（56/112）或降 `min_pairs`。health／dashboard 都會明示「配對不足」，不是靜默。
