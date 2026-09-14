@@ -395,8 +395,11 @@ valuation:
 # ---------------------------------------------------------------------------
 market_drift:
   # 「近 recent_days 天」對「再往前 base_days 天」的同卡重複成交倍率。
-  recent_days: 28
-  base_days: 56
+  # 2026-09-14 全量回補（comps-backfill，真實成交日 1,830→2,296 筆）後實測配對數：
+  #   28/56 → 35 對（只有 PSA9、ARS10 達 min_pairs）；56/112 → 82 對（除 ARS≤8 外每帶 ≥9）。
+  # 取 56/112：本地指數量的是「這一季 vs 上一季」的月級 regime，快訊號交給外部週次指數。
+  recent_days: 56
+  base_days: 112
   # 某帶倍率 ≤ alert_ratio 且配對數 ≥ min_pairs 才告警（配對不足＝「讀不到」，不是「沒跌」）。
   alert_ratio: 0.90
   min_pairs: 8

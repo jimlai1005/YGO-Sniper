@@ -24,8 +24,8 @@ class TestConfig:
     def test_market_drift_section_is_loaded(self):
         cfg = load_config()
         md = cfg.market_drift
-        assert md["recent_days"] == 28
-        assert md["base_days"] == 56
+        assert md["recent_days"] == 56
+        assert md["base_days"] == 112
         assert md["alert_ratio"] == 0.90
         assert md["min_pairs"] == 8
         assert md["external_url"].startswith("https://yugioh-relief.com/")
