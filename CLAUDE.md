@@ -377,6 +377,11 @@ ygo-sniper coverage-time --real-time-only --test-fraction 0.11 \
                                # 時間切分覆蓋率＋時間加權對照（含下尾違反率）。
                                #   改 valuation.half_life_days 之前必跑，判準見
                                #   docs/plans/market-drift-recency.md Task 11
+ygo-sniper comps-backfill      # 行情回補：對卡名主檔比對得到的每張卡挖 Yahoo 落札相場
+                               #   （3 頁≈180 天）＋PayPay 已售出，填 comps。--dry-run 只列清單；
+                               #   --limit N 分批；BLOCKED 立刻中止（exit 2）。節流帳與 refill
+                               #   共用 comps_refill（預設 21 天冷卻）。daily 每天自動輪 30 張
+                               #   （第 1 頁，market_drift.backfill_daily_limit，0 關閉）
 ygo-sniper market-drift        # 市場漂移：同卡重複成交倍率（本地）＋ yugioh-relief.com
                                #   週次 PSA 浮雕指數（外部對照）。只顯示、只告警、不進估價。
                                #   daily 每天自動算一次；health 也印。--no-refresh 只讀 meta
