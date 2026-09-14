@@ -314,3 +314,23 @@ class TestDeliverDriftAlert:
         n2 = _Notifier(ok=True)
         assert deliver_drift_alert(store, n2) is True
         assert store.get_meta(DRIFT_PENDING_KEY, "") == ""
+
+
+from ygo_sniper.cli import _drift_table_rows  # noqa: E402
+
+
+class TestDriftTableRows:
+    def test_rows_are_human_readable(self):
+        latest = {
+            "as_of": "2026-09-14", "recent_days": 28, "base_days": 56, "min_pairs": 8,
+            "alert_bands": ["PSA10"],
+            "latest": [
+                {"band": "PSA10", "as_of": "2026-09-14", "ratio": 0.85, "n_pairs": 9, "n_recent": 20, "n_base": 40},
+                {"band": "PSA9", "as_of": "2026-09-14", "ratio": None, "n_pairs": 0, "n_recent": 3, "n_base": 0},
+                {"band": "ARS10", "as_of": "2026-09-14", "ratio": 1.02, "n_pairs": 4, "n_recent": 8, "n_base": 9},
+            ],
+        }
+        rows = _drift_table_rows(latest)
+        assert rows[0] == ("PSA10", "×0.85", "9", "20 / 40", "📉 告警")
+        assert rows[1] == ("PSA9", "—", "0", "3 / 0", "樣本不足（讀不到≠沒跌）")
+        assert rows[2] == ("ARS10", "×1.02", "4", "8 / 9", "配對 <8，僅供參考")

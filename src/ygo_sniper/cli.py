@@ -21,6 +21,14 @@ from .alerts import HEALTH_LABEL
 from .config import load_config
 from .costs import breakeven_table
 from .fx import FxRates
+from .market_drift import (
+    DRIFT_COMPUTED_DATE_KEY,
+    DRIFT_LATEST_KEY,
+    RELIEF_ERROR_KEY,
+    RELIEF_LATEST_KEY,
+    deliver_drift_alert,
+    refresh_market_drift,
+)
 from .pipeline import Pipeline
 from .schedule_watch import PENDING_ALERT_KEY
 from .seller_alpha import SALE_AUCTION, SALE_FIXED, SALE_KIND_LABEL, SALE_UNKNOWN
@@ -58,6 +66,7 @@ def daily(
         result = pipe.scan(skip_comps=skip_comps)
         _print_scan(result)
         _mine_snipes_daily(pipe)
+        _refresh_market_drift_daily(pipe)
         if not no_notify:
             _run_notifications(pipe, result, band="std")
     finally:
@@ -169,6 +178,37 @@ def _mine_snipes_daily(pipe) -> None:
     # 只有全部成功才記帳：有管道被擋就讓下一輪再試（否則今天就再也不挖了）
     if not problems:
         pipe.store.set_meta(_SNIPE_MINE_META_KEY, today)
+
+
+def _refresh_market_drift_daily(pipe) -> None:
+    """每天算一次市場漂移指數並送（或重送）告警。**失敗只警告，絕不影響掃描與推播。**
+
+    計算一天一次（meta `DRIFT_COMPUTED_DATE_KEY`），但**每一輪都嘗試送 pending**：
+    昨天沒送出去的告警不能因為今天不重算就永遠卡住（送達才消耗，CLAUDE.md 第五節第 7 項）。
+    """
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    today = now.date().isoformat()
+    if pipe.store.get_meta(DRIFT_COMPUTED_DATE_KEY) != today:
+        try:
+            res = refresh_market_drift(pipe.store, pipe.fetcher, pipe.cfg, now=now)
+        except Exception as exc:  # noqa: BLE001 - 指數算壞不能拖垮 daily，但要大聲
+            print(f"[warn] 市場漂移指數計算失敗：{type(exc).__name__}: {exc}")
+        else:
+            pipe.store.set_meta(DRIFT_COMPUTED_DATE_KEY, today)
+            if res["alert_bands"]:
+                console.print(f"[yellow]市場漂移告警：{', '.join(res['alert_bands'])}[/yellow]")
+            err = pipe.store.get_meta(RELIEF_ERROR_KEY, "")
+            if err:
+                print(f"[warn] 外部指數抓取失敗（沿用上一份）：{err}")
+    try:
+        ok = deliver_drift_alert(pipe.store, pipe.notifier)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] 市場漂移告警送出時例外：{type(exc).__name__}: {exc}")
+        return
+    if not ok:
+        console.print("[red]市場漂移告警送出失敗——留在 pending 帳裡，下一輪會重送[/red]")
 
 
 def _run_notifications(pipe, result: dict, *, band: str | None = None) -> int:
@@ -2194,6 +2234,83 @@ def stats():
     console.print_json(json.dumps(Store(cfg.db_path).stats(), ensure_ascii=False, default=str))
 
 
+def _drift_table_rows(latest: dict) -> list[tuple[str, str, str, str, str]]:
+    """把 meta 裡的 latest 轉成 health 表的列：(帶, 倍率, 配對數, 近期/基期筆數, 判讀)。"""
+    min_pairs = int(latest.get("min_pairs", 8))
+    alert_bands = set(latest.get("alert_bands") or [])
+    rows = []
+    for p in latest.get("latest") or []:
+        ratio = p.get("ratio")
+        n_pairs = int(p.get("n_pairs") or 0)
+        if ratio is None:
+            note = "樣本不足（讀不到≠沒跌）"
+        elif p["band"] in alert_bands:
+            note = "📉 告警"
+        elif n_pairs < min_pairs:
+            note = f"配對 <{min_pairs}，僅供參考"
+        else:
+            note = ""
+        rows.append((
+            p["band"],
+            f"×{ratio:.2f}" if ratio is not None else "—",
+            str(n_pairs),
+            f"{p.get('n_recent', 0)} / {p.get('n_base', 0)}",
+            note,
+        ))
+    return rows
+
+
+def _print_market_drift(store: Store) -> None:
+    raw = store.get_meta(DRIFT_LATEST_KEY)
+    if not raw:
+        console.print("[dim]市場漂移：還沒算過。跑一次 `ygo-sniper market-drift` 或等 daily。[/dim]")
+        return
+    latest = json.loads(raw)
+    t = Table(
+        title=f"市場漂移（同卡重複成交：近 {latest['recent_days']} 天 vs 前 {latest['base_days']} 天"
+              f"｜as_of {latest['as_of']}｜樣本 {latest.get('n_rows', '?')} 筆真實成交日）"
+    )
+    for col in ("帶", "倍率", "配對", "近期/基期筆數", "判讀"):
+        t.add_column(col, justify="right" if col in ("倍率", "配對") else "left")
+    for row in _drift_table_rows(latest):
+        t.add_row(*row)
+    console.print(t)
+    ext_raw = store.get_meta(RELIEF_LATEST_KEY)
+    err = store.get_meta(RELIEF_ERROR_KEY, "")
+    if ext_raw:
+        ext = json.loads(ext_raw)
+        weeks = ext.get("weeks") or []
+        t2 = Table(title=f"外部對照：yugioh-relief.com 週次 PSA 浮雕指數（抓於 {ext.get('fetched_at', '')[:16]}"
+                         "｜只涵蓋浮雕、carry-forward 中位數、**不進計算**）")
+        for col in ("週", "全部", "PSA10", "PSA9", "PSA≤8", "更新/成分"):
+            t2.add_column(col, justify="left" if col == "週" else "right")
+        for w in weeks[-6:]:
+            t2.add_row(w["week_start"], f"{w['all']:.1f}", f"{w['psa10']:.1f}", f"{w['psa9']:.1f}",
+                       f"{w['psa8_below']:.1f}", f"{w['updated']}/{w['components']}")
+        console.print(t2)
+    if err:
+        console.print(f"[red]外部指數最近一次抓取失敗：{err}[/red]")
+
+
+@app.command(name="market-drift")
+def market_drift(
+    refresh: bool = typer.Option(True, "--refresh/--no-refresh", help="重算並抓外部指數；--no-refresh 只印 meta 裡的"),
+):
+    """市場漂移監視器：同卡重複成交倍率（本地）＋ yugioh-relief.com 週次指數（外部對照）。
+    只顯示、只告警，永遠不進估價。告警由 daily 推播；這個指令不送 Telegram。"""
+    from datetime import UTC, datetime
+
+    from .sources.base import CachedFetcher
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    if refresh:
+        res = refresh_market_drift(store, CachedFetcher(cfg), cfg, now=datetime.now(UTC))
+        if res["alert_bands"]:
+            console.print(f"[yellow]告警帶：{', '.join(res['alert_bands'])}（已排入 pending，下一輪 daily 推播）[/yellow]")
+    _print_market_drift(store)
+
+
 @app.command()
 def health(
     clear: bool = typer.Option(
@@ -2256,6 +2373,8 @@ def health(
                 s.get("detail") or "",
             )
         console.print(t)
+
+    _print_market_drift(store)
 
     rows = store.list_alerts()
     if not rows:
