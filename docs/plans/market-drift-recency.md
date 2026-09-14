@@ -2820,3 +2820,123 @@ git commit -m "feat(daily): 每天輪 30 張卡的行情回補（第 1 頁），
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
+
+### Task 21 @sdd：回補查詢加鑑定詞變體（高流量卡才挖得到 180 天）
+
+背景（主線程 2026-09-14 實測 `yahoo_closed` 3 頁）：`青眼の白龍` 純卡名 300 筆只回溯 09-06～09-14（8 天，被熱門未鑑定卡淹沒）；
+`青眼の白龍 PSA` 回溯到 08-07；`青眼の白龍 ARS` 回溯到 04-21；`ブラック・マジシャン PSA` 回溯到 05-26。
+第一批 40 張回補：找到 2,646 筆、過濾後 63 筆、**真正新增只有 10 筆**（其餘已在庫）。
+所以：每張卡對 `yahoo_closed` 跑三組查詢——純卡名（抓沒寫機構的）、`卡名 PSA`、`卡名 ARS`；鑑定詞變體允許翻更多頁
+（來源在檔案盡頭會提早停，`pages_fetched < pages`，多給的頁數只對高流量卡生效）。`paypay_direct` 只跑純卡名。
+
+**Files:** `src/ygo_sniper/comps_backfill.py`、`src/ygo_sniper/cli.py`（`comps-backfill` 指令）、`tests/test_comps_backfill.py`
+
+- [ ] **Step 1: 紅燈測試**（append 到 `TestRunBackfill`）
+
+```python
+    def test_yahoo_gets_grader_variants_with_deeper_pages(self, store):
+        y, p = _Src(n=3), _Src(n=1)
+        rep = run_backfill(store=store, sources={"yahoo_closed": y, "paypay_direct": p}, comps=_Comps(kept=1),
+                           names=["a"], cooldown_days=7, limit=None,
+                           pages={"yahoo_closed": 3, "paypay_direct": 1},
+                           grader_terms=("PSA", "ARS"), variant_pages=6, log=lambda s: None)
+        assert y.calls == [("a", 3), ("a PSA", 6), ("a ARS", 6)]
+        assert p.calls == [("a", 1)]
+        assert rep.found == 3 + 3 + 3 + 1 and rep.kept == 4
+
+    def test_no_grader_terms_keeps_single_query(self, store):
+        y = _Src(n=2)
+        run_backfill(store=store, sources={"yahoo_closed": y}, comps=_Comps(), names=["a"],
+                     cooldown_days=7, limit=None, pages={"yahoo_closed": 2}, grader_terms=(), log=lambda s: None)
+        assert y.calls == [("a", 2)]
+
+    def test_blocked_on_variant_stops_run(self, store):
+        class _Flaky(_Src):
+            def search_detailed(self, keyword, *, sold, pages):
+                self.calls.append((keyword, pages))
+                h = ParseHealth.BLOCKED if keyword.endswith(" ARS") else ParseHealth.OK
+                return SearchResult(source="x", site="buyee_yahoo", query=keyword, listings=[object()],
+                                    parsed_count=1, pages_fetched=1, health=h)
+        y = _Flaky()
+        rep = run_backfill(store=store, sources={"yahoo_closed": y}, comps=_Comps(), names=["a", "b"],
+                           cooldown_days=7, limit=None, pages={"yahoo_closed": 1},
+                           grader_terms=("PSA", "ARS"), variant_pages=2, log=lambda s: None)
+        assert rep.blocked is True and rep.cards_done == 0 and len(y.calls) == 3
+```
+
+既有 `test_queries_each_source_with_its_pages_and_records_ledger` 等測試**沒傳** `grader_terms`，預設必須維持「只查純卡名」
+（預設 `grader_terms=()`），這些測試不能變紅。
+
+Run: `.venv/bin/pytest tests/test_comps_backfill.py -v` → 3 條紅（`TypeError: unexpected keyword argument 'grader_terms'`）。
+
+- [ ] **Step 2: 實作**
+
+`comps_backfill.py`：`run_backfill` 簽名在 `dry_run` 之前加兩個參數：
+
+```python
+    grader_terms: tuple[str, ...] = (),
+    variant_pages: int = 6,
+```
+
+模組常數區加：
+
+```python
+#: 只有 yahoo_closed 值得跑鑑定詞變體（檔案深、被未鑑定卡淹沒）；paypay 1 頁 5 筆，變體沒意義。
+VARIANT_SOURCES: frozenset[str] = frozenset({"yahoo_closed"})
+```
+
+把 `for source_name, n_pages in pages.items():` 那個迴圈整個換成：
+
+```python
+        for source_name, n_pages in pages.items():
+            src = sources.get(source_name)
+            if src is None or not getattr(src, "supports_sold", False):
+                continue
+            queries: list[tuple[str, int]] = [(name, n_pages)]
+            if source_name in VARIANT_SOURCES:
+                queries += [(f"{name} {g}", variant_pages) for g in grader_terms]
+            for keyword, q_pages in queries:
+                res = _sold_search(src, source_name, keyword, pages=q_pages)
+                health = getattr(res.health, "name", str(res.health))
+                if health == "BLOCKED":
+                    report.blocked = True
+                    report.problems.append(f"{source_name}／{keyword}：BLOCKED——中止本輪，避免升級封鎖")
+                    return report
+                if health not in ("OK", "EMPTY_CONFIRMED"):
+                    report.problems.append(
+                        f"{source_name}／{keyword}：{health}（{getattr(res, 'detail', '') or '沒有細節'}）"
+                    )
+                    continue
+                observed = True
+                ingest = comps.ingest_sold(res.listings)
+                found += len(res.listings)
+                kept += int(getattr(ingest, "kept", 0))
+```
+
+docstring 補一段：「`grader_terms`：對 `VARIANT_SOURCES` 多跑 `卡名 PSA`／`卡名 ARS`。高流量卡的落札檔案被未鑑定卡淹沒
+（`青眼の白龍` 純卡名 3 頁只回溯 8 天，加 ARS 回溯 5 個月，2026-09-14 實測），鑑定詞變體是唯一挖得到它們 180 天的方法；
+`ingest_sold` 本來就只收有機構的列，所以變體不會放進任何純卡名查不到的垃圾。」
+
+`cli.py` 的 `comps-backfill` 指令加兩個參數並傳入：
+
+```python
+    grader_terms: str = typer.Option("PSA,ARS", help="yahoo_closed 額外跑「卡名 <詞>」變體，逗號分隔；空字串＝不跑"),
+    variant_pages: int = typer.Option(6, help="鑑定詞變體每查詢最多頁數（檔案到底會提早停）"),
+```
+`run_backfill(...)` 呼叫加 `grader_terms=tuple(t.strip() for t in grader_terms.split(",") if t.strip()), variant_pages=variant_pages,`。
+`console.print(f"[dim]已知 in_era 卡名 …` 那行尾補 `｜變體 {grader_terms or '無'}×{variant_pages} 頁`。
+
+Task 20 的 `_backfill_comps_daily` 也加 `grader_terms=("PSA", "ARS"), variant_pages=2`（每天 30 張 × (1+2+2+1)=6 請求 → 180 請求 ≈ 7 分鐘；
+watchdog 預算 1500 秒，可承受）。並把 `TestDailyBackfillHook.test_daily_calls_backfill_slice_once_per_day` 的 assert 加一行：
+`assert calls[0]["grader_terms"] == ("PSA", "ARS") and calls[0]["variant_pages"] == 2`。
+
+Run: `.venv/bin/pytest tests/test_comps_backfill.py tests/test_market_drift.py -v` → 全綠（51 passed）。
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/ygo_sniper/comps_backfill.py src/ygo_sniper/cli.py tests/test_comps_backfill.py tests/test_market_drift.py
+git commit -m "feat(comps-backfill): yahoo_closed 加「卡名 PSA／ARS」變體查詢——高流量卡才挖得到 180 天
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
