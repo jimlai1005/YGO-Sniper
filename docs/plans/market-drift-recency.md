@@ -2380,3 +2380,443 @@ git commit -m "fix(market-drift): 配對鍵改卡名主檔身分（與估價同�
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
+
+### Task 19 @sdd：`comps-backfill`——對已知卡名挖各平台已售出檔案，填 comps（一次性回補＋可輪替）
+
+背景（主線程 2026-09-14 實測）：`yahoo_closed`（Yahoo 落札相場）對特定卡名 1-2 頁就能回溯約 180 天
+（`コスモクイーン` 138 筆 2026-03-18～09-13；`きまぐれの女神` 76 筆 03-22～09-12）；`paypay_direct` 1 頁 5 筆、只有近幾天。
+comps 與 signals 標題經卡名主檔比對共 735 張 in_era 卡。回補走既有 `refill._sold_search` → `CompsEngine.ingest_sold`
+（同一組過濾、同一個去重），節流帳沿用 `comps_refill`（`store.record_refill`／`refill_cooldown_active`）。
+**碰到 BLOCKED 立刻停整輪**（升級封鎖會讓 daily 掃描一起瞎掉，CLAUDE.md 第五節）。
+
+**Files:**
+- Create: `src/ygo_sniper/comps_backfill.py`、`tests/test_comps_backfill.py`
+- Modify: `src/ygo_sniper/cli.py`（新增 `comps-backfill` 指令，放在 `market_drift` 指令之前）
+
+- [ ] **Step 1: 紅燈測試**（建立 `tests/test_comps_backfill.py`）
+
+```python
+"""行情回補：卡名清單、節流、BLOCKED 即停、入庫計數。"""
+
+from __future__ import annotations
+
+import pytest
+
+from ygo_sniper.comps_backfill import BackfillReport, known_card_names, run_backfill
+from ygo_sniper.sources.base import SearchResult
+from ygo_sniper.sources.health import ParseHealth
+from ygo_sniper.store import Store
+
+
+@pytest.fixture
+def store(tmp_path):
+    return Store(tmp_path / "t.db")
+
+
+class _Index:
+    available = True
+
+    class _M:
+        def __init__(self, name, in_era=True):
+            self.name_ja = name
+            self.in_era = in_era
+
+    def match(self, title):
+        if title.startswith("card:"):
+            return self._M(title[5:])
+        if title.startswith("modern:"):
+            return self._M(title[7:], in_era=False)
+        return None
+
+
+class _StoreTitles:
+    def __init__(self, comps, signals):
+        self._c = comps
+        self._s = signals
+
+    def comps_by(self, **kw):
+        return [{"title": t} for t in self._c]
+
+    def all_signal_titles(self):
+        return [{"title": t} for t in self._s]
+
+
+class TestKnownCardNames:
+    def test_union_dedup_sorted_in_era_only(self):
+        st = _StoreTitles(["card:b", "card:a", "junk", "modern:z"], ["card:a", "card:c"])
+        assert known_card_names(st, _Index()) == ["a", "b", "c"]
+
+
+class _Src:
+    supports_sold = True
+
+    def __init__(self, health=ParseHealth.OK, n=3):
+        self.health = health
+        self.n = n
+        self.calls = []
+
+    def search_detailed(self, keyword, *, sold, pages):
+        self.calls.append((keyword, pages))
+        return SearchResult(source="x", site="buyee_yahoo", query=keyword,
+                            listings=[object()] * self.n, parsed_count=self.n,
+                            pages_fetched=pages, health=self.health)
+
+
+class _Comps:
+    def __init__(self, kept=2):
+        self.kept = kept
+        self.batches = []
+
+    def ingest_sold(self, listings):
+        self.batches.append(len(listings))
+
+        class R:
+            kept = self.kept
+            rejected = 0
+        return R()
+
+
+class TestRunBackfill:
+    def test_queries_each_source_with_its_pages_and_records_ledger(self, store):
+        y, p = _Src(n=3), _Src(n=1)
+        comps = _Comps(kept=2)
+        rep = run_backfill(store=store, sources={"yahoo_closed": y, "paypay_direct": p}, comps=comps,
+                           names=["a", "b"], cooldown_days=7, limit=None,
+                           pages={"yahoo_closed": 3, "paypay_direct": 1}, log=lambda s: None)
+        assert y.calls == [("a", 3), ("b", 3)] and p.calls == [("a", 1), ("b", 1)]
+        assert comps.batches == [3, 1, 3, 1]
+        assert (rep.cards_total, rep.cards_done, rep.found, rep.kept) == (2, 2, 8, 8)
+        assert store.refill_cooldown_active(7) == {"a", "b"}
+
+    def test_cooldown_and_limit(self, store):
+        store.record_refill("a", found=1, kept=1)
+        y = _Src()
+        rep = run_backfill(store=store, sources={"yahoo_closed": y}, comps=_Comps(),
+                           names=["a", "b", "c"], cooldown_days=7, limit=1,
+                           pages={"yahoo_closed": 1}, log=lambda s: None)
+        assert rep.cards_skipped_cooldown == 1
+        assert [c[0] for c in y.calls] == ["b"]
+        assert rep.cards_done == 1
+
+    def test_blocked_stops_whole_run_and_does_not_record(self, store):
+        y = _Src(health=ParseHealth.BLOCKED)
+        rep = run_backfill(store=store, sources={"yahoo_closed": y}, comps=_Comps(),
+                           names=["a", "b"], cooldown_days=7, limit=None,
+                           pages={"yahoo_closed": 1}, log=lambda s: None)
+        assert rep.blocked is True and rep.cards_done == 0
+        assert len(y.calls) == 1
+        assert store.refill_cooldown_active(7) == set()
+
+    def test_fetch_failed_source_is_skipped_but_card_still_recorded_if_other_source_ok(self, store):
+        y = _Src(health=ParseHealth.FETCH_FAILED)
+        p = _Src(n=2)
+        rep = run_backfill(store=store, sources={"yahoo_closed": y, "paypay_direct": p}, comps=_Comps(kept=1),
+                           names=["a"], cooldown_days=7, limit=None,
+                           pages={"yahoo_closed": 1, "paypay_direct": 1}, log=lambda s: None)
+        assert rep.cards_done == 1 and rep.found == 2 and rep.kept == 1
+        assert len(rep.problems) == 1 and "FETCH_FAILED" in rep.problems[0]
+        assert store.refill_cooldown_active(7) == {"a"}
+
+    def test_all_sources_failed_does_not_record(self, store):
+        y = _Src(health=ParseHealth.FETCH_FAILED)
+        rep = run_backfill(store=store, sources={"yahoo_closed": y}, comps=_Comps(),
+                           names=["a"], cooldown_days=7, limit=None,
+                           pages={"yahoo_closed": 1}, log=lambda s: None)
+        assert rep.cards_done == 0 and store.refill_cooldown_active(7) == set()
+
+    def test_dry_run_touches_nothing(self, store):
+        y = _Src()
+        rep = run_backfill(store=store, sources={"yahoo_closed": y}, comps=_Comps(),
+                           names=["a"], cooldown_days=7, limit=None,
+                           pages={"yahoo_closed": 1}, dry_run=True, log=lambda s: None)
+        assert y.calls == [] and rep.cards_total == 1 and store.refill_cooldown_active(7) == set()
+```
+
+Run: `.venv/bin/pytest tests/test_comps_backfill.py -v` → `ModuleNotFoundError`。
+
+- [ ] **Step 2: 實作**（建立 `src/ygo_sniper/comps_backfill.py`）
+
+```python
+"""行情回補：對已知卡名挖各平台的已售出檔案，把有真實成交日的成交填進 comps。
+
+為什麼要有它（2026-09-14）：comps 是我們對市場檔案的**記憶體**——Yahoo 落札相場只保留
+約 180 天，Mercari 的已售出頁根本沒有日期。漂移指數與估價都吃 comps，而日常掃描只對
+屬性空間抽樣（`sold_shard`），單張卡的歷史要靠針對性查詢才會進來。這裡對「卡名主檔
+比對得到的每一張卡」各挖一次（首次回補），之後靠節流帳輪替保鮮。
+
+三條鐵律：
+1. 入庫只走 `CompsEngine.ingest_sold`（同一組過濾、同一個去重，工程原則 1）。
+2. **BLOCKED 立刻停整輪**：升級封鎖會讓 daily 掃描一起瞎掉（第五節）。
+3. 「至少一個來源完成觀測」才落節流帳；全滅不落帳，下輪重試（讀不到 ≠ 沒有）。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from typing import Any
+
+#: 來源 → 頁數。yahoo_closed 3 頁≈300 筆，對單張卡通常已到檔案盡頭（約 180 天）；
+#: paypay 1 頁只有 5 筆、只有近幾天，多翻沒有意義。
+DEFAULT_PAGES: dict[str, int] = {"yahoo_closed": 3, "paypay_direct": 1}
+
+
+@dataclass(slots=True)
+class BackfillReport:
+    cards_total: int = 0
+    cards_done: int = 0
+    cards_skipped_cooldown: int = 0
+    found: int = 0
+    kept: int = 0
+    blocked: bool = False
+    dry_run: bool = False
+    problems: list[str] = field(default_factory=list)
+    per_card: list[tuple[str, int, int]] = field(default_factory=list)
+
+    def summary(self) -> str:
+        head = (
+            f"回補 {self.cards_done}/{self.cards_total} 張（冷卻跳過 {self.cards_skipped_cooldown}）"
+            f"｜找到 {self.found} 筆、入庫 {self.kept} 筆"
+        )
+        if self.dry_run:
+            head += "｜dry-run（未打外網）"
+        if self.blocked:
+            head += "｜⚠️ 被擋，已中止"
+        if self.problems:
+            head += f"｜問題 {len(self.problems)} 條"
+        return head
+
+
+def known_card_names(store: Any, index: Any) -> list[str]:
+    """comps 與 signals 的標題經卡名主檔比對出的 in_era 卡名，去重、排序（決定性）。"""
+    names: set[str] = set()
+    titles = [r.get("title") or "" for r in store.comps_by(limit=20000)]
+    titles += [r.get("title") or "" for r in store.all_signal_titles()]
+    for t in titles:
+        m = index.match(t)
+        if m and m.in_era and m.name_ja:
+            names.add(m.name_ja)
+    return sorted(names)
+
+
+def run_backfill(
+    *,
+    store: Any,
+    sources: Mapping[str, Any],
+    comps: Any,
+    names: Iterable[str],
+    cooldown_days: float,
+    limit: int | None,
+    pages: Mapping[str, int] | None = None,
+    dry_run: bool = False,
+    log: Callable[[str], None] = print,
+) -> BackfillReport:
+    from .refill import _sold_search  # noqa: PLC0415 - 延後匯入避免循環相依
+
+    pages = dict(pages or DEFAULT_PAGES)
+    report = BackfillReport(dry_run=dry_run)
+    names = list(names)
+    report.cards_total = len(names)
+    cooling = store.refill_cooldown_active(cooldown_days)
+    todo = [n for n in names if n not in cooling]
+    report.cards_skipped_cooldown = len(names) - len(todo)
+    if limit is not None:
+        todo = todo[:limit]
+    for name in todo:
+        if dry_run:
+            report.per_card.append((name, 0, 0))
+            continue
+        found = kept = 0
+        observed = False
+        for source_name, n_pages in pages.items():
+            src = sources.get(source_name)
+            if src is None or not getattr(src, "supports_sold", False):
+                continue
+            res = _sold_search(src, source_name, name, pages=n_pages)
+            health = getattr(res.health, "name", str(res.health))
+            if health == "BLOCKED":
+                report.blocked = True
+                report.problems.append(f"{source_name}／{name}：BLOCKED——中止本輪，避免升級封鎖")
+                return report
+            if health not in ("OK", "EMPTY_CONFIRMED"):
+                report.problems.append(
+                    f"{source_name}／{name}：{health}（{getattr(res, 'detail', '') or '沒有細節'}）"
+                )
+                continue
+            observed = True
+            ingest = comps.ingest_sold(res.listings)
+            found += len(res.listings)
+            kept += int(getattr(ingest, "kept", 0))
+        if not observed:
+            continue
+        store.record_refill(name, found=found, kept=kept)
+        report.cards_done += 1
+        report.found += found
+        report.kept += kept
+        report.per_card.append((name, found, kept))
+        log(f"[backfill] {name}：找到 {found} 筆、入庫 {kept} 筆")
+    return report
+```
+
+`cli.py`：在 `@app.command(name="market-drift")` 之前加：
+
+```python
+@app.command(name="comps-backfill")
+def comps_backfill(
+    limit: int = typer.Option(None, help="本輪最多查幾張卡（不給＝全部未在冷卻中的卡）"),
+    cooldown_days: float = typer.Option(21.0, help="同一張卡幾天內不重查（與 refill 共用 comps_refill 帳）"),
+    pages_yahoo: int = typer.Option(3, help="yahoo_closed 每卡頁數（3 頁≈300 筆≈180 天）"),
+    pages_paypay: int = typer.Option(1, help="paypay_direct 每卡頁數"),
+    dry_run: bool = typer.Option(False, help="只列卡名清單與統計，不打外網、不入庫、不記帳"),
+):
+    """行情回補：對卡名主檔比對得到的每一張卡，挖 Yahoo 落札相場（約 180 天）與 PayPay 已售出，
+    填進 comps。漂移指數（market-drift）與估價都吃這張表。BLOCKED 立刻中止（exit 2）。"""
+    from .cards import CardIndex
+    from .comps import CompsEngine
+    from .comps_backfill import known_card_names, run_backfill
+    from .pipeline import build_sources
+    from .sources.base import CachedFetcher
+
+    cfg = load_config()
+    store = Store(cfg.db_path)
+    index = CardIndex.load()
+    if not index.available:
+        console.print("[red]卡名主檔不可用，無法列出要回補的卡[/red]")
+        raise typer.Exit(1)
+    names = known_card_names(store, index)
+    console.print(f"[dim]已知 in_era 卡名 {len(names)} 張；冷卻 {cooldown_days:g} 天；"
+                  f"頁數 yahoo_closed={pages_yahoo} paypay_direct={pages_paypay}[/dim]")
+    sources = build_sources(cfg, CachedFetcher(cfg))
+    comps_engine = CompsEngine(cfg, FxRates(cfg), store)
+    report = run_backfill(
+        store=store, sources=sources, comps=comps_engine, names=names,
+        cooldown_days=cooldown_days, limit=limit,
+        pages={"yahoo_closed": pages_yahoo, "paypay_direct": pages_paypay},
+        dry_run=dry_run, log=lambda s: console.print(f"[dim]{s}[/dim]"),
+    )
+    console.print(report.summary())
+    for p in report.problems[:20]:
+        console.print(f"[yellow]{p}[/yellow]")
+    if report.blocked:
+        raise typer.Exit(2)
+```
+
+Run: `.venv/bin/pytest tests/test_comps_backfill.py -v` → `7 passed`。
+Run: `.venv/bin/ygo-sniper comps-backfill --dry-run` → 印「已知 in_era 卡名 N 張」（N 約 735）與 summary，無 traceback。
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/ygo_sniper/comps_backfill.py src/ygo_sniper/cli.py tests/test_comps_backfill.py
+git commit -m "feat(comps-backfill): 對已知卡名挖 Yahoo 落札相場／PayPay 已售出填 comps；BLOCKED 即停、節流帳共用 comps_refill
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+### Task 20 @sdd：daily 每天輪一小片回補，維持 comps 新鮮
+
+**Files:** `src/ygo_sniper/cli.py`（`daily()` 與新 helper）、`config/settings.yaml`（`market_drift:` 節）、`tests/test_market_drift.py`
+
+- [ ] **Step 1: 測試**（append 到 `tests/test_market_drift.py` 檔尾）
+
+```python
+class TestDailyBackfillHook:
+    def test_daily_calls_backfill_slice_once_per_day(self, store, monkeypatch):
+        calls = []
+        monkeypatch.setattr(cli_mod, "run_backfill", lambda **kw: calls.append(kw) or type("R", (), {
+            "summary": lambda self: "ok", "blocked": False, "problems": [], "cards_done": 0})())
+        monkeypatch.setattr(cli_mod, "known_card_names", lambda store, index: ["a", "b"])
+        pipe = _Pipe(store)
+        pipe.cfg.market_drift.update({"backfill_daily_limit": 5, "backfill_cooldown_days": 21})
+        pipe.sources = {}
+        pipe.comps = object()
+        cli_mod._backfill_comps_daily(pipe, now=datetime(2026, 9, 14, tzinfo=UTC))
+        cli_mod._backfill_comps_daily(pipe, now=datetime(2026, 9, 14, tzinfo=UTC))
+        assert len(calls) == 1
+        assert calls[0]["limit"] == 5 and calls[0]["cooldown_days"] == 21
+        assert calls[0]["pages"] == {"yahoo_closed": 1, "paypay_direct": 1}
+
+    def test_daily_backfill_disabled_by_zero_limit(self, store, monkeypatch):
+        calls = []
+        monkeypatch.setattr(cli_mod, "run_backfill", lambda **kw: calls.append(kw))
+        pipe = _Pipe(store)
+        pipe.cfg.market_drift.update({"backfill_daily_limit": 0})
+        cli_mod._backfill_comps_daily(pipe, now=datetime(2026, 9, 14, tzinfo=UTC))
+        assert calls == []
+```
+
+同時把 `TestDailyCommandWiring.test_daily_command_calls_market_drift_hook` 裡的 monkeypatch 清單加一行：
+
+```python
+        monkeypatch.setattr(cli_mod, "_backfill_comps_daily", lambda pipe, **kw: seen.setdefault("backfill_pipe", pipe))
+```
+並在最後加 `assert seen.get("backfill_pipe") is seen["pipe"]`。
+
+- [ ] **Step 2: 實作**
+
+`cli.py` import 區加：
+
+```python
+from .comps_backfill import known_card_names, run_backfill
+```
+
+`daily()` 裡 `_refresh_market_drift_daily(pipe)` **之前**加一行 `_backfill_comps_daily(pipe)`（先補資料再算指數）。
+
+在 `_refresh_market_drift_daily` 之前新增：
+
+```python
+_BACKFILL_DATE_KEY = "comps_backfill_date"
+
+
+def _backfill_comps_daily(pipe, *, now: "datetime | None" = None) -> None:
+    """每天輪一小片行情回補（預設 30 張卡、只翻第 1 頁），讓漂移指數與估價的 comps 保鮮。
+    **失敗只警告，絕不影響掃描與推播；BLOCKED 當天就停。** `backfill_daily_limit: 0` 關閉。"""
+    from datetime import UTC, datetime
+
+    md = dict(getattr(pipe.cfg, "market_drift", None) or {})
+    limit = int(md.get("backfill_daily_limit", 30))
+    if limit <= 0:
+        return
+    now = now or datetime.now(UTC)
+    today = now.date().isoformat()
+    if pipe.store.get_meta(_BACKFILL_DATE_KEY) == today:
+        return
+    try:
+        from .cards import CardIndex
+
+        index = getattr(pipe, "index", None) or CardIndex.load()
+        names = known_card_names(pipe.store, index)
+        report = run_backfill(
+            store=pipe.store, sources=pipe.sources, comps=pipe.comps, names=names,
+            cooldown_days=float(md.get("backfill_cooldown_days", 21)), limit=limit,
+            pages={"yahoo_closed": 1, "paypay_direct": 1},
+            log=lambda s: None,
+        )
+    except Exception as exc:  # noqa: BLE001 - 回補失敗不能拖垮 daily，但要大聲
+        print(f"[warn] 行情回補失敗：{type(exc).__name__}: {exc}")
+        return
+    pipe.store.set_meta(_BACKFILL_DATE_KEY, today)
+    console.print(f"[dim]行情回補：{report.summary()}[/dim]")
+    for p in report.problems[:5]:
+        print(f"[warn] 行情回補 {p}")
+```
+
+`config/settings.yaml` 的 `market_drift:` 節末尾加：
+
+```yaml
+  # daily 每天輪一小片行情回補（只翻第 1 頁）：30 張 × 2 來源 ≈ 60 請求 ≈ 2-3 分鐘，
+  # 21 天冷卻 → 約 630 張卡一輪。0 = 關閉。首次全量回補用 `ygo-sniper comps-backfill`。
+  backfill_daily_limit: 30
+  backfill_cooldown_days: 21
+```
+
+Run: `.venv/bin/pytest tests/test_market_drift.py tests/test_comps_backfill.py -v` → 全綠（48 passed）。
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/ygo_sniper/cli.py config/settings.yaml tests/test_market_drift.py
+git commit -m "feat(daily): 每天輪 30 張卡的行情回補（第 1 頁），維持 comps 新鮮；0 可關
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
