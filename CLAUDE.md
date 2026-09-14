@@ -306,6 +306,16 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 不要看 `n_effective`。要調任何門檻之前，先跑 `ygo-sniper coverage-groups`
 重新量一次，不要照直覺調。
 
+**模型的擬合沒有時間視窗**（2026-09-14 確認）：`build_valuator` → `comps_by(limit=5000)`
+不帶 `since_days`，等權吃下全部成交；`scoring.comps_window_days: 90` 只管舊的
+`stats_for` 路徑。市場單邊移動時它慢慢跟，跌勢裡會系統性高估。當時的處理：
+(1) `market-drift` 監視器讓漂移看得見（只顯示不進計算）；(2) 加了
+`valuation.half_life_days`（時間衰減權重，預設 `null`＝等權、行為逐位元不變），
+用預註冊判準實測 45/60/90 天在崩盤後切片的**下尾違反率全部劣於等權**
+（10.6-11.6% vs 9.1%），所以沒上線。要再開這個案子，先重跑
+`coverage-time --half-life`，判準與結果在 `docs/plans/market-drift-recency.md`。
+另外 `n_effective` 在有半衰期時是**權重和**（不是筆數），等權時兩者相等。
+
 ---
 
 ## 八、出價上限的紅線（會花真錢的地方）
@@ -328,7 +338,7 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 1932 passed，2026-08-28 實測）
+make test                      # pytest（目前 1972 passed，2026-09-14 實測）
                                #   ⚠️ 別自己再加 `-q`：pyproject 的 addopts 已有一個，
                                #   疊成 `-qq` 會**吃掉最後那行 `N passed`**，而 exit code
                                #   仍是 0——「測試沒跑」與「跑了但看不到綠字」外顯一樣。
@@ -362,6 +372,14 @@ ygo-sniper snipe mine [<id>]   # 重挖市場成交檔案（省略 id ＝ 全部
                                #   會滾掉，我們的表是它的記憶體，不重挖就永遠失去
 ygo-sniper snipe remove <id>   # 移出（軟刪除，成交檔案與命中帳留著）
 ygo-sniper coverage-groups     # 分群覆蓋率（調門檻前必跑）
+ygo-sniper coverage-time --real-time-only --test-fraction 0.11 \
+    --half-life 45 --half-life 60 --half-life 90
+                               # 時間切分覆蓋率＋時間加權對照（含下尾違反率）。
+                               #   改 valuation.half_life_days 之前必跑，判準見
+                               #   docs/plans/market-drift-recency.md Task 11
+ygo-sniper market-drift        # 市場漂移：同卡重複成交倍率（本地）＋ yugioh-relief.com
+                               #   週次 PSA 浮雕指數（外部對照）。只顯示、只告警、不進估價。
+                               #   daily 每天自動算一次；health 也印。--no-refresh 只讀 meta
 ygo-sniper backfill-sale-kind  # 回填 comps 成交型態（競標結標／定價成交），冪等
 ygo-sniper revalue             # 手動重算估價快取（掃描收尾會自動跑；首次部署回填用）
 ygo-sniper corpus-diff         # 全語料雙向比對（改過濾／解析規則前後必跑，見第一節）
