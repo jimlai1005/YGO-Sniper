@@ -131,3 +131,32 @@ class TestRunBackfill:
                            names=["a"], cooldown_days=7, limit=None,
                            pages={"yahoo_closed": 1}, dry_run=True, log=lambda s: None)
         assert y.calls == [] and rep.cards_total == 1 and store.refill_cooldown_active(7) == set()
+
+    def test_yahoo_gets_grader_variants_with_deeper_pages(self, store):
+        y, p = _Src(n=3), _Src(n=1)
+        rep = run_backfill(store=store, sources={"yahoo_closed": y, "paypay_direct": p}, comps=_Comps(kept=1),
+                           names=["a"], cooldown_days=7, limit=None,
+                           pages={"yahoo_closed": 3, "paypay_direct": 1},
+                           grader_terms=("PSA", "ARS"), variant_pages=6, log=lambda s: None)
+        assert y.calls == [("a", 3), ("a PSA", 6), ("a ARS", 6)]
+        assert p.calls == [("a", 1)]
+        assert rep.found == 3 + 3 + 3 + 1 and rep.kept == 4
+
+    def test_no_grader_terms_keeps_single_query(self, store):
+        y = _Src(n=2)
+        run_backfill(store=store, sources={"yahoo_closed": y}, comps=_Comps(), names=["a"],
+                     cooldown_days=7, limit=None, pages={"yahoo_closed": 2}, grader_terms=(), log=lambda s: None)
+        assert y.calls == [("a", 2)]
+
+    def test_blocked_on_variant_stops_run(self, store):
+        class _Flaky(_Src):
+            def search_detailed(self, keyword, *, sold, pages):
+                self.calls.append((keyword, pages))
+                h = ParseHealth.BLOCKED if keyword.endswith(" ARS") else ParseHealth.OK
+                return SearchResult(source="x", site="buyee_yahoo", query=keyword, listings=[object()],
+                                    parsed_count=1, pages_fetched=1, health=h)
+        y = _Flaky()
+        rep = run_backfill(store=store, sources={"yahoo_closed": y}, comps=_Comps(), names=["a", "b"],
+                           cooldown_days=7, limit=None, pages={"yahoo_closed": 1},
+                           grader_terms=("PSA", "ARS"), variant_pages=2, log=lambda s: None)
+        assert rep.blocked is True and rep.cards_done == 0 and len(y.calls) == 3

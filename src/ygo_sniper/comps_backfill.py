@@ -21,6 +21,9 @@ from typing import Any
 #: paypay 1 頁只有 5 筆、只有近幾天，多翻沒有意義。
 DEFAULT_PAGES: dict[str, int] = {"yahoo_closed": 3, "paypay_direct": 1}
 
+#: 只有 yahoo_closed 值得跑鑑定詞變體（檔案深、被未鑑定卡淹沒）；paypay 1 頁 5 筆，變體沒意義。
+VARIANT_SOURCES: frozenset[str] = frozenset({"yahoo_closed"})
+
 
 @dataclass(slots=True)
 class BackfillReport:
@@ -69,9 +72,17 @@ def run_backfill(
     cooldown_days: float,
     limit: int | None,
     pages: Mapping[str, int] | None = None,
+    grader_terms: tuple[str, ...] = (),
+    variant_pages: int = 6,
     dry_run: bool = False,
     log: Callable[[str], None] = print,
 ) -> BackfillReport:
+    """對已知卡名逐一查詢 comps 表缺失的成交。
+
+    `grader_terms`：對 `VARIANT_SOURCES` 多跑 `卡名 PSA`／`卡名 ARS`。高流量卡的落札檔案被未鑑定卡淹沒
+    （`青眼の白龍` 純卡名 3 頁只回溯 8 天，加 ARS 回溯 5 個月，2026-09-14 實測），鑑定詞變體是唯一挖得到它們 180 天的方法；
+    `ingest_sold` 本來就只收有機構的列，所以變體不會放進任何純卡名查不到的垃圾。
+    """
     from .refill import _sold_search  # noqa: PLC0415 - 延後匯入避免循環相依
 
     pages = dict(pages or DEFAULT_PAGES)
@@ -93,21 +104,25 @@ def run_backfill(
             src = sources.get(source_name)
             if src is None or not getattr(src, "supports_sold", False):
                 continue
-            res = _sold_search(src, source_name, name, pages=n_pages)
-            health = getattr(res.health, "name", str(res.health))
-            if health == "BLOCKED":
-                report.blocked = True
-                report.problems.append(f"{source_name}／{name}：BLOCKED——中止本輪，避免升級封鎖")
-                return report
-            if health not in ("OK", "EMPTY_CONFIRMED"):
-                report.problems.append(
-                    f"{source_name}／{name}：{health}（{getattr(res, 'detail', '') or '沒有細節'}）"
-                )
-                continue
-            observed = True
-            ingest = comps.ingest_sold(res.listings)
-            found += len(res.listings)
-            kept += int(getattr(ingest, "kept", 0))
+            queries: list[tuple[str, int]] = [(name, n_pages)]
+            if source_name in VARIANT_SOURCES:
+                queries += [(f"{name} {g}", variant_pages) for g in grader_terms]
+            for keyword, q_pages in queries:
+                res = _sold_search(src, source_name, keyword, pages=q_pages)
+                health = getattr(res.health, "name", str(res.health))
+                if health == "BLOCKED":
+                    report.blocked = True
+                    report.problems.append(f"{source_name}／{keyword}：BLOCKED——中止本輪，避免升級封鎖")
+                    return report
+                if health not in ("OK", "EMPTY_CONFIRMED"):
+                    report.problems.append(
+                        f"{source_name}／{keyword}：{health}（{getattr(res, 'detail', '') or '沒有細節'}）"
+                    )
+                    continue
+                observed = True
+                ingest = comps.ingest_sold(res.listings)
+                found += len(res.listings)
+                kept += int(getattr(ingest, "kept", 0))
         if not observed:
             continue
         store.record_refill(name, found=found, kept=kept)

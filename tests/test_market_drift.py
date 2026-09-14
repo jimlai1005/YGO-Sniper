@@ -535,6 +535,7 @@ class TestDailyBackfillHook:
         assert len(calls) == 1
         assert calls[0]["limit"] == 5 and calls[0]["cooldown_days"] == 21
         assert calls[0]["pages"] == {"yahoo_closed": 1, "paypay_direct": 1}
+        assert calls[0]["grader_terms"] == ("PSA", "ARS") and calls[0]["variant_pages"] == 2
 
     def test_daily_backfill_disabled_by_zero_limit(self, store, monkeypatch):
         calls = []

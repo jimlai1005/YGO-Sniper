@@ -207,6 +207,7 @@ def _backfill_comps_daily(pipe, *, now: "datetime | None" = None) -> None:
             store=pipe.store, sources=pipe.sources, comps=pipe.comps, names=names,
             cooldown_days=float(md.get("backfill_cooldown_days", 21)), limit=limit,
             pages={"yahoo_closed": 1, "paypay_direct": 1},
+            grader_terms=("PSA", "ARS"), variant_pages=2,
             log=lambda s: None,
         )
     except Exception as exc:  # noqa: BLE001 - 回補失敗不能拖垮 daily，但要大聲
@@ -2336,6 +2337,8 @@ def comps_backfill(
     cooldown_days: float = typer.Option(21.0, help="同一張卡幾天內不重查（與 refill 共用 comps_refill 帳）"),
     pages_yahoo: int = typer.Option(3, help="yahoo_closed 每卡頁數（3 頁≈300 筆≈180 天）"),
     pages_paypay: int = typer.Option(1, help="paypay_direct 每卡頁數"),
+    grader_terms: str = typer.Option("PSA,ARS", help="yahoo_closed 額外跑「卡名 <詞>」變體，逗號分隔；空字串＝不跑"),
+    variant_pages: int = typer.Option(6, help="鑑定詞變體每查詢最多頁數（檔案到底會提早停）"),
     dry_run: bool = typer.Option(False, help="只列卡名清單與統計，不打外網、不入庫、不記帳"),
 ):
     """行情回補：對卡名主檔比對得到的每一張卡，挖 Yahoo 落札相場（約 180 天）與 PayPay 已售出，
@@ -2351,8 +2354,9 @@ def comps_backfill(
         console.print("[red]卡名主檔不可用，無法列出要回補的卡[/red]")
         raise typer.Exit(1)
     names = known_card_names(store, index)
+    grader_terms_tuple = tuple(t.strip() for t in grader_terms.split(",") if t.strip())
     console.print(f"[dim]已知 in_era 卡名 {len(names)} 張；冷卻 {cooldown_days:g} 天；"
-                  f"頁數 yahoo_closed={pages_yahoo} paypay_direct={pages_paypay}[/dim]")
+                  f"頁數 yahoo_closed={pages_yahoo} paypay_direct={pages_paypay}｜變體 {grader_terms or '無'}×{variant_pages} 頁[/dim]")
     from .pipeline import build_sources
     sources = build_sources(cfg, CachedFetcher(cfg))
     comps_engine = CompsEngine(cfg, FxRates(cfg), store)
@@ -2360,6 +2364,7 @@ def comps_backfill(
         store=store, sources=sources, comps=comps_engine, names=names,
         cooldown_days=cooldown_days, limit=limit,
         pages={"yahoo_closed": pages_yahoo, "paypay_direct": pages_paypay},
+        grader_terms=grader_terms_tuple, variant_pages=variant_pages,
         dry_run=dry_run, log=lambda s: console.print(f"[dim]{s}[/dim]"),
     )
     console.print(report.summary())
