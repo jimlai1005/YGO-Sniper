@@ -455,6 +455,22 @@ def stats():
     return store.stats()
 
 
+@app.get("/api/market-drift")
+def market_drift():
+    """漂移監視器的 meta 快取（daily 每天算一次；沒算過就是 null）。只顯示，不進估價。"""
+    import json as _json
+
+    from ygo_sniper.market_drift import DRIFT_LATEST_KEY, RELIEF_ERROR_KEY, RELIEF_LATEST_KEY
+
+    raw = store.get_meta(DRIFT_LATEST_KEY)
+    ext = store.get_meta(RELIEF_LATEST_KEY)
+    return {
+        "local": _json.loads(raw) if raw else None,
+        "external": _json.loads(ext) if ext else None,
+        "external_error": store.get_meta(RELIEF_ERROR_KEY, "") or None,
+    }
+
+
 @app.get("/api/bidding")
 def bidding_meta():
     """競標視圖的**說明文字與參數**，全部來自後端常數。

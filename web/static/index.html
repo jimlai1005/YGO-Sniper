@@ -375,6 +375,7 @@
     <span class="pill" id="stat-new">待處理 <b>–</b></span>
     <span class="pill" id="stat-bundle">湊單籃 <b>–</b></span>
     <span class="pill" id="stat-comps">行情 <b>–</b></span>
+    <span class="pill" id="stat-drift" title="市場漂移：同卡重複成交，近 4 週 vs 前 8 週（只顯示，不進估價）">漂移 <b>–</b></span>
     <span class="pill" id="stat-fx">匯率 <b>–</b></span>
     <div style="margin-left:auto" class="row">
       <span class="pill" id="scan-when" title="還沒讀到掃描狀態">最後掃描 <b>–</b></span>
@@ -1971,6 +1972,19 @@ async function loadStats(){
   document.getElementById("stat-new").innerHTML = `待處理 <b>${s.by_state.new || 0}</b>`;
   document.getElementById("stat-bundle").innerHTML = `湊單籃 <b>${s.by_state.in_bundle || 0}</b>`;
   document.getElementById("stat-comps").innerHTML = `行情 <b>${s.comps}</b>`;
+  try {
+    const d = await api("/api/market-drift");
+    const el = document.getElementById("stat-drift");
+    const loc = d.local;
+    if (!loc) { el.innerHTML = "漂移 <b>未算</b>"; }
+    else {
+      const by = Object.fromEntries((loc.latest || []).map(p => [p.band, p]));
+      const fmt = b => (by[b] && by[b].ratio != null) ? `×${by[b].ratio.toFixed(2)}` : "—";
+      const alert = (loc.alert_bands || []).length > 0;
+      el.innerHTML = `漂移 <b>全體 ${fmt("ALL")} ｜ PSA10 ${fmt("PSA10")} ｜ PSA9 ${fmt("PSA9")}</b>`
+        + (alert ? ` <span style="color:var(--bad,#c33)">📉 ${loc.alert_bands.join(", ")}</span>` : "");
+    }
+  } catch (e) { /* 漂移 pill 壞了不能影響其他統計 */ }
 }
 
 /* ------------------------------------------------------------ 掃描狀態
