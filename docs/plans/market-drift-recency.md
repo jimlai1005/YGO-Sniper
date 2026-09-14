@@ -512,7 +512,7 @@ def evaluate_alert(
 - [ ] **Step 4: 跑，確認綠燈**
 
 Run: `.venv/bin/pytest tests/test_market_drift.py -v`
-Expected: 全綠（`14 passed`）
+Expected: 全綠（`13 passed`）
 
 - [ ] **Step 5: Commit**
 
@@ -645,7 +645,7 @@ def fetch_relief_index(fetcher: Any, url: str, *, keep_weeks: int = 12) -> dict[
 - [ ] **Step 4: 跑，確認綠燈**
 
 Run: `.venv/bin/pytest tests/test_market_drift.py -v`
-Expected: 全綠（`17 passed`）
+Expected: 全綠（`16 passed`）
 
 - [ ] **Step 5: Commit**
 
@@ -874,7 +874,7 @@ def deliver_drift_alert(store: Any, notifier: Any) -> bool:
 - [ ] **Step 4: 跑，確認綠燈**
 
 Run: `.venv/bin/pytest tests/test_market_drift.py -v`
-Expected: 全綠（`24 passed`）
+Expected: 全綠（`23 passed`）
 
 - [ ] **Step 5: Commit**
 
@@ -1070,7 +1070,7 @@ def market_drift(
 - [ ] **Step 4: 跑，確認綠燈**
 
 Run: `.venv/bin/pytest tests/test_market_drift.py -v`
-Expected: 全綠（`25 passed`）
+Expected: 全綠（`24 passed`）
 
 Run: `.venv/bin/ygo-sniper market-drift`
 Expected: 印出「市場漂移」表（7 列：PSA10…ALL）與「外部對照」表（6 週），無 traceback。
@@ -1631,7 +1631,7 @@ Expected: FAIL，`KeyError: 'lower_tail'`
 - [ ] **Step 4: 跑，確認綠燈**
 
 Run: `.venv/bin/pytest tests/test_valuation_recency.py -v`
-Expected: 全綠（`17 passed`）
+Expected: 全綠（`16 passed`）
 
 Run: `.venv/bin/ygo-sniper coverage-time --real-time-only --test-fraction 0.11 --half-life 45 --half-life 60 --half-life 90`
 Expected: 原本兩張表之後多出「時間加權對照」表，8 列（等權/45/60/90 × 無/有），下尾欄有百分比。
