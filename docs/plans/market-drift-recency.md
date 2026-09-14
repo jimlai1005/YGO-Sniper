@@ -2244,3 +2244,139 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 `_refresh_market_drift_daily(pipe)` 換成 `pass`，`TestDailyCommandWiring` 立刻紅（1 failed）；全量 `make test` 1985 passed。
 複審的 5 條 Warning 全部處理（配對鍵含 site／告警行帶截至日期／daily 呼叫點釘住／`now` 注入／標題與 pill 補註）。
 未做：Warning 1 的 `reject_n_buckets` 重量測（休眠，`half_life_days: null`）與 Warning 5 的 `min_pairs`／視窗調整（使用者決定）。
+
+---
+
+## 第二回合（2026-09-14，使用者：「用過去資料建立指數、馬上要有配對」）
+
+診斷（主線程實測）：配對稀疏的主因不是資料量，是 Task 12 把配對鍵綁在 `set_code`（1,806 筆真實成交日
+只有 350 筆有卡號）。改用卡名主檔比對（`CardIndex.match(title)`，與估價模型 `obs_from_comps` 同一個身分判準）
+之後，1,610 筆能配對；現有資料下 28/56 視窗 20 對、56/112 視窗 60 對、56/168 視窗 86 對。
+第二步才是回補歷史（見 Task 19）。
+
+### Task 18 @sdd：配對鍵改「卡名主檔身分」
+
+**Files:** `src/ygo_sniper/store.py`（`comps_for_drift`）、`src/ygo_sniper/market_drift.py`（`repeat_sale_ratio`、`refresh_market_drift`）、
+`src/ygo_sniper/cli.py`（`_print_market_drift` 標題）、`tests/test_market_drift.py`
+
+- [ ] **Step 1: 改測試**
+
+`_row` helper 改為（多 `card_name`，預設 `"卡A"`）：
+
+```python
+def _row(sig, day, price, grader="PSA", grade=10.0, sale_kind="auction", card_name="卡A"):
+    return {"signature": sig, "sold_at": f"2026-{day}T12:00:00+00:00", "price_native": price,
+            "currency": "JPY", "grader": grader, "grade": grade, "site": "buyee_yahoo",
+            "sale_kind": sale_kind, "card_name": card_name, "rarity": "ultra"}
+```
+
+`TestRepeatSaleRatio` 既有測試裡凡是「同 signature 配對」的案例，因為 `_row` 預設同一張卡名，行為不變。加三個測試：
+
+```python
+    def test_pairs_by_card_identity_not_signature(self):
+        rows = [_row("sigX", "07-10", 1000, card_name="青眼の白龍"), _row("sigY", "09-01", 800, card_name="青眼の白龍")]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 1 and pts["PSA10"].ratio == pytest.approx(0.8)
+
+    def test_rows_without_card_name_are_skipped(self):
+        rows = [_row("a", "07-10", 1000, card_name=None), _row("a", "09-01", 800, card_name=None)]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0 and pts["PSA10"].n_recent == 0
+
+    def test_different_rarity_same_name_not_paired(self):
+        a = _row("a", "07-10", 1000); b = _row("b", "09-01", 800); b["rarity"] = "secret"
+        pts = {p.band: p for p in repeat_sale_ratio([a, b], as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0
+```
+
+`TestCompsForDrift.test_requires_set_code_and_known_sale_kind` 改名並改內容為：
+
+```python
+    def test_requires_known_sale_kind_and_returns_title(self, store):
+        _insert_comp(store, signature="ok", sold_at="2026-09-01T00:00:00+00:00", price=1000, set_code="")
+        _insert_comp(store, signature="nokind", sold_at="2026-09-01T00:00:00+00:00", price=1000, sale_kind="unknown")
+        rows = store.comps_for_drift()
+        assert [r["signature"] for r in rows] == ["ok"]
+        assert rows[0]["sale_kind"] == "auction" and rows[0]["title"] == "t ok" and "rarity" in rows[0]
+```
+
+`TestRefreshMarketDrift`／`TestPendingMerge`／`TestDailyHook` 用 `_insert_comp` 塞的列標題是 `t <signature>`，卡名主檔比對不到
+→ 這些測試會失去配對而紅。修法：`refresh_market_drift` 多一個 `index` 參數（見 Step 2），測試傳一個假索引：
+
+```python
+class _FakeIndex:
+    """title → 卡名：把 `t a` 讀成卡 a、`t b` 讀成卡 b（in_era 恆 True）。"""
+    available = True
+
+    class _M:
+        def __init__(self, name):
+            self.name_ja = name
+            self.in_era = True
+
+    def match(self, title):
+        return self._M(title.replace("t ", "", 1)) if title.startswith("t ") else None
+```
+
+把這個類放在 `_Cfg` 之前；`_Cfg.__init__` 不變。所有 `refresh_market_drift(store, <fetcher>, cfg, now=...)` 的呼叫
+（TestRefreshMarketDrift、TestPendingMerge）都加上 `index=_FakeIndex()`；`_Pipe` 加屬性 `self.index = _FakeIndex()`。
+
+- [ ] **Step 2: 實作**
+
+(a) `store.comps_for_drift` SQL 改為（拿掉 `set_code <> ''`，加 `title, rarity`）：
+
+```python
+        q = (
+            "SELECT signature, title, sold_at, price_native, currency, grader, grade, rarity, site, "
+            "sale_kind, set_code "
+            "FROM comps WHERE COALESCE(sold_at_is_ingest, 0) = 0 AND dup_of_id IS NULL "
+            "AND price_native > 0 AND COALESCE(era_evidence, '') <> '' "
+            "AND sale_kind IN ('auction', 'fixed') "
+            "ORDER BY sold_at"
+        )
+```
+docstring 把「只取有卡號」那段改成：「卡的身分不用 `signature`（無卡號時是 token fallback）也不用 `set_code`
+（只有兩成的列有），用**卡名主檔比對**（`CardIndex.match(title)`，與 `valuation.obs_from_comps` 同判準）——
+比對在 `market_drift.refresh_market_drift` 做，這裡把 `title` 帶出去。」
+
+(b) `market_drift.repeat_sale_ratio`：把 `sig = str(r.get("signature") or "")` 到 `sig = f"{sig}|{kind}|{site}"` 那段換成
+
+```python
+        name = r.get("card_name")
+        if not name:
+            continue
+        kind = r.get("sale_kind")
+        if kind not in ("auction", "fixed"):
+            continue
+        sig = f"{name}|{r.get('rarity') or ''}|{band}|{r.get('grade')}|{kind}|{r.get('site') or ''}"
+```
+（`band` 已在上面算好。）docstring 的配對說明改為：「同卡＝卡名主檔身分×稀有度×機構×分數；同機制；同站。」
+
+(c) `market_drift.refresh_market_drift` 簽名加 `index: Any | None = None`，`rows = store.comps_for_drift()` 之後加：
+
+```python
+    idx = index
+    if idx is None:
+        from .cards import CardIndex  # noqa: PLC0415 - 延後匯入，測試可注入假索引
+        idx = CardIndex.load()
+    if idx is not None and getattr(idx, "available", False):
+        for r in rows:
+            m = idx.match(r.get("title") or "")
+            r["card_name"] = m.name_ja if (m and m.in_era) else None
+    else:
+        for r in rows:
+            r["card_name"] = None
+```
+
+(d) `cli._print_market_drift` 標題的「有卡號且機制已知」改成「卡名可比對且機制已知」。
+
+Run: `.venv/bin/pytest tests/test_market_drift.py -v` → 全綠（39 passed）。
+Run: `.venv/bin/ygo-sniper market-drift` → PSA9 配對數應 ≥ 5（現有資料實測 7）。
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/ygo_sniper/store.py src/ygo_sniper/market_drift.py src/ygo_sniper/cli.py tests/test_market_drift.py
+git commit -m "fix(market-drift): 配對鍵改卡名主檔身分（與估價同判準）——不再要求 set_code，配對 5→20
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
