@@ -2105,3 +2105,137 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   目前 null → 休眠。**若日後開啟半衰期，`reject_n_buckets` 必須連帶用 `coverage-groups` 重量測**（已寫進 CLAUDE.md 第七節）。
 - **Warning 5**：`min_pairs: 8` 在現有資料密度（且 Task 12 之後只剩同機制×有卡號的配對，更少）下不可達，本地告警實質不會觸發。
   這是資料事實，由使用者決定要不要拉長視窗（56/112）或降 `min_pairs`。health／dashboard 都會明示「配對不足」，不是靜默。
+
+### 複審回合（2026-09-14）：Critical 1／2 與 Warning 3 實證修復；Warning 4 只釘住函式沒釘住呼叫。新 Warning 5 條→ Task 17
+
+### Task 17 @sdd：配對鍵含 site、告警行帶日期、daily 呼叫點釘住、`now` 注入、標籤與 pill 補註
+
+**Files:** `src/ygo_sniper/market_drift.py`、`src/ygo_sniper/cli.py`、`web/static/index.html`、`tests/test_market_drift.py`
+
+- [ ] **Step 1: 紅燈測試**（全部 append／修改在 `tests/test_market_drift.py`）
+
+(i) `TestRepeatSaleRatio` 加：
+
+```python
+    def test_same_card_same_kind_different_sites_are_not_paired(self):
+        a = _row("a", "07-10", 1000, sale_kind="fixed"); a["site"] = "buyee_paypay"
+        b = _row("a", "09-01", 800, sale_kind="fixed"); b["site"] = "buyee_yahoo"
+        pts = {p.band: p for p in repeat_sale_ratio([a, b], as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0
+```
+
+(ii) `TestEvaluateAlert.test_alert_when_ratio_at_or_below_threshold_with_enough_pairs` 的
+`assert "PSA10" in text and "×0.85" in text and "n=9" in text` 之後加一行：
+
+```python
+        assert "2026-09-14" in text
+```
+
+(iii) `TestPendingMerge` 加：
+
+```python
+    def test_old_format_pending_without_lines_is_discarded(self, store):
+        store.set_meta(DRIFT_PENDING_KEY, json.dumps({"text": "old", "bands": {"PSA10": "2026-09-01"}}))
+        refresh_market_drift(store, _FetcherDown(), _Cfg(external_enabled=False),
+                             now=datetime(2026, 9, 14, tzinfo=UTC))
+        assert store.get_meta(DRIFT_PENDING_KEY, "") in ("", None) or \
+            json.loads(store.get_meta(DRIFT_PENDING_KEY))["lines"]
+        n = _Notifier(ok=True)
+        deliver_drift_alert(store, n)
+        assert all("PSA10" in t for t in n.sent)   # 不會送出沒有任何帶的空身告警
+```
+
+(iv) `TestDailyHook.test_daily_sends_alert_when_band_drops` 整個換成：
+
+```python
+    def test_daily_sends_alert_when_band_drops(self, store):
+        _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
+        pipe = _Pipe(store)
+        cli_mod._refresh_market_drift_daily(pipe, now=datetime(2026, 9, 14, tzinfo=UTC))
+        assert any("PSA10" in t for t in pipe.notifier.sent)
+```
+
+(v) 檔尾加 daily 指令的接線測試：
+
+```python
+class TestDailyCommandWiring:
+    def test_daily_command_calls_market_drift_hook(self, monkeypatch, tmp_path):
+        """拿掉 cli.daily() 裡的 `_refresh_market_drift_daily(pipe)` 這一行，這條要紅。"""
+        from typer.testing import CliRunner
+
+        seen = {}
+
+        class FakePipe:
+            def __init__(self):
+                seen["pipe"] = self
+
+            def scan(self, **kw):
+                return {"scanned": 0, "candidates": 0, "signals": 0}
+
+            def close(self):
+                seen["closed"] = True
+
+        monkeypatch.setattr(cli_mod, "Pipeline", FakePipe)
+        monkeypatch.setattr(cli_mod, "_print_scan", lambda result: None)
+        monkeypatch.setattr(cli_mod, "_mine_snipes_daily", lambda pipe: None)
+        monkeypatch.setattr(cli_mod, "_run_notifications", lambda pipe, result, band=None: 0)
+        monkeypatch.setattr(cli_mod, "_refresh_market_drift_daily",
+                            lambda pipe, **kw: seen.setdefault("drift_pipe", pipe))
+        result = CliRunner().invoke(cli_mod.app, ["daily", "--no-notify"])
+        assert result.exit_code == 0, result.output
+        assert seen.get("drift_pipe") is seen["pipe"]
+        assert seen.get("closed") is True
+```
+
+Run: `.venv/bin/pytest tests/test_market_drift.py -v` → (i)(ii)(iv) 紅；(iii)(v) 可能紅可能綠，都照做。
+
+- [ ] **Step 2: 實作**
+
+(a) `market_drift.py` `repeat_sale_ratio`：`sig = f"{sig}|{kind}"` 改為
+
+```python
+        sig = f"{sig}|{kind}|{r.get('site') or ''}"
+```
+
+docstring 補一句：「同站對同站：fixed 同時來自 PayPay 與ヤフオク即決，價格水準不同（第三節事故 #2），配對鍵含 `site`。」
+
+(b) `market_drift.py` `_band_line` 改為：
+
+```python
+def _band_line(p: DriftPoint) -> str:
+    return f"{p.band} ×{p.ratio:.2f}（n={p.n_pairs}，截至 {p.as_of}）"
+```
+
+(c) `market_drift.py` `refresh_market_drift`：`existing = json.loads(...) or {}` 那行之後加
+
+```python
+    if existing and not existing.get("lines"):
+        existing = {}   # 舊格式（沒有逐行內容）無法合併，丟棄；不能送出沒有任何帶的空身告警
+```
+
+並把 `if bands:` 改成 `if bands and lines:`。
+
+(d) `cli.py` `_refresh_market_drift_daily` 簽名改 `def _refresh_market_drift_daily(pipe, *, now: "datetime | None" = None) -> None:`，
+函式內 `now = datetime.now(UTC)` 改為 `now = now or datetime.now(UTC)`。
+`_print_market_drift` 的表標題 `｜樣本 {latest.get('n_rows', '?')} 筆真實成交日）` 改為
+`｜樣本 {latest.get('n_rows', '?')} 筆真實成交日、有卡號且機制已知）`。
+
+(e) `web/static/index.html` Task 16 的 `fmt` 改為：
+
+```javascript
+      const minPairs = loc.min_pairs || 8;
+      const fmt = b => (by[b] && by[b].ratio != null)
+        ? `×${by[b].ratio.toFixed(2)}<small style="opacity:.7">(n=${by[b].n_pairs}${by[b].n_pairs < minPairs ? "，參考" : ""})</small>` : "—";
+```
+
+Run: `.venv/bin/pytest tests/test_market_drift.py -v` → 全綠（36 passed）；`grep -c '，參考' web/static/index.html` → 1。
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/ygo_sniper/market_drift.py src/ygo_sniper/cli.py web/static/index.html tests/test_market_drift.py
+git commit -m "fix(market-drift): 配對鍵含 site、告警行帶截至日期、daily 呼叫點釘住、now 可注入、標籤補「有卡號且機制已知」
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
