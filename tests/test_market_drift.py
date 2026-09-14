@@ -393,3 +393,57 @@ class TestDriftTableRows:
         assert rows[0] == ("PSA10", "×0.85", "9", "20 / 40", "📉 告警")
         assert rows[1] == ("PSA9", "—", "0", "3 / 0", "樣本不足（讀不到≠沒跌）")
         assert rows[2] == ("ARS10", "×1.02", "4", "8 / 9", "配對 <8，僅供參考")
+
+
+from ygo_sniper import cli as cli_mod  # noqa: E402
+from ygo_sniper.market_drift import DRIFT_COMPUTED_DATE_KEY  # noqa: E402
+
+
+class _Pipe:
+    def __init__(self, store):
+        self.store = store
+        self.fetcher = _FetcherDown()
+        self.cfg = _Cfg(external_enabled=False)
+        self.notifier = _Notifier(ok=True)
+
+
+class TestDailyHook:
+    def test_daily_refreshes_once_per_day_but_delivers_every_run(self, store, monkeypatch):
+        calls = {"refresh": 0, "deliver": 0}
+        real_refresh = cli_mod.refresh_market_drift
+        real_deliver = cli_mod.deliver_drift_alert
+
+        def spy_refresh(*a, **kw):
+            calls["refresh"] += 1
+            return real_refresh(*a, **kw)
+
+        def spy_deliver(*a, **kw):
+            calls["deliver"] += 1
+            return real_deliver(*a, **kw)
+
+        monkeypatch.setattr(cli_mod, "refresh_market_drift", spy_refresh)
+        monkeypatch.setattr(cli_mod, "deliver_drift_alert", spy_deliver)
+        pipe = _Pipe(store)
+        cli_mod._refresh_market_drift_daily(pipe)
+        cli_mod._refresh_market_drift_daily(pipe)
+        assert calls == {"refresh": 1, "deliver": 2}
+        assert store.get_meta(DRIFT_COMPUTED_DATE_KEY) is not None
+
+    def test_daily_sends_alert_when_band_drops(self, store):
+        _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
+        pipe = _Pipe(store)
+        cli_mod._refresh_market_drift_daily(pipe)
+        # 這筆成交若已超出「近 28 天」視窗（測試在 2026-09-29 之後跑），告警不該響——用 as_of 判斷
+        latest = json.loads(store.get_meta(DRIFT_LATEST_KEY))
+        if "PSA10" in latest["alert_bands"]:
+            assert any("PSA10" in t for t in pipe.notifier.sent)
+        else:
+            assert pipe.notifier.sent == []
+
+    def test_daily_never_raises_when_refresh_explodes(self, store, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("db on fire")
+        monkeypatch.setattr(cli_mod, "refresh_market_drift", boom)
+        cli_mod._refresh_market_drift_daily(_Pipe(store))   # 不拋就是通過
+        assert store.get_meta(DRIFT_COMPUTED_DATE_KEY) is None
