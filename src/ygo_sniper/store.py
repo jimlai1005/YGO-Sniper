@@ -1181,11 +1181,17 @@ class Store:
         「近 4 週 vs 前 8 週」量到的是我們的抓取順序，不是市場——所以一律排除，
         寧可指數樣本薄，也不要一個看起來正常但全部是錯的數字。
         同時排除去重副本（`dup_of_id`）與無年代證據列（與估價取樣同判準）。
+
+        **只取有卡號、且成交機制已知的列**（2026-09-14 審查回合）：`signature` 沒卡號時是
+        標題 token 的 fallback，會把不同卡配成一對；`sale_kind` 不分則是拿ヤフオク落札價
+        對フリマ一口價（第三節事故 #7）。兩者都會在配對數只有個位數時決定整帶的答案。
         """
         q = (
-            "SELECT signature, sold_at, price_native, currency, grader, grade, site "
+            "SELECT signature, sold_at, price_native, currency, grader, grade, site, "
+            "sale_kind, set_code "
             "FROM comps WHERE COALESCE(sold_at_is_ingest, 0) = 0 AND dup_of_id IS NULL "
             "AND price_native > 0 AND COALESCE(era_evidence, '') <> '' "
+            "AND COALESCE(set_code, '') <> '' AND sale_kind IN ('auction', 'fixed') "
             "ORDER BY sold_at"
         )
         with self._conn() as c:

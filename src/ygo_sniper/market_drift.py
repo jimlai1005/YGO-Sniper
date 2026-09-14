@@ -77,7 +77,8 @@ def repeat_sale_ratio(
     """同卡重複成交倍率：近 `recent_days` 天 vs 再往前 `base_days` 天。
 
     同一個 signature 兩個視窗都有成交才配成一對；每對取「近期中位對數價 − 基期中位對數價」，
-    再取所有配對的中位數。同卡對同卡，組成變化（這個月剛好賣的都是貴卡）不會被讀成漲跌。
+    再取所有配對的中位數。同卡對同卡，而且**同機制對同機制**：競標落札價與定價成交是兩種價格形成機制
+    （第三節事故 #7），同一張卡的 auction 配 auction、fixed 配 fixed，各算一對。
     只吃 JPY 且價格 > 0 的列（三個 Buyee 系來源都是 JPY；別的幣別混進來就是混源）。
     """
     recent_start = as_of - timedelta(days=recent_days)
@@ -106,6 +107,10 @@ def repeat_sale_ratio(
         sig = str(r.get("signature") or "")
         if not sig:
             continue
+        kind = r.get("sale_kind")
+        if kind not in ("auction", "fixed"):
+            continue
+        sig = f"{sig}|{kind}"
         for b in (band, ALL_BAND):
             buckets[b].setdefault(sig, {"recent": [], "base": []})[window].append(price)
             counts[b][window] += 1

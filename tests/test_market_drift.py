@@ -33,14 +33,15 @@ class TestConfig:
 
 
 def _insert_comp(store, *, signature, sold_at, price, grader="PSA", grade=10.0,
-                 ingest=0, era="1999", dup_of=None, currency="JPY", site="buyee_yahoo"):
+                 ingest=0, era="1999", dup_of=None, currency="JPY", site="buyee_yahoo",
+                 sale_kind="auction", set_code="LOB-001"):
     with store._conn() as c:
         c.execute(
             "INSERT INTO comps (signature, title, price_twd, price_native, currency, site, "
-            "sold_at, grader, grade, era_evidence, sold_at_is_ingest, dup_of_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "sold_at, grader, grade, era_evidence, sold_at_is_ingest, dup_of_id, sale_kind, set_code) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (signature, f"t {signature}", price * 0.22, price, currency, site,
-             sold_at, grader, grade, era, ingest, dup_of),
+             sold_at, grader, grade, era, ingest, dup_of, sale_kind, set_code),
         )
 
 
@@ -55,6 +56,14 @@ class TestCompsForDrift:
         assert [r["signature"] for r in rows] == ["a"]
         assert set(rows[0]) >= {"signature", "sold_at", "price_native", "currency", "grader", "grade"}
 
+    def test_requires_set_code_and_known_sale_kind(self, store):
+        _insert_comp(store, signature="ok", sold_at="2026-09-01T00:00:00+00:00", price=1000)
+        _insert_comp(store, signature="nocode", sold_at="2026-09-01T00:00:00+00:00", price=1000, set_code="")
+        _insert_comp(store, signature="nokind", sold_at="2026-09-01T00:00:00+00:00", price=1000, sale_kind="unknown")
+        rows = store.comps_for_drift()
+        assert [r["signature"] for r in rows] == ["ok"]
+        assert rows[0]["sale_kind"] == "auction" and rows[0]["set_code"] == "LOB-001"
+
 
 from ygo_sniper.market_drift import (  # noqa: E402
     ALL_BAND,
@@ -67,9 +76,10 @@ from ygo_sniper.market_drift import (  # noqa: E402
 )
 
 
-def _row(sig, day, price, grader="PSA", grade=10.0):
+def _row(sig, day, price, grader="PSA", grade=10.0, sale_kind="auction"):
     return {"signature": sig, "sold_at": f"2026-{day}T12:00:00+00:00", "price_native": price,
-            "currency": "JPY", "grader": grader, "grade": grade, "site": "buyee_yahoo"}
+            "currency": "JPY", "grader": grader, "grade": grade, "site": "buyee_yahoo",
+            "sale_kind": sale_kind}
 
 
 AS_OF = datetime(2026, 9, 14, tzinfo=UTC)
@@ -125,6 +135,24 @@ class TestRepeatSaleRatio:
         rows[1]["currency"] = "USD"
         pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
         assert pts["PSA10"].n_pairs == 0
+
+    def test_cross_mechanism_sales_are_not_paired(self):
+        rows = [_row("a", "07-10", 1000, sale_kind="auction"), _row("a", "09-01", 800, sale_kind="fixed")]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0
+        assert pts["PSA10"].n_recent == 1 and pts["PSA10"].n_base == 1
+
+    def test_same_card_two_mechanisms_give_two_pairs(self):
+        rows = [_row("a", "07-10", 1000, sale_kind="auction"), _row("a", "09-01", 800, sale_kind="auction"),
+                _row("a", "07-12", 2000, sale_kind="fixed"), _row("a", "09-02", 2000, sale_kind="fixed")]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 2
+        assert pts["PSA10"].ratio == pytest.approx(math.exp((math.log(0.8) + 0.0) / 2))
+
+    def test_unknown_sale_kind_rows_are_skipped(self):
+        rows = [_row("a", "07-10", 1000, sale_kind="unknown"), _row("a", "09-01", 800, sale_kind="unknown")]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0 and pts["PSA10"].n_recent == 0
 
 
 class TestDriftSeries:
