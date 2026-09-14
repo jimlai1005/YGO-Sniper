@@ -192,7 +192,7 @@ def _refresh_market_drift_daily(pipe, *, now: "datetime | None" = None) -> None:
     today = now.date().isoformat()
     if pipe.store.get_meta(DRIFT_COMPUTED_DATE_KEY) != today:
         try:
-            res = refresh_market_drift(pipe.store, pipe.fetcher, pipe.cfg, now=now)
+            res = refresh_market_drift(pipe.store, pipe.fetcher, pipe.cfg, index=getattr(pipe, "index", None), now=now)
         except Exception as exc:  # noqa: BLE001 - 指數算壞不能拖垮 daily，但要大聲
             print(f"[warn] 市場漂移指數計算失敗：{type(exc).__name__}: {exc}")
         else:
@@ -2268,7 +2268,7 @@ def _print_market_drift(store: Store) -> None:
     latest = json.loads(raw)
     t = Table(
         title=f"市場漂移（同卡重複成交：近 {latest['recent_days']} 天 vs 前 {latest['base_days']} 天"
-              f"｜as_of {latest['as_of']}｜樣本 {latest.get('n_rows', '?')} 筆真實成交日、有卡號且機制已知）"
+              f"｜as_of {latest['as_of']}｜樣本 {latest.get('n_rows', '?')} 筆真實成交日、卡名可比對且機制已知）"
     )
     for col in ("帶", "倍率", "配對", "近期/基期筆數", "判讀"):
         t.add_column(col, justify="right" if col in ("倍率", "配對") else "left")

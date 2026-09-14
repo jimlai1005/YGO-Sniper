@@ -56,13 +56,12 @@ class TestCompsForDrift:
         assert [r["signature"] for r in rows] == ["a"]
         assert set(rows[0]) >= {"signature", "sold_at", "price_native", "currency", "grader", "grade"}
 
-    def test_requires_set_code_and_known_sale_kind(self, store):
-        _insert_comp(store, signature="ok", sold_at="2026-09-01T00:00:00+00:00", price=1000)
-        _insert_comp(store, signature="nocode", sold_at="2026-09-01T00:00:00+00:00", price=1000, set_code="")
+    def test_requires_known_sale_kind_and_returns_title(self, store):
+        _insert_comp(store, signature="ok", sold_at="2026-09-01T00:00:00+00:00", price=1000, set_code="")
         _insert_comp(store, signature="nokind", sold_at="2026-09-01T00:00:00+00:00", price=1000, sale_kind="unknown")
         rows = store.comps_for_drift()
         assert [r["signature"] for r in rows] == ["ok"]
-        assert rows[0]["sale_kind"] == "auction" and rows[0]["set_code"] == "LOB-001"
+        assert rows[0]["sale_kind"] == "auction" and rows[0]["title"] == "t ok" and "rarity" in rows[0]
 
 
 from ygo_sniper.market_drift import (  # noqa: E402
@@ -76,10 +75,10 @@ from ygo_sniper.market_drift import (  # noqa: E402
 )
 
 
-def _row(sig, day, price, grader="PSA", grade=10.0, sale_kind="auction"):
+def _row(sig, day, price, grader="PSA", grade=10.0, sale_kind="auction", card_name="卡A"):
     return {"signature": sig, "sold_at": f"2026-{day}T12:00:00+00:00", "price_native": price,
             "currency": "JPY", "grader": grader, "grade": grade, "site": "buyee_yahoo",
-            "sale_kind": sale_kind}
+            "sale_kind": sale_kind, "card_name": card_name, "rarity": "ultra"}
 
 
 AS_OF = datetime(2026, 9, 14, tzinfo=UTC)
@@ -104,13 +103,13 @@ class TestRepeatSaleRatio:
     def test_pairs_same_signature_recent_vs_base(self):
         rows = [
             # 卡 a：前 56 天 1000、近 28 天 800 → ×0.8
-            _row("a", "07-10", 1000), _row("a", "09-01", 800),
+            _row("a", "07-10", 1000, card_name="卡a"), _row("a", "09-01", 800, card_name="卡a"),
             # 卡 b：前 56 天 2000（兩筆中位 2000）、近 28 天 1800 → ×0.9
-            _row("b", "07-20", 1900), _row("b", "08-01", 2100), _row("b", "09-05", 1800),
+            _row("b", "07-20", 1900, card_name="卡b"), _row("b", "08-01", 2100, card_name="卡b"), _row("b", "09-05", 1800, card_name="卡b"),
             # 卡 c：只有近期 → 不配對
-            _row("c", "09-02", 500),
+            _row("c", "09-02", 500, card_name="卡c"),
             # 卡 d：太舊（超過 84 天）→ 不進 base
-            _row("d", "06-01", 100), _row("d", "09-03", 50),
+            _row("d", "06-01", 100, card_name="卡d"), _row("d", "09-03", 50, card_name="卡d"),
         ]
         pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
         p = pts["PSA10"]
@@ -157,6 +156,21 @@ class TestRepeatSaleRatio:
     def test_same_card_same_kind_different_sites_are_not_paired(self):
         a = _row("a", "07-10", 1000, sale_kind="fixed"); a["site"] = "buyee_paypay"
         b = _row("a", "09-01", 800, sale_kind="fixed"); b["site"] = "buyee_yahoo"
+        pts = {p.band: p for p in repeat_sale_ratio([a, b], as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0
+
+    def test_pairs_by_card_identity_not_signature(self):
+        rows = [_row("sigX", "07-10", 1000, card_name="青眼の白龍"), _row("sigY", "09-01", 800, card_name="青眼の白龍")]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 1 and pts["PSA10"].ratio == pytest.approx(0.8)
+
+    def test_rows_without_card_name_are_skipped(self):
+        rows = [_row("a", "07-10", 1000, card_name=None), _row("a", "09-01", 800, card_name=None)]
+        pts = {p.band: p for p in repeat_sale_ratio(rows, as_of=AS_OF)}
+        assert pts["PSA10"].n_pairs == 0 and pts["PSA10"].n_recent == 0
+
+    def test_different_rarity_same_name_not_paired(self):
+        a = _row("a", "07-10", 1000); b = _row("b", "09-01", 800); b["rarity"] = "secret"
         pts = {p.band: p for p in repeat_sale_ratio([a, b], as_of=AS_OF)}
         assert pts["PSA10"].n_pairs == 0
 
@@ -249,6 +263,19 @@ from ygo_sniper.market_drift import (  # noqa: E402
 from ygo_sniper.sources.base import FetchError  # noqa: E402
 
 
+class _FakeIndex:
+    """title → 卡名：把 `t a` 讀成卡 a、`t b` 讀成卡 b（in_era 恆 True）。"""
+    available = True
+
+    class _M:
+        def __init__(self, name):
+            self.name_ja = name
+            self.in_era = True
+
+    def match(self, title):
+        return self._M(title.replace("t ", "", 1)) if title.startswith("t ") else None
+
+
 class _Cfg:
     def __init__(self, external_enabled=True):
         self.market_drift = {
@@ -288,7 +315,7 @@ def _seed_drop(store):
 class TestRefreshMarketDrift:
     def test_persists_local_series_and_external(self, store):
         _seed_drop(store)
-        res = refresh_market_drift(store, _FetcherOK(), _Cfg(), now=AS_OF)
+        res = refresh_market_drift(store, _FetcherOK(), _Cfg(), index=_FakeIndex(), now=AS_OF)
         latest = json.loads(store.get_meta(DRIFT_LATEST_KEY))
         assert latest["as_of"] == "2026-09-14"
         assert latest["recent_days"] == 28 and latest["base_days"] == 56
@@ -305,20 +332,20 @@ class TestRefreshMarketDrift:
 
     def test_external_failure_is_recorded_not_raised(self, store):
         _seed_drop(store)
-        refresh_market_drift(store, _FetcherDown(), _Cfg(), now=AS_OF)
+        refresh_market_drift(store, _FetcherDown(), _Cfg(), index=_FakeIndex(), now=AS_OF)
         assert store.get_meta(RELIEF_LATEST_KEY) is None
         assert "boom" in store.get_meta(RELIEF_ERROR_KEY)
         assert store.get_meta(DRIFT_LATEST_KEY) is not None  # 本地指數不受外部失敗影響
 
     def test_external_disabled_skips_fetch(self, store):
         _seed_drop(store)
-        refresh_market_drift(store, _FetcherDown(), _Cfg(external_enabled=False), now=AS_OF)
+        refresh_market_drift(store, _FetcherDown(), _Cfg(external_enabled=False), index=_FakeIndex(), now=AS_OF)
         assert store.get_meta(RELIEF_ERROR_KEY, "") == ""
 
     def test_already_sent_this_week_does_not_re_pend(self, store):
         _seed_drop(store)
         store.set_meta(DRIFT_SENT_KEY, json.dumps({"PSA10": "2026-09-14"}))
-        res = refresh_market_drift(store, _FetcherOK(), _Cfg(), now=AS_OF)
+        res = refresh_market_drift(store, _FetcherOK(), _Cfg(), index=_FakeIndex(), now=AS_OF)
         assert res["alert_text"] is None
         assert store.get_meta(DRIFT_PENDING_KEY, "") == ""
 
@@ -331,7 +358,7 @@ class TestDeliverDriftAlert:
 
     def test_delivered_clears_pending_and_records_sent(self, store):
         _seed_drop(store)
-        refresh_market_drift(store, _FetcherOK(), _Cfg(), now=AS_OF)
+        refresh_market_drift(store, _FetcherOK(), _Cfg(), index=_FakeIndex(), now=AS_OF)
         n = _Notifier(ok=True)
         assert deliver_drift_alert(store, n) is True
         assert len(n.sent) == 1 and "PSA10" in n.sent[0]
@@ -340,7 +367,7 @@ class TestDeliverDriftAlert:
 
     def test_failed_send_keeps_pending(self, store):
         _seed_drop(store)
-        refresh_market_drift(store, _FetcherOK(), _Cfg(), now=AS_OF)
+        refresh_market_drift(store, _FetcherOK(), _Cfg(), index=_FakeIndex(), now=AS_OF)
         n = _Notifier(ok=False)
         assert deliver_drift_alert(store, n) is False
         assert store.get_meta(DRIFT_PENDING_KEY, "") != ""
@@ -357,13 +384,13 @@ class TestPendingMerge:
         # day 1：PSA10 跌 → pending，送失敗
         _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
         _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
-        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 13, tzinfo=UTC))
+        refresh_market_drift(store, _FetcherDown(), cfg, index=_FakeIndex(), now=datetime(2026, 9, 13, tzinfo=UTC))
         assert deliver_drift_alert(store, _Notifier(ok=False)) is False
         # day 2：PSA10 回升、PSA9 跌
         _insert_comp(store, signature="a", sold_at="2026-09-12T00:00:00+00:00", price=1300)
         _insert_comp(store, signature="b", sold_at="2026-07-20T00:00:00+00:00", price=1000, grade=9.0)
         _insert_comp(store, signature="b", sold_at="2026-09-10T00:00:00+00:00", price=700, grade=9.0)
-        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 14, tzinfo=UTC))
+        refresh_market_drift(store, _FetcherDown(), cfg, index=_FakeIndex(), now=datetime(2026, 9, 14, tzinfo=UTC))
         pending = json.loads(store.get_meta(DRIFT_PENDING_KEY))
         assert pending["bands"] == {"PSA10": "2026-09-13", "PSA9": "2026-09-14"}
         n = _Notifier(ok=True)
@@ -375,8 +402,8 @@ class TestPendingMerge:
         cfg = _Cfg(external_enabled=False)
         _insert_comp(store, signature="a", sold_at="2026-07-20T00:00:00+00:00", price=1000)
         _insert_comp(store, signature="a", sold_at="2026-09-01T00:00:00+00:00", price=800)
-        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 13, tzinfo=UTC))
-        refresh_market_drift(store, _FetcherDown(), cfg, now=datetime(2026, 9, 14, tzinfo=UTC))
+        refresh_market_drift(store, _FetcherDown(), cfg, index=_FakeIndex(), now=datetime(2026, 9, 13, tzinfo=UTC))
+        refresh_market_drift(store, _FetcherDown(), cfg, index=_FakeIndex(), now=datetime(2026, 9, 14, tzinfo=UTC))
         pending = json.loads(store.get_meta(DRIFT_PENDING_KEY))
         assert pending["bands"] == {"PSA10": "2026-09-14"}
         assert pending["text"].count("PSA10") == 1
@@ -384,7 +411,7 @@ class TestPendingMerge:
     def test_old_format_pending_without_lines_is_discarded(self, store):
         store.set_meta(DRIFT_PENDING_KEY, json.dumps({"text": "old", "bands": {"PSA10": "2026-09-01"}}))
         refresh_market_drift(store, _FetcherDown(), _Cfg(external_enabled=False),
-                             now=datetime(2026, 9, 14, tzinfo=UTC))
+                             index=_FakeIndex(), now=datetime(2026, 9, 14, tzinfo=UTC))
         assert store.get_meta(DRIFT_PENDING_KEY, "") in ("", None) or \
             json.loads(store.get_meta(DRIFT_PENDING_KEY))["lines"]
         n = _Notifier(ok=True)
@@ -422,6 +449,7 @@ class _Pipe:
         self.fetcher = _FetcherDown()
         self.cfg = _Cfg(external_enabled=False)
         self.notifier = _Notifier(ok=True)
+        self.index = _FakeIndex()
 
 
 class TestDailyHook:

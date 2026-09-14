@@ -1182,16 +1182,17 @@ class Store:
         寧可指數樣本薄，也不要一個看起來正常但全部是錯的數字。
         同時排除去重副本（`dup_of_id`）與無年代證據列（與估價取樣同判準）。
 
-        **只取有卡號、且成交機制已知的列**（2026-09-14 審查回合）：`signature` 沒卡號時是
-        標題 token 的 fallback，會把不同卡配成一對；`sale_kind` 不分則是拿ヤフオク落札價
-        對フリマ一口價（第三節事故 #7）。兩者都會在配對數只有個位數時決定整帶的答案。
+        卡的身分不用 `signature`（無卡號時是 token fallback）也不用 `set_code`
+        （只有兩成的列有），用**卡名主檔比對**（`CardIndex.match(title)`，與 `valuation.obs_from_comps` 同判準）——
+        比對在 `market_drift.refresh_market_drift` 做，這裡把 `title` 帶出去。
+        `sale_kind` 必須已知（不分則是拿ヤフオク落札價對フリマ一口價，第三節事故 #7）。
         """
         q = (
-            "SELECT signature, sold_at, price_native, currency, grader, grade, site, "
+            "SELECT signature, title, sold_at, price_native, currency, grader, grade, rarity, site, "
             "sale_kind, set_code "
             "FROM comps WHERE COALESCE(sold_at_is_ingest, 0) = 0 AND dup_of_id IS NULL "
             "AND price_native > 0 AND COALESCE(era_evidence, '') <> '' "
-            "AND COALESCE(set_code, '') <> '' AND sale_kind IN ('auction', 'fixed') "
+            "AND sale_kind IN ('auction', 'fixed') "
             "ORDER BY sold_at"
         )
         with self._conn() as c:

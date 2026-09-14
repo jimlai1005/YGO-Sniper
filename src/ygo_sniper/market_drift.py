@@ -76,10 +76,8 @@ def repeat_sale_ratio(
 ) -> list[DriftPoint]:
     """同卡重複成交倍率：近 `recent_days` 天 vs 再往前 `base_days` 天。
 
-    同一個 signature 兩個視窗都有成交才配成一對；每對取「近期中位對數價 − 基期中位對數價」，
-    再取所有配對的中位數。同卡對同卡，而且**同機制對同機制**：競標落札價與定價成交是兩種價格形成機制
-    （第三節事故 #7），同一張卡的 auction 配 auction、fixed 配 fixed，各算一對。同站對同站：
-    fixed 同時來自 PayPay 與ヤフオク即決，價格水準不同（第三節事故 #2），配對鍵含 `site`。
+    同卡＝卡名主檔身分×稀有度×分數；同機制；同站。
+    每對取「近期中位對數價 − 基期中位對數價」，再取所有配對的中位數。
     只吃 JPY 且價格 > 0 的列（三個 Buyee 系來源都是 JPY；別的幣別混進來就是混源）。
     """
     recent_start = as_of - timedelta(days=recent_days)
@@ -105,13 +103,13 @@ def repeat_sale_ratio(
         band = band_of(r.get("grader"), r.get("grade"))
         if band is None:
             continue
-        sig = str(r.get("signature") or "")
-        if not sig:
+        name = r.get("card_name")
+        if not name:
             continue
         kind = r.get("sale_kind")
         if kind not in ("auction", "fixed"):
             continue
-        sig = f"{sig}|{kind}|{r.get('site') or ''}"
+        sig = f"{name}|{r.get('rarity') or ''}|{band}|{r.get('grade')}|{kind}|{r.get('site') or ''}"
         for b in (band, ALL_BAND):
             buckets[b].setdefault(sig, {"recent": [], "base": []})[window].append(price)
             counts[b][window] += 1
@@ -236,7 +234,7 @@ def _week_key(as_of: datetime) -> str:
     return as_of.date().isoformat()
 
 
-def refresh_market_drift(store: Any, fetcher: Any, cfg: Any, *, now: datetime) -> dict[str, Any]:
+def refresh_market_drift(store: Any, fetcher: Any, cfg: Any, *, index: Any | None = None, now: datetime) -> dict[str, Any]:
     """算本地指數、抓外部指數、判告警並記進 pending 帳本。**不送 Telegram**——送與清帳
     在 `deliver_drift_alert`，分開是為了讓「送達才消耗」有單一出口。
 
@@ -250,6 +248,17 @@ def refresh_market_drift(store: Any, fetcher: Any, cfg: Any, *, now: datetime) -
     min_pairs = int(md.get("min_pairs", 8))
 
     rows = store.comps_for_drift()
+    idx = index
+    if idx is None:
+        from .cards import CardIndex  # noqa: PLC0415 - 延後匯入，測試可注入假索引
+        idx = CardIndex.load()
+    if idx is not None and getattr(idx, "available", False):
+        for r in rows:
+            m = idx.match(r.get("title") or "")
+            r["card_name"] = m.name_ja if (m and m.in_era) else None
+    else:
+        for r in rows:
+            r["card_name"] = None
     series = drift_series(rows, as_of=now, weeks=12, recent_days=recent_days, base_days=base_days)
     latest = [p for p in series if p.as_of == now.date().isoformat()]
     alert_text, alert_bands = evaluate_alert(latest, alert_ratio=alert_ratio, min_pairs=min_pairs)
