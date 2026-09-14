@@ -168,6 +168,9 @@ class Config:
     # 沒有它，settings.yaml 裡打的 seller_alpha 區塊會被 load_config 直接丟掉，
     # 使用者以為調了門檻其實沒有。
     seller_alpha: dict[str, Any] = field(default_factory=dict)
+    # 市場漂移監視器（settings.yaml 的 market_drift:）。缺區塊時 market_drift.py 走預設值。
+    # 與 seller_alpha 同理：沒有這個欄位，yaml 裡打的區塊會被 load_config 丟掉而不報錯。
+    market_drift: dict[str, Any] = field(default_factory=dict)
     # 買方身分事實（settings.yaml 的 buying:，例如美國收件地址）。缺區塊＝沒有
     # 美國地址，所有依賴它的功能（eBay 替代路徑、US 旗標）安靜地不出現。
     buying: dict[str, Any] = field(default_factory=dict)
@@ -363,6 +366,7 @@ def load_config(config_dir: str | None = None) -> Config:
         scan=settings.get("scan", {}),
         bidding=settings.get("bidding", {}),
         seller_alpha=settings.get("seller_alpha", {}) or {},
+        market_drift=settings.get("market_drift", {}),
         buying=settings.get("buying", {}) or {},
         resale=_resale_from_settings(settings),
         root=root,
