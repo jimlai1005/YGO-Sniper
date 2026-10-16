@@ -1296,6 +1296,8 @@ document.addEventListener("keydown", ev => {
   if(!view || view.style.display === "none") return;
   const action = hotkeyAction(ev.key.toLowerCase(), focusContext());
   if(!action) return;
+  // 空清單時方向鍵沒有卡可選：放行給瀏覽器捲頁，不要把 ↑↓ 攔成什麼都不做
+  if(action.kind === "nav" && !document.querySelector("#grid .card:not(.leaving)")) return;
   ev.preventDefault();
   runHotkey(action);
 });
@@ -1457,7 +1459,8 @@ function focusContext(){
     （樂觀更新、作廢載入、失敗對帳那套不重寫）。 */
 function runHotkey(action){
   if(action.kind === "nav"){
-    const keys = [...document.querySelectorAll("#grid .card")].map(n => n.dataset.key);
+    // 與 focusLeaving 同源：淡出中的卡不算（略過後 160ms 內按 k 不該回到正在消失的那張）
+    const keys = [...document.querySelectorAll("#grid .card:not(.leaving)")].map(n => n.dataset.key);
     if(!keys.length) return;
     const idx = keys.indexOf(focusKey);
     let next;
@@ -1481,9 +1484,17 @@ function runHotkey(action){
 /** u：把上一個狀態動作送回原狀態。帳由 setState 記（滑鼠與快捷鍵都算）。
     被略過的卡片本地已移除，setState 的樂觀更新找不到它；POST 落庫後重抓一次讓它回來。
     復原本身也會被 setState 記下來，所以再按一次 u ＝ 取消復原。 */
+let undoInFlight = false;     // u 是 GET→POST→可能重載的多步非同步；進行中再按 u 不能重入（兩次讀到同一筆帳）
 async function undoLastState(){
+  if(undoInFlight){ toast("復原進行中，等一下再按"); return; }
+  undoInFlight = true;
+  try{ await _undoLastState(); }
+  finally{ undoInFlight = false; }
+}
+async function _undoLastState(){
   const act = lastStateAction;
   if(!act || act.prevState == null){ toast("沒有可復原的動作"); return; }
+  const focusAtStart = focusKey;                    // 收尾時只在使用者沒移動焦點的情況下才把焦點拉回來
   // 帳會過期的路徑不只本地：清除實證、CLI、另一個視窗都可能在中間改掉這張卡，而被略過的卡
   // 本地根本看不到。所以問後端現在是什麼——與帳上記的 newState 不同就不復原；
   // 讀不到就不動（讀不到 ≠ 可以改，與第五節「推論不得直接觸發會動資料的動作」同一條）。
@@ -1510,7 +1521,10 @@ async function undoLastState(){
   }
   // 重載被更新的請求作廢時卡片還沒畫出來；此時 setFocus 會把焦點清成 null，
   // 把 focusLeaving 剛交出去的焦點弄丟。畫出來才接焦點，沒畫出來就讓焦點留在原處。
-  if(document.querySelector(`#grid [data-key="${CSS.escape(act.key)}"]`)) setFocus(act.key, true);
+  // 等待期間使用者已用 j/k 或 n 把焦點移到別張（focusKey 變了）→ 眼睛在那張上，不要拉回來，
+  // 否則下一下 n 會打在剛救回的卡上、等於把復原撤銷掉。
+  const nodeBack = document.querySelector(`#grid [data-key="${CSS.escape(act.key)}"]`);
+  if(nodeBack && focusKey === focusAtStart) setFocus(act.key, true);
   toast(`已復原為「${HOTKEY_LABELS[act.prevState] || act.prevState}」`);
 }
 

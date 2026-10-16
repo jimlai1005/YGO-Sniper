@@ -742,6 +742,17 @@ reviewer 第二輪 finding 與裁決（已全部實作在 commit 中）：
 - **S-4** plan 裡「grep 計數因此是 2」那句無對應測試，刪除。
 - 觀察（不做）：會補發 mouseover 的瀏覽器（Firefox／Safari 未實測）在滾輪捲動後焦點可能留在捲出畫面的卡上；Chrome 實測不補發。
 
+### Task 6：第三輪審查修正（2026-10-16，主線程自己動手，使用者要求第三輪確認品質）
+
+- **W-A** `undoLastState` 無重入鎖：連按 u u 兩次讀到同一筆帳，第二下不是「取消復原」而是重送同值或被判成「外部改過」。
+  修：模組級 `undoInFlight` 旗標，進行中再按 u → toast「復原進行中」。
+- **W-B** 復原收尾無條件把焦點拉回被復原的卡：等待期間使用者已 j/n 到下一張，焦點被拉回、下一下 n 打在剛救回的卡上。
+  修：開始時記 `focusAtStart`，收尾只在 `focusKey === focusAtStart` 時 `setFocus`。
+- **S-A** j/k 的卡片清單含 `.leaving` → 改 `:not(.leaving)`，與 `focusLeaving` 同源。
+- **S-B** 空清單按 ↑↓ 被 `preventDefault` 成什麼都不做 → nav 而無卡時放行給瀏覽器捲頁。
+- **S-C**（不改，記錄）後端全掛、A B 連續失敗時帳可能退回沒落庫的 A；被 W-3 的 GET 檢查擋住，只會多一則「之後又被改成…」訊息，不寫錯資料。
+- reviewer 結論：修完不需整輪複審，主線程在 Chrome 重跑「連按 u u」與「u 之後立刻 n」兩個情境即可。
+
 ## 主線程驗收（builder 回報後親跑）
 
 1. `.venv/bin/pytest tests/test_hotkeys.py -v` 全綠；`make test` 末行 `N passed`。
