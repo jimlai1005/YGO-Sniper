@@ -155,3 +155,19 @@ def test_bucket_buttons_show_their_hotkey():
     html = INDEX.read_text(encoding="utf-8")
     assert 'BUCKET_KEYS = {high_value: "m", rare: ","}' in html
     assert "<kbd>${BUCKET_KEYS[k]}</kbd></button>" in html
+
+
+# ---- DOM 守門的文字回歸（DOM 層沒有 node 測試，至少釘住這兩條不被順手刪掉）------
+
+def test_keydown_guard_blocks_repeat_and_confirm_dialog():
+    html = INDEX.read_text(encoding="utf-8")
+    assert "if(ev.repeat) return;" in html, "按住連發必須擋掉（2026-10-15 審查 W1）"
+    assert 'if(dlg && dlg.style.display !== "none") return;' in html, \
+        "keydown 守門必須檢查 #xp-confirm 確認框（審查 W3）"
+
+
+def test_set_state_reports_failure_to_caller():
+    # undoLastState 靠這個布林決定要不要說「已復原」（審查 C1）
+    html = INDEX.read_text(encoding="utf-8")
+    body = html.split("async function setState(key, state){", 1)[1].split("\n}\n", 1)[0]
+    assert "return true;" in body and "return false;" in body

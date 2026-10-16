@@ -572,7 +572,7 @@
     <button id="xp-clear-btn" style="margin-left:10px">清除</button>
   </div>
   <div class="hint" style="margin:0 0 8px">鍵盤：滑鼠停在卡片上或按 <b>j</b>／<b>k</b> 選卡，
-    按鈕旁的字母就是快捷鍵（<b>n</b> 略過），<b>u</b> 復原上一個狀態動作。</div>
+    按鈕旁的字母就是快捷鍵（<b>n</b> 略過），<b>u</b> 復原上一個狀態動作（再按一次取消）。</div>
   <div class="rows" id="grid"></div>
   <div class="empty" id="empty" style="display:none">這個分頁沒有標的。</div>
 </div><!-- /signals-view -->
@@ -1289,6 +1289,9 @@ document.addEventListener("keydown", ev => {
   if(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
   if(ev.metaKey || ev.ctrlKey || ev.altKey || ev.isComposing) return;
   if(lightbox.classList.contains("show")) return;
+  if(ev.repeat) return;                              // 按住連發：一次按鍵只做一件事
+  const dlg = document.getElementById("xp-confirm"); // 清除確認框開著：框後面的卡不能被改
+  if(dlg && dlg.style.display !== "none") return;
   const view = document.getElementById("signals-view");
   if(!view || view.style.display === "none") return;
   const action = hotkeyAction(ev.key.toLowerCase(), focusContext());
@@ -1422,10 +1425,21 @@ function setFocus(key, scroll){
   if(scroll) node.scrollIntoView({block: "nearest"});
 }
 
+/** 焦點卡片開始離場（淡出中）：立刻把焦點交給它後面那張。DOM 上它還在、但已帶 .leaving。 */
+function focusLeaving(key){
+  if(focusKey !== key) return;
+  const all  = [...document.querySelectorAll("#grid .card")].map(n => n.dataset.key);
+  const live = [...document.querySelectorAll("#grid .card:not(.leaving)")].map(n => n.dataset.key);
+  setFocus(resolveFocus(all, live, key), false);
+}
+
 // 滑鼠停在卡片任何位置就是焦點——解決「略過按鈕位置會跑」：手不用瞄按鈕。
 // 已知限制：滑鼠不動時 mouseover 不再觸發，此時焦點以鍵盤（j/k、略過後自動落到下一張）為準；
 // 滑鼠一動就回到懸停。
+let lastMouse = null;   // 瀏覽器在捲動／重排後可能補發座標相同的 mouseover；座標沒變就不是使用者在動
 document.getElementById("grid").addEventListener("mouseover", ev => {
+  if(lastMouse && lastMouse.x === ev.clientX && lastMouse.y === ev.clientY) return;
+  lastMouse = {x: ev.clientX, y: ev.clientY};
   const node = ev.target.closest?.(".card");
   if(node && node.dataset.key !== focusKey) setFocus(node.dataset.key, false);
 });
@@ -1457,25 +1471,32 @@ function runHotkey(action){
   const it = items.find(i => i.key === focusKey);
   if(!it){ toast("焦點卡片已不在清單上"); setFocus(null, false); return; }
   if(action.kind === "state"){
-    lastStateAction = {key: it.key, prevState: it.state};
     setState(it.key, action.state);
   }else if(action.kind === "bucket"){
     setBucket(it.key, action.bucket);
   }
 }
 
-/** u：把上一個狀態動作送回原狀態。被略過的卡片本地已經移除，setState 的樂觀更新
-    找不到它（applyLocalState idx<0 → 不變）；POST 落庫後重抓一次清單讓它回來。 */
+/** u：把上一個狀態動作送回原狀態。帳由 setState 記（滑鼠與快捷鍵都算）。
+    被略過的卡片本地已移除，setState 的樂觀更新找不到它；POST 落庫後重抓一次讓它回來。
+    復原本身也會被 setState 記下來，所以再按一次 u ＝ 取消復原。 */
 async function undoLastState(){
-  if(!lastStateAction){ toast("沒有可復原的動作"); return; }
-  const {key, prevState} = lastStateAction;
-  lastStateAction = null;                       // 只復原一步，不做復原的復原
-  await setState(key, prevState);
-  if(!items.some(i => i.key === key)){
-    await loadSignals().catch(e => toast("載入失敗：" + e.message));
+  const act = lastStateAction;
+  if(!act || act.prevState == null){ toast("沒有可復原的動作"); return; }
+  const cur = items.find(i => i.key === act.key);
+  if(cur && cur.state !== act.newState){
+    lastStateAction = null;
+    toast("這張卡之後又被改過，不復原");
+    return;
   }
-  setFocus(key, true);
-  toast(`已復原為「${HOTKEY_LABELS[prevState] || prevState}」`);
+  const ok = await setState(act.key, act.prevState);
+  if(!ok) return;                                   // setState 已 toast 失敗並重抓對帳，這裡不能再說成功
+  if(!items.some(i => i.key === act.key)){
+    try{ await loadSignals(); }
+    catch(e){ toast("已復原，但重載清單失敗：" + e.message); return; }
+  }
+  setFocus(act.key, true);
+  toast(`已復原為「${HOTKEY_LABELS[act.prevState] || act.prevState}」`);
 }
 
 /** 指派／清除分類。`bucket` 是空字串就送 null（清除）。
@@ -1519,6 +1540,9 @@ async function setBucket(key, bucket){
     /api/signals 全列重算＋MB 級回應，使用者被迫等卡片消失才敢按下一張。
     失敗路徑不樂觀：toast 病名＋loadSignals() 回去對帳，後端才是事實。 */
 async function setState(key, state){
+  // u 復原用的帳：記在這裡而不是 runHotkey，滑鼠點按鈕、快捷鍵、復原本身都經過這一支。
+  const before = items.find(i => i.key === key);
+  lastStateAction = {key, prevState: before ? before.state : null, newState: state};
   const droppedLoad = signalsInFlight > 0;   // 作廢的是不是使用者要的一次載入
   signalsSeq++;   // 本地已經走在伺服器快照前面了，任何在飛的清單回應都過期
   const res = applyLocalState(items, key, state, currentState);
@@ -1526,6 +1550,7 @@ async function setState(key, state){
   const node = document.querySelector(`#grid [data-key="${CSS.escape(key)}"]`);
   if(res.removed && node){
     node.classList.add("leaving");                 // 150ms 淡出，看得出是哪張走了
+    focusLeaving(key);                             // 焦點現在就移走，不等 160ms（連按 n 才不會斷）
     setTimeout(renderSignals, 160);
   }else{
     renderSignals();
@@ -1546,10 +1571,12 @@ async function setState(key, state){
     // 重載都會補上，不值得為它擋住主流程——但 rejection 要接住，不留 unhandled。
     loadBundle().catch(e => console.warn("湊單籃補刷失敗", e));
     loadStats().catch(e => console.warn("計數補刷失敗", e));
+    return true;
   }catch(e){
     toast("失敗：" + e.message);
     // 樂觀錯了就認：重抓後端的事實，卡片會自己回來
     loadSignals().catch(e2 => toast("載入失敗：" + e2.message));
+    return false;
   }
 }
 
