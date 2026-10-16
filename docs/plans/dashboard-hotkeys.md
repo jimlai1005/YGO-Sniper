@@ -560,6 +560,166 @@ git commit -m "feat(dashboard): 按鈕 <kbd> 快捷鍵提示＋說明列；CLAUD
 
 ---
 
+### Task 4 `@inline`：審查修正（2026-10-15 reviewer 第一輪，主線程已逐條核實）
+
+**Files:**
+- Modify: `web/static/index.html`（keydown 守門、`setState`、`setFocus` 附近的 mouseover、`runHotkey`、`undoLastState`）
+- Modify: `tests/test_hotkeys.py`（補兩條 grep 回歸）
+
+主線程裁決（寫在這裡就是定案）：
+- **C1（Critical）** `setState` 的 catch 只 toast 不 rethrow，`undoLastState` 的 `await setState(...)` 永遠成功，
+  失敗時仍 toast「已復原為…」把「失敗：…」蓋掉（違反工程原則 #3、專案第五節）。
+  修法：`setState` **回傳布林**（成功 `true`、catch 分支 `false`），`undoLastState` 失敗就不說復原。
+- **W1** 沒擋 `ev.repeat`：按住 n 會連略過下一張。修法：守門加 `if(ev.repeat) return;`（主線程實測確認會觸發）。
+- **W2** 略過後 160ms 淡出期間 `items` 已移除、DOM 還在、`focusKey` 還指著它，再按一鍵會走到
+  「焦點卡片已不在清單上」把焦點清空，連按 n 斷掉。修法：卡片**開始離場的當下**就把焦點移走——
+  `setState` 的 `res.removed && node` 分支加 `.leaving` 之後呼叫 `focusLeaving(key)`。
+- **W3** 守門漏了 `#xp-confirm`（清除確認框，`style.display` 切換）：框開著按 n 會改到框後面的卡。修法：守門加一條。
+- **W4** `lastStateAction` 只記快捷鍵，滑鼠點按鈕不記；且永不過期，中間用滑鼠改過狀態再按 u 會覆寫。
+  修法：改在 **`setState` 裡**記 `{key, prevState, newState}`（滑鼠、快捷鍵、復原本身都經過它），
+  `runHotkey` 不再自己記；`undoLastState` 若本地找得到該卡且 `it.state !== newState`（之後又被改過）
+  → toast「這張卡之後又被改過，不復原」並清掉。副作用：復原本身也會被記，**再按一次 u ＝ 取消復原**，
+  說明列文字改成「u 復原上一個狀態動作（再按一次取消）」。
+- **W5** 捲動後瀏覽器補發 mouseover 把焦點拉回游標底下：主線程 Chrome 實測**未重現**（j 三次、捲 850px、
+  游標下已換卡，mouseover 零次）。但防護只要兩行：mouseover 的 `clientX/Y` 與上一次相同就忽略（補發事件
+  座標不變、真實移動座標必變）。做。
+- **S1**（n 之後立刻 u，兩個 POST 併發、落庫順序無保證）：不做，記為觀察；SQLite 鎖住時的時序問題
+  要靠後端序列化，不在本案。
+
+- [ ] **Step 1: 補兩條 grep 回歸測試**（`tests/test_hotkeys.py` 末尾）
+
+```python
+# ---- DOM 守門的文字回歸（DOM 層沒有 node 測試，至少釘住這兩條不被順手刪掉）------
+
+def test_keydown_guard_blocks_repeat_and_confirm_dialog():
+    html = INDEX.read_text(encoding="utf-8")
+    assert "if(ev.repeat) return;" in html, "按住連發必須擋掉（2026-10-15 審查 W1）"
+    assert 'if(dlg && dlg.style.display !== "none") return;' in html, \
+        "keydown 守門必須檢查 #xp-confirm 確認框（審查 W3）"
+
+
+def test_set_state_reports_failure_to_caller():
+    # undoLastState 靠這個布林決定要不要說「已復原」（審查 C1）
+    html = INDEX.read_text(encoding="utf-8")
+    body = html.split("async function setState(key, state){", 1)[1].split("\n}\n", 1)[0]
+    assert "return true;" in body and "return false;" in body
+```
+
+- [ ] **Step 2: 跑測試確認這兩條紅燈**
+
+Run: `.venv/bin/pytest tests/test_hotkeys.py -v`
+Expected: 新的兩條 FAIL，其餘 39 PASS。
+
+- [ ] **Step 3: keydown 守門（W1、W3）**
+
+在 `if(lightbox.classList.contains("show")) return;` 之後加：
+
+```js
+  if(ev.repeat) return;                              // 按住連發：一次按鍵只做一件事
+  const dlg = document.getElementById("xp-confirm"); // 清除確認框開著：框後面的卡不能被改
+  if(dlg && dlg.style.display !== "none") return;
+```
+
+- [ ] **Step 4: `setState` 回傳布林＋記錄動作＋離場即移焦（C1、W4、W2）**
+
+`async function setState(key, state){` 開頭（`const droppedLoad` 之前）加：
+
+```js
+  // u 復原用的帳：記在這裡而不是 runHotkey，滑鼠點按鈕、快捷鍵、復原本身都經過這一支。
+  const before = items.find(i => i.key === key);
+  lastStateAction = {key, prevState: before ? before.state : null, newState: state};
+```
+
+`if(res.removed && node){ node.classList.add("leaving"); setTimeout(renderSignals, 160); }` 改成：
+
+```js
+  if(res.removed && node){
+    node.classList.add("leaving");                 // 150ms 淡出，看得出是哪張走了
+    focusLeaving(key);                             // 焦點現在就移走，不等 160ms（連按 n 才不會斷）
+    setTimeout(renderSignals, 160);
+  }
+```
+
+try 區塊末尾（`loadStats().catch(...)` 之後）加 `return true;`；catch 區塊末尾加 `return false;`。
+`prevState` 為 null（本地找不到那張卡）時 `undoLastState` 視為沒有可復原的動作。
+
+- [ ] **Step 5: `focusLeaving`、mouseover 防補發（W2、W5）**
+
+`setFocus` 之後加：
+
+```js
+/** 焦點卡片開始離場（淡出中）：立刻把焦點交給它後面那張。DOM 上它還在、但已帶 .leaving。 */
+function focusLeaving(key){
+  if(focusKey !== key) return;
+  const all  = [...document.querySelectorAll("#grid .card")].map(n => n.dataset.key);
+  const live = [...document.querySelectorAll("#grid .card:not(.leaving)")].map(n => n.dataset.key);
+  setFocus(resolveFocus(all, live, key), false);
+}
+```
+
+mouseover 接線改成：
+
+```js
+let lastMouse = null;   // 瀏覽器在捲動／重排後可能補發座標相同的 mouseover；座標沒變就不是使用者在動
+document.getElementById("grid").addEventListener("mouseover", ev => {
+  if(lastMouse && lastMouse.x === ev.clientX && lastMouse.y === ev.clientY) return;
+  lastMouse = {x: ev.clientX, y: ev.clientY};
+  const node = ev.target.closest?.(".card");
+  if(node && node.dataset.key !== focusKey) setFocus(node.dataset.key, false);
+});
+```
+
+- [ ] **Step 6: `runHotkey` 不再記帳、`undoLastState` 看布林與過期（C1、W4）**
+
+`runHotkey` 的 state 分支刪掉 `lastStateAction = {…};` 那一行，只留 `setState(it.key, action.state);`。
+
+`undoLastState` 整個換成：
+
+```js
+/** u：把上一個狀態動作送回原狀態。帳由 setState 記（滑鼠與快捷鍵都算）。
+    被略過的卡片本地已移除，setState 的樂觀更新找不到它；POST 落庫後重抓一次讓它回來。
+    復原本身也會被 setState 記下來，所以再按一次 u ＝ 取消復原。 */
+async function undoLastState(){
+  const act = lastStateAction;
+  if(!act || act.prevState == null){ toast("沒有可復原的動作"); return; }
+  const cur = items.find(i => i.key === act.key);
+  if(cur && cur.state !== act.newState){
+    lastStateAction = null;
+    toast("這張卡之後又被改過，不復原");
+    return;
+  }
+  const ok = await setState(act.key, act.prevState);
+  if(!ok) return;                                   // setState 已 toast 失敗並重抓對帳，這裡不能再說成功
+  if(!items.some(i => i.key === act.key)){
+    try{ await loadSignals(); }
+    catch(e){ toast("已復原，但重載清單失敗：" + e.message); return; }
+  }
+  setFocus(act.key, true);
+  toast(`已復原為「${HOTKEY_LABELS[act.prevState] || act.prevState}」`);
+}
+```
+
+- [ ] **Step 7: 說明列文字**
+
+`.hint` 裡 `<b>u</b> 復原上一個狀態動作。` 改成 `<b>u</b> 復原上一個狀態動作（再按一次取消）。`
+
+- [ ] **Step 8: 跑測試**
+
+Run: `.venv/bin/pytest tests/test_hotkeys.py tests/test_optimistic_state.py -v`
+Expected: 全部 PASS（41 + 4）。
+
+Run: `make test`
+Expected: 末行 `N passed`，0 failed。
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add web/static/index.html tests/test_hotkeys.py
+git commit -m "fix(dashboard): 快捷鍵審查修正——setState 回報失敗、擋連發與確認框、離場即移焦、u 帳改記在 setState"
+```
+
+---
+
 ## 主線程驗收（builder 回報後親跑）
 
 1. `.venv/bin/pytest tests/test_hotkeys.py -v` 全綠；`make test` 末行 `N passed`。
