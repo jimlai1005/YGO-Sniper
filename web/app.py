@@ -236,6 +236,16 @@ class StateUpdate(BaseModel):
     note: str | None = None
 
 
+@app.get("/api/signals/{key:path}/state")
+def get_state(key: str):
+    """單筆的目前狀態。給 dashboard 的 u 復原用：復原前先問後端「現在是什麼」，
+    與本地帳上記的不同（清除實證、CLI、另一個視窗改過）就不復原。只讀。"""
+    row = store.get_signal(key)
+    if not row:
+        raise HTTPException(404, "找不到這筆標的")
+    return {"key": key, "state": row["state"]}
+
+
 @app.post("/api/signals/{key:path}/state")
 def set_state(key: str, body: StateUpdate):
     valid = {s.value for s in TriageState}

@@ -692,7 +692,7 @@ async function undoLastState(){
   if(!ok) return;                                   // setState 已 toast 失敗並重抓對帳，這裡不能再說成功
   // 被略過的卡本地找不到，setState 記下的 prevState 會是 null → 第二次 u 就取消不了。
   // 這裡自己知道它剛才是什麼（act.newState），用它覆寫成正確的「取消復原」帳。
-  //（2026-10-15 builder 回報的缺口，主線程補上；grep 測試的「lastStateAction = {」計數因此是 2。）
+  //（2026-10-15 builder 回報的缺口，主線程補上。）
   lastStateAction = {key: act.key, prevState: act.newState, newState: act.prevState};
   if(!items.some(i => i.key === act.key)){
     try{ await loadSignals(); }
@@ -723,6 +723,24 @@ git commit -m "fix(dashboard): 快捷鍵審查修正——setState 回報失敗�
 ```
 
 ---
+
+### Task 5：第二輪審查修正（2026-10-16，主線程自己動手——單檔小修＋一支只讀端點）
+
+reviewer 第二輪 finding 與裁決（已全部實作在 commit 中）：
+- **W-1** u 復原的 POST 等待期間對別張卡按 n → 復原回來後無條件覆寫帳，B 的帳被 A 的「取消復原」帳蓋掉。
+  修：只在 `lastStateAction` 仍是這次 setState 記的那筆時才覆寫。
+- **W-2** 復原後 `loadSignals` 被作廢（卡還沒畫出來）→ `setFocus` 把焦點清成 null，連按節奏斷掉。
+  修：DOM 有那張卡才 `setFocus`，否則讓焦點留在 `focusLeaving` 交出去的位置。
+- **W-3** 帳過期的判定只看本地 `items`；被略過的卡本地看不到，中間若被清除實證／CLI／另一視窗改掉，
+  u 會把實證已售出的卡拉回待處理並歸零 `cleared_verified`（CLAUDE.md 第五節第 5 項同型）。
+  修：**新增只讀端點 `GET /api/signals/{key}/state`**（`web/app.py`，測試 `tests/test_hotkeys_web.py`），
+  復原前先問後端；與帳上 `newState` 不同 → 不復原並說出現在是什麼；讀不到 → 不復原（讀不到 ≠ 可以改）。
+  這是本案唯一的後端改動，純讀取。
+- **S-1** setState POST 失敗後帳仍留著沒落庫的動作 → catch 分支把自己那筆收回（還原成呼叫前的帳），別張卡期間記的帳不動。
+- **S-2** setBucket 連動 new→watching 不經 setState → 連動改了狀態時清帳，避免 u 復原到別張卡卻像在說這張回來了。
+- **S-3** `lastStateAction` 宣告處註解更新。
+- **S-4** plan 裡「grep 計數因此是 2」那句無對應測試，刪除。
+- 觀察（不做）：會補發 mouseover 的瀏覽器（Firefox／Safari 未實測）在滾輪捲動後焦點可能留在捲出畫面的卡上；Chrome 實測不補發。
 
 ## 主線程驗收（builder 回報後親跑）
 

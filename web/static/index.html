@@ -1412,7 +1412,8 @@ function resolveFocus(prevKeys, nextKeys, focusKey){
 /* ==== HOTKEY-LOGIC:END ==== */
 let focusKey = null;          // 按鍵會作用的卡片（data-key）；null＝沒有焦點
 let lastShownKeys = [];       // 上一次 renderSignals 畫出的 data-key 順序（給 resolveFocus）
-let lastStateAction = null;   // {key, prevState}：u 復原用，只記**狀態**動作，分類開關不記
+let lastStateAction = null;   // {key, prevState, newState}：u 復原用的帳，由 setState 記（滑鼠點按鈕、
+                              // 快捷鍵、復原本身都算）；分類開關不記，但它連動改了狀態時會把帳清掉
 
 /** 把焦點外框移到 key 那張；scroll 為真才捲到可見（鍵盤移動才捲，滑鼠懸停不捲）。 */
 function setFocus(key, scroll){
@@ -1483,22 +1484,33 @@ function runHotkey(action){
 async function undoLastState(){
   const act = lastStateAction;
   if(!act || act.prevState == null){ toast("沒有可復原的動作"); return; }
-  const cur = items.find(i => i.key === act.key);
-  if(cur && cur.state !== act.newState){
+  // 帳會過期的路徑不只本地：清除實證、CLI、另一個視窗都可能在中間改掉這張卡，而被略過的卡
+  // 本地根本看不到。所以問後端現在是什麼——與帳上記的 newState 不同就不復原；
+  // 讀不到就不動（讀不到 ≠ 可以改，與第五節「推論不得直接觸發會動資料的動作」同一條）。
+  let serverState;
+  try{
+    serverState = (await api(`/api/signals/${encodeURIComponent(act.key)}/state`)).state;
+  }catch(e){ toast("查不到這張卡的目前狀態，不復原：" + e.message); return; }
+  if(serverState !== act.newState){
     lastStateAction = null;
-    toast("這張卡之後又被改過，不復原");
+    toast(`這張卡之後又被改成「${HOTKEY_LABELS[serverState] || serverState}」，不復原`);
     return;
   }
   const ok = await setState(act.key, act.prevState);
   if(!ok) return;                                   // setState 已 toast 失敗並重抓對帳，這裡不能再說成功
   // 被略過的卡本地找不到，setState 記下的 prevState 會是 null → 第二次 u 就取消不了。
-  // 這裡自己知道它剛才是什麼（act.newState），用它覆寫成正確的「取消復原」帳。
-  lastStateAction = {key: act.key, prevState: act.newState, newState: act.prevState};
+  // 這裡自己知道它剛才是什麼（act.newState），用它覆寫成正確的「取消復原」帳——
+  // 但只在帳還是這次 setState 記的那一筆時才覆寫；等待期間若對別張卡按了 n，那筆帳才是最新的。
+  if(lastStateAction && lastStateAction.key === act.key && lastStateAction.newState === act.prevState){
+    lastStateAction = {key: act.key, prevState: act.newState, newState: act.prevState};
+  }
   if(!items.some(i => i.key === act.key)){
     try{ await loadSignals(); }
     catch(e){ toast("已復原，但重載清單失敗：" + e.message); return; }
   }
-  setFocus(act.key, true);
+  // 重載被更新的請求作廢時卡片還沒畫出來；此時 setFocus 會把焦點清成 null，
+  // 把 focusLeaving 剛交出去的焦點弄丟。畫出來才接焦點，沒畫出來就讓焦點留在原處。
+  if(document.querySelector(`#grid [data-key="${CSS.escape(act.key)}"]`)) setFocus(act.key, true);
   toast(`已復原為「${HOTKEY_LABELS[act.prevState] || act.prevState}」`);
 }
 
@@ -1517,7 +1529,12 @@ async function setBucket(key, bucket){
     // 後端回的是**寫完讀回來的值**（state 可能被 new→watching 連動改掉），
     // 照實更新本地，不重打整頁。
     const it = items.find(i => i.key === key);
-    if(it){ it.bucket = r.bucket; if(r.state) it.state = r.state; }
+    if(it){
+      // 連動 new→watching 不經 setState，u 的帳不知道；留著舊帳會讓 u 復原到別張卡、
+      // toast 卻像在說這張回來了。清掉比誤導好。
+      if(r.state && r.state !== it.state) lastStateAction = null;
+      it.bucket = r.bucket; if(r.state) it.state = r.state;
+    }
     // 分類分頁：改完分類後不再屬於這一頁的，本地移除（與後端過濾同義）。
     if(currentBucket && r.bucket !== currentBucket){
       items = items.filter(i => i.key !== key);
@@ -1545,7 +1562,9 @@ async function setBucket(key, bucket){
 async function setState(key, state){
   // u 復原用的帳：記在這裡而不是 runHotkey，滑鼠點按鈕、快捷鍵、復原本身都經過這一支。
   const before = items.find(i => i.key === key);
-  lastStateAction = {key, prevState: before ? before.state : null, newState: state};
+  const prevLedger = lastStateAction;
+  const thisLedger = {key, prevState: before ? before.state : null, newState: state};
+  lastStateAction = thisLedger;
   const droppedLoad = signalsInFlight > 0;   // 作廢的是不是使用者要的一次載入
   signalsSeq++;   // 本地已經走在伺服器快照前面了，任何在飛的清單回應都過期
   const res = applyLocalState(items, key, state, currentState);
@@ -1577,6 +1596,9 @@ async function setState(key, state){
     return true;
   }catch(e){
     toast("失敗：" + e.message);
+    // 沒落庫的動作不能留在 u 的帳上（留著會讓下一次 u 把本來就是的值再送一次、還說「已復原」）；
+    // 但只收回自己這一筆——期間若別張卡已經記了帳，那筆是真的，不能動。
+    if(lastStateAction === thisLedger) lastStateAction = prevLedger;
     // 樂觀錯了就認：重抓後端的事實，卡片會自己回來
     loadSignals().catch(e2 => toast("載入失敗：" + e2.message));
     return false;
