@@ -1333,6 +1333,60 @@ function applyLocalState(items, key, newState, currentState){
 }
 /* ==== LOCAL-STATE-LOGIC:END ==== */
 
+/* ==== HOTKEY-LOGIC:BEGIN ==== */
+/* 卡片快捷鍵（2026-10-15 使用者定案）：鍵盤最下排由左到右＝卡片按鈕列由左到右，
+   n 剛好落在略過。鍵綁的是**動作**不是按鈕位置——競標卡沒有 x／c 兩個動作，
+   但 n 在哪種卡片都是略過。純函式、不碰 DOM：tests/test_hotkeys.py 用 node 實跑。 */
+const HOTKEY_STATES  = {z: "watching", x: "in_bundle", c: "asked_seller",
+                        v: "offer_sent", b: "bought", n: "skipped"};
+const HOTKEY_LABELS  = {new: "待處理", watching: "觀察中", in_bundle: "加入湊單",
+                        asked_seller: "已詢問", offer_sent: "已出價", bought: "已購買", skipped: "略過"};
+const HOTKEY_BUCKETS = {m: "high_value", ",": "rare"};
+//: 競標卡（auctionCard）沒有的狀態動作：按了要說「沒有這顆按鈕」，不能靜默。
+const AUCTION_UNSUPPORTED = new Set(["in_bundle", "asked_seller"]);
+const HOTKEY_NAV = {j: 1, arrowdown: 1, k: -1, arrowup: -1};
+
+/** 鍵 → 動作。`key` 由呼叫端先 toLowerCase（這裡對大寫一律回 null，不猜）。
+    ctx = {isAuction, bucket}：目前焦點卡片是不是競標卡、目前分類是什麼。
+    回傳 {kind:"state",state} | {kind:"bucket",bucket} | {kind:"nav",delta}
+         | {kind:"undo"} | {kind:"unsupported",label} | null */
+function hotkeyAction(key, ctx){
+  ctx = ctx || {};
+  if(key in HOTKEY_STATES){
+    const state = HOTKEY_STATES[key];
+    if(ctx.isAuction && AUCTION_UNSUPPORTED.has(state)){
+      return {kind: "unsupported", label: HOTKEY_LABELS[state]};
+    }
+    return {kind: "state", state: state};
+  }
+  if(key in HOTKEY_BUCKETS){
+    const b = HOTKEY_BUCKETS[key];
+    // 與 bucketActs 同一個開關語意：已經是這個分類就送空字串＝清除
+    return {kind: "bucket", bucket: ctx.bucket === b ? "" : b};
+  }
+  if(key in HOTKEY_NAV) return {kind: "nav", delta: HOTKEY_NAV[key]};
+  if(key === "u") return {kind: "undo"};
+  return null;
+}
+
+/** 重畫之後焦點該落在誰身上。prevKeys／nextKeys 是重畫前後 #grid 的 data-key 順序。
+    還在 → 留著；不在（被略過、被篩掉）→ 從它原本的位置往後找第一張還在的，
+    往後沒有就往前找；完全無交集（換分頁）→ null，不亂指。 */
+function resolveFocus(prevKeys, nextKeys, focusKey){
+  if(focusKey == null) return null;
+  if(nextKeys.includes(focusKey)) return focusKey;
+  const idx = prevKeys.indexOf(focusKey);
+  if(idx < 0) return null;
+  for(let i = idx + 1; i < prevKeys.length; i++){
+    if(nextKeys.includes(prevKeys[i])) return prevKeys[i];
+  }
+  for(let i = idx - 1; i >= 0; i--){
+    if(nextKeys.includes(prevKeys[i])) return prevKeys[i];
+  }
+  return null;
+}
+/* ==== HOTKEY-LOGIC:END ==== */
+
 /** 指派／清除分類。`bucket` 是空字串就送 null（清除）。
     回應帶著 db 讀回來的 state：new 會被連動升成 watching，要照實告訴使用者
     ——狀態被改掉卻沒說，下次他在「待處理」找不到這張卡會以為它消失了。 */
