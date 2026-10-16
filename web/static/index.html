@@ -1491,6 +1491,9 @@ async function undoLastState(){
   }
   const ok = await setState(act.key, act.prevState);
   if(!ok) return;                                   // setState 已 toast 失敗並重抓對帳，這裡不能再說成功
+  // 被略過的卡本地找不到，setState 記下的 prevState 會是 null → 第二次 u 就取消不了。
+  // 這裡自己知道它剛才是什麼（act.newState），用它覆寫成正確的「取消復原」帳。
+  lastStateAction = {key: act.key, prevState: act.newState, newState: act.prevState};
   if(!items.some(i => i.key === act.key)){
     try{ await loadSignals(); }
     catch(e){ toast("已復原，但重載清單失敗：" + e.message); return; }
