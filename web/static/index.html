@@ -113,6 +113,9 @@
   .acts{display:flex;gap:6px;padding-top:10px;border-top:1px solid var(--line);
         flex-wrap:wrap;align-items:center;margin-top:auto}
   .acts button{padding:5px 9px;font-size:11.5px}
+  .acts kbd{font-family:var(--mono);font-size:10px;color:var(--dim);margin-left:5px;
+            border:1px solid var(--line);border-radius:3px;padding:0 3px;line-height:1.4}
+  .acts button.on kbd{color:inherit;border-color:currentColor}
   .score{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--dim)}
   .empty{color:var(--dim);padding:60px 20px;text-align:center}
   /* 表格是唯一「內容天生比容器寬」的東西：讓它在自己的框裡橫捲，
@@ -568,6 +571,8 @@
     <span id="xp-banner-text"></span>
     <button id="xp-clear-btn" style="margin-left:10px">清除</button>
   </div>
+  <div class="hint" style="margin:0 0 8px">鍵盤：滑鼠停在卡片上或按 <b>j</b>／<b>k</b> 選卡，
+    按鈕旁的字母就是快捷鍵（<b>n</b> 略過），<b>u</b> 復原上一個狀態動作。</div>
   <div class="rows" id="grid"></div>
   <div class="empty" id="empty" style="display:none">這個分頁沒有標的。</div>
 </div><!-- /signals-view -->
@@ -889,6 +894,7 @@ let currentBucket = "";
 /** 分類的顯示字串只有這一份（後端存的是 high_value / rare）。
     按鈕、徽章、分頁三處共用它——各寫各的話改文案一定會漏掉一處。 */
 const BUCKETS = {high_value: "💎 高價卡", rare: "🌟 稀有卡"};
+const BUCKET_KEYS = {high_value: "m", rare: ","};   // HOTKEY-LOGIC 的 HOTKEY_BUCKETS 反向表；兩邊都寫死，tests/test_hotkeys.py 釘住
 let filterMode  = "all";     // all | triggered | plain | auction
 let flagFilter  = "";        // 空字串 = 任何旗標
 //: 可疊加的開關（不是分類）。noauction＝隱藏競標中，見 hiddenByAuctionFilter。
@@ -1060,14 +1066,14 @@ function card(it){
       <div class="acts">
         <!-- 觀察中放最前：它是最輕量的動作（先盯著，不承諾任何行動）。
              競標卡片（auctionCard）本來就有這顆，這裡補齊讓兩種卡片一致。 -->
-        <button onclick="setState('${it.key}','watching')">觀察中</button>
-        <button onclick="setState('${it.key}','in_bundle')">加入湊單</button>
-        <button onclick="setState('${it.key}','asked_seller')">已詢問</button>
-        <button onclick="setState('${it.key}','offer_sent')">已出價</button>
+        <button onclick="setState('${it.key}','watching')">觀察中<kbd>z</kbd></button>
+        <button onclick="setState('${it.key}','in_bundle')">加入湊單<kbd>x</kbd></button>
+        <button onclick="setState('${it.key}','asked_seller')">已詢問<kbd>c</kbd></button>
+        <button onclick="setState('${it.key}','offer_sent')">已出價<kbd>v</kbd></button>
         <!-- 用詞與上方頁籤一致：「已購買」。競標卡片那顆是「已標到」
              （得標 ≠ 已付款出貨），語意不同，不要跟著改。 -->
-        <button onclick="setState('${it.key}','bought')">已購買</button>
-        <button onclick="setState('${it.key}','skipped')">略過</button>
+        <button onclick="setState('${it.key}','bought')">已購買<kbd>b</kbd></button>
+        <button onclick="setState('${it.key}','skipped')">略過<kbd>n</kbd></button>
         <span class="sep" style="width:1px;height:16px;background:var(--line);display:inline-block"></span>
         <!-- 分類與上面的狀態是兩件事，所以用分隔線隔開：按了分類不會動狀態
              （只有 new 會被順手升成 watching），按了狀態也不會動分類。 -->
@@ -1327,7 +1333,7 @@ function bucketActs(it){
     const next = on ? "" : k;
     const tip = on ? `取消「${label}」分類` : `標記為「${label}」（分類與狀態互不覆寫）`;
     return `<button class="${on ? "on" : ""}" title="${escapeHtml(tip)}"`
-      + ` onclick="setBucket('${it.key}','${next}')">${label}</button>`;
+      + ` onclick="setBucket('${it.key}','${next}')">${label}<kbd>${BUCKET_KEYS[k]}</kbd></button>`;
   }).join("");
 }
 
@@ -2023,10 +2029,10 @@ function auctionCard(it){
         ? b.notes.map(fmt).join("<br>")
         : "上限是「保守公允價（80% 區間下緣）× (1 − 目標利潤) − 代購費／運費／刷卡手續費」反解回日圓的結果。"}</div>
       <div class="acts">
-        <button onclick="setState('${it.key}','watching')">觀察中</button>
-        <button onclick="setState('${it.key}','offer_sent')">已出價</button>
-        <button onclick="setState('${it.key}','bought')">已標到</button>
-        <button onclick="setState('${it.key}','skipped')">略過</button>
+        <button onclick="setState('${it.key}','watching')">觀察中<kbd>z</kbd></button>
+        <button onclick="setState('${it.key}','offer_sent')">已出價<kbd>v</kbd></button>
+        <button onclick="setState('${it.key}','bought')">已標到<kbd>b</kbd></button>
+        <button onclick="setState('${it.key}','skipped')">略過<kbd>n</kbd></button>
         <span class="sep" style="width:1px;height:16px;background:var(--line);display:inline-block"></span>
         <!-- 競標卡也要有分類：使用者要標的「比較貴的 PSA9/10」有一大半正在競標中。
              這一組漏掉的話，他最想分類的那一批恰好分不了類。 -->

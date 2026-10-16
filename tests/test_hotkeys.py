@@ -148,7 +148,10 @@ def test_buttons_show_their_hotkey(key, label):
     assert f"{label}<kbd>{key}</kbd>" in html, f"按鈕「{label}」沒有 <kbd>{key}</kbd> 提示"
 
 
-@pytest.mark.parametrize("key", ["m", ","])
-def test_bucket_buttons_show_their_hotkey(key):
+def test_bucket_buttons_show_their_hotkey():
+    # 分類按鈕的 <kbd> 是模板展開（bucketActs 用 BUCKET_KEYS[k]），原文不會有字面的
+    # <kbd>m</kbd>；所以釘兩件事：來源表的值＋模板真的把它畫進按鈕。
+    # （2026-10-15 裁決：原版斷言字面 <kbd>m</kbd> 與實作矛盾，改成這樣。）
     html = INDEX.read_text(encoding="utf-8")
-    assert f"<kbd>{key}</kbd>" in html
+    assert 'BUCKET_KEYS = {high_value: "m", rare: ","}' in html
+    assert "<kbd>${BUCKET_KEYS[k]}</kbd></button>" in html
