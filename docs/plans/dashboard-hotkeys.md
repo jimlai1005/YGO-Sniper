@@ -228,10 +228,13 @@ def test_buttons_show_their_hotkey(key, label):
     assert f"{label}<kbd>{key}</kbd>" in html, f"按鈕「{label}」沒有 <kbd>{key}</kbd> 提示"
 
 
-@pytest.mark.parametrize("key", ["m", ","])
-def test_bucket_buttons_show_their_hotkey(key):
+def test_bucket_buttons_show_their_hotkey():
+    # 分類按鈕的 <kbd> 是模板展開（bucketActs 用 BUCKET_KEYS[k]），原文不會有字面的
+    # <kbd>m</kbd>；所以釘兩件事：來源表的值＋模板真的把它畫進按鈕。
+    # （2026-10-15 裁決：原版斷言字面 <kbd>m</kbd> 與實作矛盾，改成這樣。）
     html = INDEX.read_text(encoding="utf-8")
-    assert f"<kbd>{key}</kbd>" in html
+    assert 'BUCKET_KEYS = {high_value: "m", rare: ","}' in html
+    assert "<kbd>${BUCKET_KEYS[k]}</kbd></button>" in html
 ```
 
 - [ ] **Step 2: 跑測試確認紅燈**
@@ -528,10 +531,13 @@ git commit -m "feat(dashboard): 卡片快捷鍵接線——懸停／j k 焦點�
     按鈕旁的字母就是快捷鍵（<b>n</b> 略過），<b>u</b> 復原上一個狀態動作。</div>
 ```
 
-- [ ] **Step 4: 跑測試**
+- [ ] **Step 4: 修正 Task 1 寫的 `test_bucket_buttons_show_their_hotkey`，再跑測試**
+
+把 `tests/test_hotkeys.py` 裡該測試換成上面 Task 1 Step 1 現在列的版本（釘 `BUCKET_KEYS` 來源表
+＋ `bucketActs` 模板使用，不再斷言字面 `<kbd>m</kbd>`）。
 
 Run: `.venv/bin/pytest tests/test_hotkeys.py -v`
-Expected: 全部 PASS。
+Expected: 全部 PASS（39 passed）。
 
 Run: `make test`
 Expected: 末行 `N passed`（N ≥ 2000 ＋ 本案新增；不得有 failed）。
