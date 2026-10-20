@@ -1,5 +1,8 @@
 # Dashboard 卡片快捷鍵 Implementation Plan
 
+> **狀態：已完成並上線（2026-10-19 收工）。** Task 1-6 全部落地，三輪 reviewer 審查的 finding 全數處理
+> （裁決見各 Task 節）；使用者實際使用後回饋「很順手」。使用說明在 `docs/dashboard.md` §二-1。
+
 > **For agentic workers:** 逐 task 執行，TDD（先寫紅燈測試再實作）。每個 task 完成後主線程親跑驗收指令。
 > Steps use checkbox (`- [ ]`) syntax for tracking。所有 task 標 `@inline`（builder／sonnet）：
 > 要改的是一支 3,200 行的單檔前端（`web/static/index.html`），必須讀懂既有的樂觀更新
