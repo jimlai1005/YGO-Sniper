@@ -461,3 +461,38 @@ def test_launchd_plists_enable_the_slot_gate(plist):
         env = plistlib.load(f)["EnvironmentVariables"]
     assert env["YGO_SLOT_GATE"] == "1"
     assert env["TZ"] == "Asia/Taipei"
+
+
+# ---------------------------------------------------------------------------
+# wrapper 腳本防「執行中被改寫」（2026-10-21 重跑事故，docs/plans/schedule-pin-taipei.md Task 5）
+# ---------------------------------------------------------------------------
+
+_WRAPPER_SCRIPTS = ["run_daily.sh", "run_high.sh", "run_dashboard.sh"]
+
+
+@pytest.mark.parametrize("name", _WRAPPER_SCRIPTS)
+def test_wrapper_script_body_is_wrapped_in_main(name):
+    """bash 邊執行邊依位元組位移讀檔：正式輪次跑到一半時原地改寫腳本，bash 會回頭
+    讀到錯的位移（2026-10-21 00:36 同一輪 daily 被重跑、第一輪沒有結束行與 ledger，
+    全程無任何錯誤訊息）。結構性修法：`set -uo pipefail` 之後的全部內容包進
+    `main() { … }`，檔案最後一個非空行是 `main "$@"; exit $?`——bash 必須讀完整個
+    函式定義才開始執行，之後檔案怎麼改都與這次執行無關。
+    """
+    lines = (REPO_ROOT / "scripts" / name).read_text().splitlines()
+
+    # (a) 存在 `main() {` 行
+    main_idx = [i for i, ln in enumerate(lines) if re.match(r"^main\(\) \{", ln)]
+    assert len(main_idx) == 1, f"{name} 必須恰好有一行 `main() {{`，實際 {len(main_idx)} 行"
+
+    # (b) 最後一個非空行是 main "$@"; exit $?
+    non_blank = [ln for ln in lines if ln.strip()]
+    assert non_blank[-1] == 'main "$@"; exit $?', f"{name} 最後一個非空行是 {non_blank[-1]!r}"
+
+    # (c) `set -uo pipefail` 之後、`main() {` 之前只允許註解與空行
+    set_idx = [i for i, ln in enumerate(lines) if ln.strip() == "set -uo pipefail"]
+    assert len(set_idx) == 1, f"{name} 找不到唯一的 `set -uo pipefail`"
+    for ln in lines[set_idx[0] + 1 : main_idx[0]]:
+        stripped = ln.strip()
+        assert not stripped or stripped.startswith("#"), (
+            f"{name} 在 main() 之前有可執行行：{ln!r}（會在函式定義前就被 bash 逐行執行）"
+        )

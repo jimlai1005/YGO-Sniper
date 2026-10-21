@@ -18,6 +18,12 @@
 
 set -uo pipefail
 
+# 2026-10-21 事故：bash 邊執行邊依位元組位移讀檔，正式輪次跑到一半時原地改寫本檔，
+# bash 回頭讀到錯的位移（同一輪重跑、無結束行、ledger 漏寫，且無任何錯誤訊息）。
+# 所以 set 之後的全部內容包進 main()，檔尾 `main "$@"; exit $?`：bash 讀完整個函式
+# 定義才開始執行。函式本體刻意不縮排（heredoc 結束符與 tests 的行首錨定正規式依賴它）。
+main() {
+
 # 排程時鐘釘台北（docs/plans/schedule-pin-taipei.md）：bash 的 date、ledger 的 finished_at、
 # Python 內所有未指定時區的 datetime.now() 都跟著變成台北。Python 端排程邏輯另有
 # clock.schedule_now() 自己釘，這行只是讓 log 與帳本看起來一致。
@@ -208,3 +214,6 @@ write_last_run_ledger "$STATUS"
 find "$LOG_DIR" -name 'high-*.log' -mtime +14 -delete 2>/dev/null
 
 exit $STATUS
+}
+
+main "$@"; exit $?

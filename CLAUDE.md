@@ -315,6 +315,7 @@ JSON：這一輪的 exit code、結束時間、失敗通知有沒有送達。下
    `disappeared_at`，不看 `window_exit_at`。與地平線判定平行存在、互不覆蓋
    （`store.py` 的 `seller_scope_disappeared`，回歸測試見
    `tests/test_venue_study.py`）
+9. **改 `scripts/*.sh` 之前先 `ls data/run_daily.lock data/run_high.lock`，有鎖就等**——bash 邊執行邊依位元組位移讀檔，輪次跑到一半原地改寫會讀錯位移（2026-10-21：同一輪重跑、無結束行、ledger 漏寫，全程無錯誤訊息）；三支 wrapper 已包進 `main()` 結構性防住，但仍不要在正式輪次跑到一半時部署 plist
 
 ### 漏跑視窗帳與補跑模式（2026-10-20）
 
