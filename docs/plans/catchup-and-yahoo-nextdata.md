@@ -1096,6 +1096,31 @@ git commit -m "feat(dashboard): 補跑 daily 按鈕（走 run_daily.sh --catchup
 
 ---
 
+> **E2E 實跑（2026-10-20 22:20–22:28 CDT，主線程）**：8322 dashboard `POST /api/daily-run` → `run_daily.sh --catchup` 被拉起（鎖 pid 80375、行程樹帶 `--catchup`）；跑步中第二次 POST 回 `started:false`（scan_status 預檢）；日誌有 `[catchup] 補跑模式：--catchup；每個發現查詢多翻 1 頁`、`yahoo_direct: ok count=559`、`[catchup] 強制重挖狙擊成交檔案`、`#9 魔法の筒：成交檔案新增 11 筆`、**推播 19 則**（Yahoo 來源恢復後的第一輪）、`漏跑期間沒有狙擊卡成交，無回顧可送；視窗標記為已補跑`，`exit=0`，7.5 分鐘；`/api/schedule/gap` 回帳上 `caught_up_at` 已填。
+> 注意這一輪的「漏跑 2 個時段（21:00、21:30）」是 Chicago 時區基準下的假漏格（見上方重要發現），帳因此被建立並立刻標已補跑，行為正確但輸入是假的。
+
+## Task 8 @inline：複審修正（2026-10-20 reviewer 三條 Warning，主線程裁決）
+
+**Files:** `src/ygo_sniper/pipeline.py`（`_decide_catchup`）、`src/ygo_sniper/schedule_watch.py`（`resolve_gap_record`）、`src/ygo_sniper/cli.py`（`daily`）、`tests/test_cli_notify.py`（`_catchup_env`＋新測試）、`tests/test_schedule_watch.py`、`tests/test_pipeline_catchup.py`、`docs/run_daily.md:120`、`docs/dashboard.md:166`、`web/static/index.html:2265` 附近註解。
+
+- [ ] **W1 已補跑過的視窗被手動 `--catchup` 再推一次**：`_decide_catchup` 改成
+  `self._catchup_record = rec if (rec and rec.get("caught_up_at") is None) else None`
+  （已補跑的帳不再是「這一輪要回顧的對象」；`--catchup` 仍會多翻頁與強制重挖，只是沒有回顧可送）。
+  測試（`tests/test_cli_notify.py`）：帳上 `caught_up_at` 非 None 時跑 `daily --catchup` → `send_alert` 呼叫數 0、`caught_up_at` 原值不變。
+- [ ] **W2 未達門檻的視窗永遠不消耗、跨天合併**：兩個修正——
+  1. `resolve_gap_record` 的合併條件改成**連續**才合併：`merge = prev_rec is not None and prev_rec.get("caught_up_at") is None and prev_rec.get("uncovered_to") == prev.isoformat()`（上一筆的 `uncovered_to` 正是這一輪的 `prev_started` ＝ 中間沒有任何正常輪次）。不連續就換新帳。
+     測試（`tests/test_schedule_watch.py`）：10-12 漏 1 格、10-14 正常跑、10-16 又漏 1 格 → 10-16 的帳 `uncovered_from` 是 10-16 的 prev、`missed_slots == 1`（不合併）；既有 `test_gap_record_extends_uncaught_window` 的情境（連續）仍合併。
+  2. 正常輪次收尾時把**未達門檻**的帳標掉：`cli.daily` 在 `_run_notifications` 之後、非補跑模式且帳存在、`caught_up_at is None`、`missed_slots < catchup_min_missed_slots` → `mark_gap_caught_up(now)` 並印 `[dim]漏跑 N 格未達補跑門檻 M，由本輪正常掃描收尾[/dim]`。語意：沒有要送達的東西，所以不違反「送達才消耗」。
+     測試（`tests/test_cli_notify.py`）：`missed_slots=1`、門檻 2、非補跑 → 收尾後 `caught_up_at` 非 None、`send_alert` 呼叫數 0。
+- [ ] **W3 測試時區外洩**：`_catchup_env` 的 `monkeypatch.setenv("TZ", ...)` 後加 `monkeypatch.undo` 鉤子或 `request.addfinalizer(time.tzset)`——照 `tests/test_catchup.py` 既有 fixture 的寫法，undo 之後再呼叫一次 `time.tzset()`。
+  驗證：`.venv/bin/pytest tests/test_cli_notify.py -p no:randomly` 跑完後，在同一行程再跑一支臨時測試印 `time.tzname`，必須是機器時區（這台是 `('CST', 'CDT')`）而不是 Taipei；臨時測試不進 repo。
+- [ ] **S1 `_decide_catchup` 包 try/except**：設定壞掉（例如 `catchup_min_missed_slots:` 留空）→ 印 `[warn] 補跑模式判定失敗（本輪不補跑）：…`，`_catchup_active=False`、`_catchup_record=None`，不讓 `scan_status` 卡在 running。測試（`tests/test_pipeline_catchup.py`）：`scan_overrides={"catchup_min_missed_slots": None}` → `scan()` 不拋、`result["catchup"]["active"] is False`。
+- [ ] **S3 裁決**：`dry_run` 進補跑模式多翻頁**維持現狀**（dry-run 的語意是「不寫庫」，不是「不照正式路徑抓」），plan Task 4 Step 6.4 那句「dry_run 也要帶 active: False」作廢，以測試為準。
+- [ ] **文件順序**：`docs/run_daily.md:120`、`docs/dashboard.md:166`、`web/static/index.html` 補跑寬限期註解——腳本實際是**先 `mkdir` 取鎖、再 ping 等網路**，三處改正。
+- [ ] 驗收：`.venv/bin/pytest tests/test_cli_notify.py tests/test_schedule_watch.py tests/test_pipeline_catchup.py tests/test_catchup.py` 全綠；`make test` 全綠（前景）；commit：`fix(catchup): 複審修正——已補跑帳不重推、視窗只在連續時合併、未達門檻由正常輪收尾、測試時區不外洩、補跑判定不拖垮掃描`。
+
+未採納（reviewer S2「重送回顧與多翻頁／強制重挖拆開」）：送不出去的期間每輪多翻一頁與重挖是有界成本（實測重挖約 1–2 分鐘），而把「帳未消耗」拆成兩種狀態會讓 pill 與回顧的語意變複雜；先觀察，預註冊觀察項已含「每天都觸發就要看」。
+
 ## 驗收總表（主線程親跑）
 
 | # | 指令 | 預期 |
