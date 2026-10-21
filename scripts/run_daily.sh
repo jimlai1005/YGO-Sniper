@@ -148,8 +148,8 @@ notify_failure() {
     if [ "$NOTIFY_CURL_EXIT" -eq 0 ] && [ "$NOTIFY_HTTP" = "200" ]; then
         echo "[$(date '+%H:%M:%S')] 失敗通知已送達（http=200）" >> "$LOG_FILE"
     else
-        echo "[$(date '+%H:%M:%S')] 失敗通知本身也沒送成功（curl exit=$NOTIFY_CURL_EXIT, http=$NOTIFY_HTTP）——" \
-            "留痕於 $LAST_RUN_FILE，下一輪起跑時會經 PENDING_ALERT_KEY 補送" \
+        echo "[$(date '+%H:%M:%S')] 失敗通知本身也沒送成功（curl exit=${NOTIFY_CURL_EXIT}, http=${NOTIFY_HTTP}）——" \
+            "留痕於 ${LAST_RUN_FILE}，下一輪起跑時會經 PENDING_ALERT_KEY 補送" \
             >> "$LOG_FILE"
     fi
 }

@@ -339,7 +339,25 @@ def slot_check(band: str = typer.Option("std", help="std（低價帶）或 high�
 
 驗收：`bash -n` 三支；`.venv/bin/pytest tests/test_run_daily_script.py` 全綠（含新測試先紅後綠）；`make test` 全綠；commit：`fix(scripts): wrapper 全部包進 main()，杜絕執行中被改寫導致 bash 讀錯位移（2026-10-21 重跑事故）`。
 
+## Task 6 @inline：基準切換保護改成每帶一把鍵（2026-10-21 部署驗收抓到）
+
+**事故：** Task 1 Step 4 的 `CLOCK_TZ_KEY` 是全域一把。部署後低價帶 13:30（台北）那輪先進保護分支、把鍵設成 `Asia/Taipei`；高價帶 14:00 那輪讀到鍵已是台北就**不再受保護**，拿 Chicago 寫的 `schedule_run_started_at_high`（`2026-10-20T23:00`）對台北 `now` 算出「漏跑 2 個時段（台北 10:00、12:00）」——假告警，已推到 Telegram 一次。plan 裡「基準是全域的」這句推論錯了：每一帶的 `prev_started` 是各自的輪次寫的，切換也要各自認一次。與 CLAUDE.md 第三節第八事故「兩帶各自一本帳」同一條規則，當初漏套在這把鍵上。
+
+**修法：** `schedule_watch.py` 加 `CLOCK_TZ_KEY_HIGH = "schedule_clock_tz_high"`；`pipeline._update_schedule_state` 用 `clock_key = CLOCK_TZ_KEY_HIGH if high_band else CLOCK_TZ_KEY`，保護分支讀寫 `clock_key`。測試（`tests/test_pipeline_catchup.py`）：低價帶已切換（`CLOCK_TZ_KEY` 設好）、高價帶鍵未設、高價帶舊基準存在 → `_update_schedule_state(high_band=True, now=…)` 走保護分支：`_schedule_alert is None`、`PENDING_ALERT_KEY_HIGH` 不變、`CLOCK_TZ_KEY_HIGH` 被寫成台北、`RUN_STARTED_KEY_HIGH` 被寫成 `now`；反向：低價帶鍵未設但高價帶鍵已設 → 低價帶走保護。既有 8 個補鍵測試若有高價帶情境（`test_high_band_alert_delivery_clears_high_key_not_low_key`）要補 `CLOCK_TZ_KEY_HIGH`。CLAUDE.md 第五節漏跑視窗帳段落提到 `schedule_clock_tz` 的地方補一句「每帶一把」。
+驗收：`.venv/bin/pytest tests/test_pipeline_catchup.py tests/test_schedule_watch.py tests/test_cli_notify.py` 全綠；`make test` 全綠；commit：`fix(schedule): 排程時鐘基準切換保護改成每帶一把鍵（高價帶首輪假告警）`。**部署後不需要重載 plist**（純 Python）；dashboard 不需重啟（它不跑高價帶排程偵測）。
+> 註：高價帶 14:00 那輪已把 `schedule_run_started_at_high` 寫成台北基準，修好後高價帶下一輪會再走一次保護分支（跳過一次偵測），無害。
+
+## Task 7 @inline：`run_high.sh` 沙盒測試 ＋ 全形字緊接變數的結構性禁令（2026-10-21 部署驗收抓到）
+
+**事故：** 高價帶 14:00 那輪 launchd `last exit code = 1`、log 沒有「結束」行、`data/last_run_exit_high` 不存在。沙盒重現：`run_high.sh:209: STATUS）: unbound variable`——`exit=$STATUS）` 後面緊接全形「）」，bash 把它吃進識別字。**回看 `high-20261020.log`：4 個「開始」、0 個「結束」**——這顆地雷自 2026-08-22 高價帶上線以來每一輪都炸：掃描與推播都做完（python exit 0），但結束行、ledger、log 輪替從沒跑過，連失敗通知都不會送。`run_daily.sh:76-77` 的註解早就寫了這條規則，`run_high.sh` 是複製時漏掉的，而 `run_high.sh` 沒有任何沙盒測試（`tests/test_run_daily_script.py` 只蓋 `run_daily.sh`）。主線程已把五處全部改成 `${VAR}`（commit 見進度），本 task 補結構性防線：
+1. `tests/test_run_daily_script.py`（或新檔 `tests/test_run_high_script.py`）：照既有 `run_daily.sh` 沙盒 fixture 的做法，對 `run_high.sh` 跑一次「stub python 成功」的端到端：斷言 log 有「開始（高價帶）」與「結束（高價帶，exit=0）」、`data/last_run_exit_high` 存在且 `exit == 0`、鎖已釋放。fixture 的 `PROJECT_DIR`／`LAST_RUN_FILE` 解析同樣從 `run_high.sh` 原始碼抓，不硬編。
+2. 靜態測試（參數化三支 wrapper）：`re.search(r'\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]', text)` 必須為 None——「變數後面緊接非 ASCII 字元」直接紅燈，訊息指向 `run_daily.sh` 那段註解。
+3. `CLAUDE.md` 第五節加一項：shell wrapper 裡 `$VAR` 後面接全形標點必須寫 `${VAR}`；每支 wrapper 都要有一條「stub 成功路徑跑到結束行＋ledger」的沙盒測試，不能只靠 `bash -n`（`bash -n` 抓不到 `set -u` 的執行期錯誤）。
+驗收：新測試對修正前的 `run_high.sh`（`git show 917c74a:scripts/run_high.sh`）要紅、對現在的要綠；`.venv/bin/pytest tests/test_run_daily_script.py tests/test_run_high_script.py` 全綠；`make test` 全綠；commit：`test(scripts): run_high.sh 沙盒端到端 + 禁止 $VAR 緊接全形字（高價帶自上線以來每輪尾段靜默死亡）`。
+
 ## Task 4（主線程）：部署與驗收
+
+> **進度（2026-10-21 14:05 台北）**：已 `make unschedule/schedule` 兩帶、重啟 dashboard。plist 驗證：Minute 0/15/30/45、`TZ=Asia/Taipei`、`YGO_SLOT_GATE=1`。14:00 刻度：低價帶 launchd runs=1、exit 0、log 無新行（靜默跳過 ✓）；高價帶如預期跑一次，但因全域保護鍵出假告警（→ Task 6）。
 
 - [ ] `make unschedule && make schedule && make unschedule-high && make schedule-high`（載入新 plist；這會動使用者的 launchd 服務，使用者已在 2026-10-20 要求修這個問題）。
 - [ ] `launchctl kickstart -k gui/$(id -u)/com.jim.ygosniper.dashboard`（dashboard 行程吃到 clock.py）。

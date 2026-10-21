@@ -147,8 +147,8 @@ notify_failure() {
     if [ "$NOTIFY_CURL_EXIT" -eq 0 ] && [ "$NOTIFY_HTTP" = "200" ]; then
         echo "[$(date '+%H:%M:%S')] 失敗通知已送達（http=200）" >> "$LOG_FILE"
     else
-        echo "[$(date '+%H:%M:%S')] 失敗通知本身也沒送成功（curl exit=$NOTIFY_CURL_EXIT, http=$NOTIFY_HTTP）——" \
-            "留痕於 $LAST_RUN_FILE，下一輪起跑時會經 PENDING_ALERT_KEY 補送" \
+        echo "[$(date '+%H:%M:%S')] 失敗通知本身也沒送成功（curl exit=${NOTIFY_CURL_EXIT}, http=${NOTIFY_HTTP}）——" \
+            "留痕於 ${LAST_RUN_FILE}，下一輪起跑時會經 PENDING_ALERT_KEY 補送" \
             >> "$LOG_FILE"
     fi
 }
@@ -206,7 +206,11 @@ if [ $STATUS -ne 0 ]; then
     notify_failure "$MSG"
 fi
 
-echo "===== $(date '+%H:%M:%S') 結束（高價帶，exit=$STATUS） =====" >> "$LOG_FILE"
+# 變數一律加大括號：後面接的是全形「）」，bash 在多位元組 locale 下會把它吃進識別字，
+# 變成 `STATUS）: unbound variable`（set -u 直接讓腳本在這裡掛掉）。2026-10-21 沙盒重現：
+# 高價帶自 2026-08 上線以來每一輪都死在這一行——掃描與推播都做完了，但「結束」行、
+# last_run_exit_high、log 輪替從沒執行過，而 python exit 0 所以連失敗通知都不會送。
+echo "===== $(date '+%H:%M:%S') 結束（高價帶，exit=${STATUS}） =====" >> "$LOG_FILE"
 
 write_last_run_ledger "$STATUS"
 
