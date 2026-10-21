@@ -137,9 +137,10 @@ def test_dashboard_html_has_high_scan_button_and_band_chip():
     band chip（`bandChip`／`it.band === 'high'`）三件都要在，且 chip 要真的
     被接進 `card()` 的輸出模板，不能只是定義了一個沒人呼叫的函式。"""
     html = (ROOT / "web" / "static" / "index.html").read_text(encoding="utf-8")
-    assert 'id="scan-high-btn"' in html
-    assert "function scanHighNow" in html
-    assert 'onclick="scanHighNow()"' in html
+    assert 'id="scan-btn"' in html
+    assert 'onclick="scanBothNow()"' in html
+    assert "/api/scan-both" in html
+    assert 'id="scan-high-btn"' not in html
     assert "function bandChip" in html
     assert "it.band === \"high\"" in html
     assert "${bandChip(it)}" in html

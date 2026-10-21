@@ -286,6 +286,9 @@
      每一個開著的篩選都必須在「篩掉 N 筆」裡留下痕跡——安靜地隱藏東西
      比顯示太多更糟（你不會知道自己沒看到什麼）。 */
   .filterbar{gap:8px 10px}
+  /* 2026-10-20 三排：外層直排，每排各自橫向換行 */
+  .filterbar{flex-direction:column;align-items:stretch}
+  .filter-row{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;width:100%}
   .filterbar .sep{width:1px;height:17px;background:var(--line);flex:0 0 1px}
   .pfilt{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--dim);
         background:var(--panel-2);border:1px solid var(--line);border-radius:7px;
@@ -379,50 +382,53 @@
   <div class="row">
     <h1>🃏 ygo-sniper<span>1998–2004 · PSA / ARS</span></h1>
     <span class="pill" id="stat-new">待處理 <b>–</b></span>
-    <span class="pill" id="stat-bundle">湊單籃 <b>–</b></span>
-    <span class="pill" id="stat-comps">行情 <b>–</b></span>
-    <span class="pill" id="stat-drift" title="市場漂移：同卡重複成交，近 4 週 vs 前 8 週（只顯示，不進估價）">漂移 <b>–</b></span>
+    <!-- 2026-10-20 使用者要求隱藏湊單籃／行情／漂移；要復原拿掉 hidden 即可（loadStats 照常寫值） -->
+    <span class="pill" id="stat-bundle" hidden>湊單籃 <b>–</b></span>
+    <span class="pill" id="stat-comps" hidden>行情 <b>–</b></span>
+    <span class="pill" id="stat-drift" hidden title="市場漂移：同卡重複成交，近 4 週 vs 前 8 週（只顯示，不進估價）">漂移 <b>–</b></span>
     <span class="pill" id="stat-fx">匯率 <b>–</b></span>
     <div style="margin-left:auto" class="row">
       <span class="pill" id="gap-pill" hidden></span>
       <span class="pill" id="scan-when" title="還沒讀到掃描狀態">最後掃描 <b>–</b></span>
-      <button id="scan-btn" onclick="scanNow()">立即掃描</button>
-      <!-- 獨立按鈕、不併進「立即掃描」：與高價帶 plan 的隔離哲學一致——
-           兩條管線的失敗模式不互綁。共用同一個全域 scan 狀態，互斥不並跑
-           （見 pollScanStatus／renderScanStatus，任一輪在跑時兩顆一起 disable）。 -->
-      <button id="scan-high-btn" onclick="scanHighNow()" title="掃 ¥8,624～50,000 高價帶（只掛 Mercari）">高價掃描</button>
+      <!-- 2026-10-20 使用者要求合併：一顆按鈕依序跑低價帶→高價帶（POST /api/scan-both，
+           後端同一個背景任務、共用全域 scan 狀態）。 -->
+      <button id="scan-btn" onclick="scanBothNow()" title="先掃低價帶再掃高價帶，一次跑完">立即掃描</button>
       <!-- 補跑 daily：走 scripts/run_daily.sh --catchup（與 launchd 同一條路：鎖、watchdog、log、ledger）。
-           跟上面兩顆不同——那兩顆是行程內 Pipeline、不推播、不挖狙擊成交。 -->
+           跟上面不同——立即掃描是行程內 Pipeline、不推播、不挖狙擊成交。 -->
       <button id="catchup-btn" onclick="catchupNow()" title="走 run_daily.sh --catchup：完整 daily（掃描＋狙擊重挖＋推播），給關機重開或鎖卡住後用">補跑 daily</button>
-      <button onclick="loadAll()">重新整理</button>
     </div>
   </div>
   <div class="row" style="margin-top:10px">
     <button class="tab on" data-state="new">待處理</button>
-    <button class="tab" data-state="asked_seller">已詢問</button>
+    <!-- 2026-10-20 使用者要求狀態分頁只留 待處理／已出價／觀察中／全部；
+         其餘六個以 hidden 隱藏（不刪、不改 data 屬性），要復原拿掉 hidden 即可。 -->
+    <button class="tab" data-state="asked_seller" hidden>已詢問</button>
     <button class="tab" data-state="offer_sent">已出價</button>
-    <button class="tab" data-state="in_bundle">湊單籃</button>
+    <button class="tab" data-state="in_bundle" hidden>湊單籃</button>
     <!-- 已購買：按下卡片的「已購買」之後，標的會離開待處理清單。沒有這個
          頁籤的話它就此消失（使用者原話：「我就不知道他去哪邊了」），
          而「我到底買過什麼」正是最該回查的一份清單。 -->
-    <button class="tab" data-state="bought">已購買</button>
+    <button class="tab" data-state="bought" hidden>已購買</button>
     <button class="tab" data-state="watching">觀察中</button>
     <!-- 分類分頁（data-bucket）：篩的是 bucket、**不分狀態**，其餘分頁篩的是 state。
          這兩個維度是正交的——高價卡按了「已出價」之後仍然是高價卡，
          所以它不能是 state 的第九、第十個值（那會在按下的瞬間洗掉分類）。 -->
-    <button class="tab" data-bucket="high_value"
+    <button class="tab" data-bucket="high_value" hidden
             title="使用者手動指派的分類：比較貴的 PSA9/10、1999 真紅眼、SM-51……。跨狀態顯示（已詢問／已出價／已購買的也在這裡）。">💎 高價卡</button>
-    <button class="tab" data-bucket="rare"
+    <button class="tab" data-bucket="rare" hidden
             title="使用者手動指派的分類：2002-2003 比賽卡、限量 1st edition——可能是普卡但版次稀有，策略是等降價再進。跨狀態顯示。">🌟 稀有卡</button>
-    <button class="tab" data-state="expired">已過期</button>
+    <button class="tab" data-state="expired" hidden>已過期</button>
     <button class="tab" data-state="all">全部</button>
     <span class="sep" style="width:1px;height:18px;background:var(--line);display:inline-block;margin:0 6px"></span>
     <!-- 賣家是**另一個視圖**（不是訊號的第九種狀態），所以用 data-view：
          同一個 .tab 樣式，但點下去換的是整個版面而不是清單的 state。 -->
     <button class="tab" data-view="sellers" title="Seller Alpha：誰持續比同儕便宜（同儕相對折價，不是模型公允價）">👤 賣家</button>
     <button class="tab" data-view="snipe" title="指定卡狙擊：登錄特定卡（鑑定機構＋分數＋卡名＋卡號），出現就推播；比對走在所有過濾規則之前">🎯 狙擊</button>
+    <button class="tab" data-view="other" title="湊單籃攤提／破口價／怎麼用／關鍵字搜尋／平台研究">其他</button>
   </div>
   <div class="row filterbar" id="filterbar" style="margin-top:8px">
+    <!-- 2026-10-20 分三排：1 分類／快捷／P 門檻；2 旗標／排序／清除；3 筆數統計 -->
+    <div class="filter-row">
     <span class="lbl">篩選</span>
     <button class="filt on" data-filter="all">全部</button>
     <button class="filt" data-filter="triggered">只看觸發</button>
@@ -446,6 +452,8 @@
       <input type="checkbox" id="p-on">隱藏 P(值得買) &lt;
       <input type="number" id="p-th" min="0" max="99" step="5" value="30">%
     </label>
+    </div>
+    <div class="filter-row">
     <select id="flag-filter" title="只顯示帶有這個旗標的標的">
       <option value="">任何旗標</option>
     </select>
@@ -461,42 +469,15 @@
       <option value="seen_asc">更新 舊→新</option>
     </select>
     <button id="filter-reset" style="display:none" title="回到「全部」，不隱藏任何標的">清除篩選</button>
+    </div>
+    <div class="filter-row">
     <span class="pill" id="list-count">– 筆</span>
+    </div>
   </div>
 </header>
 
 <main>
 <div id="signals-view">
-  <div class="split">
-    <div class="panel">
-      <h2>湊單籃攤提</h2>
-      <div class="kpi" id="bundle-total">NT$ –</div>
-      <div class="cmp" id="bundle-detail">籃子是空的</div>
-    </div>
-    <div class="panel">
-      <h2>破口價（到手 = 鑑定費）</h2>
-      <div class="scroll-x"><table id="breakeven"><tbody><tr><td>載入中…</td></tr></tbody></table></div>
-    </div>
-    <div class="panel">
-      <h2>怎麼用</h2>
-      <div class="cmp" style="line-height:1.7">
-        🔥 白撿 = 到手成本低於鑑定費<br>
-        📉 折價 = 顯著低於近期成交中位數<br>
-        🚚 <b>運費吃掉了 N%</b> = 運費雜費佔到手成本超過門檻（不需行情就看得出來）<br>
-        <b>P(值得買)</b> = P(公允價 &gt; 到手成本)，相對於估價模型的殘差分布；
-        上方可以把低於門檻的整批藏起來（藏了幾筆會寫出來）<br>
-        點卡片上的<b>成本拆解</b>看錢花在哪：每條路徑的商品／手續費／運費<br>
-        ❓ = 需私訊問賣家寄不寄台灣<br>
-        🔨 競標中 = 目前出價會漲，判準改看<b>出價上限</b>（切到「🔨 競標」分頁）<br>
-        ⚡ <b>現在就該看</b> = 有上限、現價仍低於上限、且 24 小時內結標 —— 競標分頁把這一梯隊排最前<br>
-        ⏳ 結標還有 48 小時以上的標的，<b>現價沒有參考價值</b>：價格會漲，此刻的空間不代表最終成交價<br>
-        <b>🔥 觸發</b> = 有白撿／折價／可丟 offer／低於出價上限 之一<br>
-        <b>候選</b> = 符合年代與分數，但沒有硬理由 —— 要不要看是<b>你</b>的判斷<br>
-        丟進<b>湊單籃</b>會即時重算攤提成本
-      </div>
-    </div>
-  </div>
-
   <div class="panel">
     <!-- 收合作法與「📊 平台研究」同一套（details.brk），使用者原話：
          「使用這兩個搜尋之後，版面才不會拉得很長」。與平台研究不同的兩點：
@@ -519,47 +500,6 @@
       eBay 競標標的顯示的是<b>目前出價</b>，不是你付得出去的價格。
     </div>
     <div id="apr-out"></div>
-    </div>
-    </details>
-  </div>
-
-  <div class="panel">
-    <!-- 收合作法同上（見鑑價區塊的註解）。 -->
-    <details class="brk" id="sr-sec" style="border:0;background:none">
-    <summary style="padding:0"><h2 style="display:inline">🔎 關鍵字搜尋 — 輸入卡名，回最適合入手的賣場清單</h2><span class="sec-note" id="sr-note"></span></summary>
-    <div style="margin-top:10px">
-    <form class="apr-form sr-form" onsubmit="runSearch(event)">
-      <input id="sr-kw" type="text" autocomplete="off" spellcheck="false"
-             placeholder="青眼の白龍 / 遊戯王 PSA 初期 …">
-      <input id="sr-budget" type="number" min="0" step="50" value="1200" title="預算（台幣，到手成本）">
-      <button type="button" id="sr-venue" class="on" onclick="toggleVenue()"
-              title="校正到標的自己的平台。Yahoo 是競價出清價、Mercari/PayPay 是定價零售價，兩者差 2 倍以上">平台校正：開</button>
-      <button type="submit" id="sr-btn">搜尋</button>
-    </form>
-    <div class="hint">
-      三個來源各抓第 1 頁（新着排序）：Yahoo 直抓約 1 秒、Mercari 約 4 秒、PayPay 約 1 秒；
-      <b>Buyee 冷啟動要開瀏覽器解 WAF，第一次會多約 20 秒</b>。
-      判決與可比樣本跟上面的「貼網址鑑價」<b>共用同一套判準</b>。
-      預算外的標的不會被丟掉，只是標記出來排在後面。
-    </div>
-    <div id="sr-out"></div>
-    </div>
-    </details>
-  </div>
-
-  <div class="panel" id="vs-panel">
-    <!-- 預設收合：這一區是四張表，攤開來會把訊號清單推到兩個螢幕以外。
-         內容照樣載入（唯讀、來自 db），要看的時候點開就有。 -->
-    <details class="brk" style="border:0;background:none">
-    <summary style="padding:0"><h2 style="display:inline">📊 平台研究 — PayPay 真的比較便宜買得到嗎？（唯讀）</h2></summary>
-    <div style="margin-top:10px">
-    <div id="vs-out" class="cmp">載入中…</div>
-    <div class="hint">
-      唯讀視圖：報告由 <b>ygo-sniper venue-study</b> 產生後存進 db，這裡不重算、不打外網。
-      ⚠️ Yahoo 的在架價是<b>即決価格</b>（賣家開的溢價），Mercari／PayPay 是定價；
-      競標尾盤常以低於即決價成交，所以這份比較<b>系統性有利於 PayPay</b>。
-      樣本不足的分層一律顯示「不足以判定」，不會硬給數字。
-    </div>
     </div>
     </details>
   </div>
@@ -666,6 +606,83 @@
     <div id="sn-detail">載入中…</div>
   </div>
 </div>
+
+<!-- ===================== 其他視圖（2026-10-20 使用者要求）=====================
+     從訊號頁搬來：湊單籃攤提／破口價／怎麼用／關鍵字搜尋／平台研究。鑑價留在訊號頁。
+     只搬 HTML：JS 一律靠 id 找元素，不受位置影響。 -->
+<div id="other-view" style="display:none">
+  <div class="split">
+    <div class="panel">
+      <h2>湊單籃攤提</h2>
+      <div class="kpi" id="bundle-total">NT$ –</div>
+      <div class="cmp" id="bundle-detail">籃子是空的</div>
+    </div>
+    <div class="panel">
+      <h2>破口價（到手 = 鑑定費）</h2>
+      <div class="scroll-x"><table id="breakeven"><tbody><tr><td>載入中…</td></tr></tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>怎麼用</h2>
+      <div class="cmp" style="line-height:1.7">
+        🔥 白撿 = 到手成本低於鑑定費<br>
+        📉 折價 = 顯著低於近期成交中位數<br>
+        🚚 <b>運費吃掉了 N%</b> = 運費雜費佔到手成本超過門檻（不需行情就看得出來）<br>
+        <b>P(值得買)</b> = P(公允價 &gt; 到手成本)，相對於估價模型的殘差分布；
+        上方可以把低於門檻的整批藏起來（藏了幾筆會寫出來）<br>
+        點卡片上的<b>成本拆解</b>看錢花在哪：每條路徑的商品／手續費／運費<br>
+        ❓ = 需私訊問賣家寄不寄台灣<br>
+        🔨 競標中 = 目前出價會漲，判準改看<b>出價上限</b>（切到「🔨 競標」分頁）<br>
+        ⚡ <b>現在就該看</b> = 有上限、現價仍低於上限、且 24 小時內結標 —— 競標分頁把這一梯隊排最前<br>
+        ⏳ 結標還有 48 小時以上的標的，<b>現價沒有參考價值</b>：價格會漲，此刻的空間不代表最終成交價<br>
+        <b>🔥 觸發</b> = 有白撿／折價／可丟 offer／低於出價上限 之一<br>
+        <b>候選</b> = 符合年代與分數，但沒有硬理由 —— 要不要看是<b>你</b>的判斷<br>
+        丟進<b>湊單籃</b>會即時重算攤提成本
+      </div>
+    </div>
+  </div>
+
+
+  <div class="panel">
+    <!-- 收合作法同上（見鑑價區塊的註解）。 -->
+    <details class="brk" id="sr-sec" style="border:0;background:none">
+    <summary style="padding:0"><h2 style="display:inline">🔎 關鍵字搜尋 — 輸入卡名，回最適合入手的賣場清單</h2><span class="sec-note" id="sr-note"></span></summary>
+    <div style="margin-top:10px">
+    <form class="apr-form sr-form" onsubmit="runSearch(event)">
+      <input id="sr-kw" type="text" autocomplete="off" spellcheck="false"
+             placeholder="青眼の白龍 / 遊戯王 PSA 初期 …">
+      <input id="sr-budget" type="number" min="0" step="50" value="1200" title="預算（台幣，到手成本）">
+      <button type="button" id="sr-venue" class="on" onclick="toggleVenue()"
+              title="校正到標的自己的平台。Yahoo 是競價出清價、Mercari/PayPay 是定價零售價，兩者差 2 倍以上">平台校正：開</button>
+      <button type="submit" id="sr-btn">搜尋</button>
+    </form>
+    <div class="hint">
+      三個來源各抓第 1 頁（新着排序）：Yahoo 直抓約 1 秒、Mercari 約 4 秒、PayPay 約 1 秒；
+      <b>Buyee 冷啟動要開瀏覽器解 WAF，第一次會多約 20 秒</b>。
+      判決與可比樣本跟上面的「貼網址鑑價」<b>共用同一套判準</b>。
+      預算外的標的不會被丟掉，只是標記出來排在後面。
+    </div>
+    <div id="sr-out"></div>
+    </div>
+    </details>
+  </div>
+
+  <div class="panel" id="vs-panel">
+    <!-- 預設收合：這一區是四張表，攤開來會把訊號清單推到兩個螢幕以外。
+         內容照樣載入（唯讀、來自 db），要看的時候點開就有。 -->
+    <details class="brk" style="border:0;background:none">
+    <summary style="padding:0"><h2 style="display:inline">📊 平台研究 — PayPay 真的比較便宜買得到嗎？（唯讀）</h2></summary>
+    <div style="margin-top:10px">
+    <div id="vs-out" class="cmp">載入中…</div>
+    <div class="hint">
+      唯讀視圖：報告由 <b>ygo-sniper venue-study</b> 產生後存進 db，這裡不重算、不打外網。
+      ⚠️ Yahoo 的在架價是<b>即決価格</b>（賣家開的溢價），Mercari／PayPay 是定價；
+      競標尾盤常以低於即決價成交，所以這份比較<b>系統性有利於 PayPay</b>。
+      樣本不足的分層一律顯示「不足以判定」，不會硬給數字。
+    </div>
+    </div>
+    </details>
+  </div>
+</div><!-- /other-view -->
 </main>
 
 <div id="toast"></div>
@@ -1226,6 +1243,14 @@ function resaleBlock(it){
       不由前端去猜「這一筆有沒有套刷卡加成」。猜是會錯的：Mercari 台灣的
       台幣標價不套加成（costs.quote_route），但 eBay 走另一條路
       （costs._quote_ebay）即使標價是台幣也照套——前端寫一份規則就會有一邊說錯話。 */
+function fxSrcNote(info){
+  if(info.fx_source === "fallback" || info.fx_source === "config") return "（⚠️ 手動值，線上匯率抓不到）";
+  if(!info.fx_updated_at) return "";
+  const t = new Date(info.fx_updated_at);
+  const hhmm = t.toLocaleTimeString("zh-TW", {hour:"2-digit", minute:"2-digit", hour12:false});
+  return `（更新 ${hhmm}）`;
+}
+
 function fxNote(lst, best){
   if(!fxInfo) return "匯率參數載入中…";
   const cur = lst.currency || "JPY";
@@ -1237,7 +1262,7 @@ function fxNote(lst, best){
 
   const params = r == null
     ? `${escapeHtml(cur)} 匯率未知`
-    : `匯率 ${escapeHtml(cur)}→TWD <b>${r.toFixed(4)}</b>（來源 ${escapeHtml(fxInfo.fx_source || "?")}）`
+    : `匯率 ${escapeHtml(cur)}→TWD <b>${r.toFixed(4)}</b>${fxSrcNote(fxInfo)}`
       + ` · 刷卡海外手續費 <b>${(mk*100).toFixed(1)}%</b> · 匯率緩衝 <b>${(sb*100).toFixed(1)}%</b>`
       + `　→ 三者相乘 <b>${chain.toFixed(4)}</b>`;
   if(eff == null) return params;
@@ -2184,7 +2209,16 @@ async function loadBreakeven(){
     b.rows.map(r => `<tr><td>${r.label}</td><td>${nt(r.overhead_twd)}</td>
       <td style="color:var(--accent)">¥${Math.round(r.max_item_jpy).toLocaleString()}</td></tr>`).join("") +
     `</tbody>`;
-  document.getElementById("stat-fx").innerHTML = `匯率 <b>${b.fx_source}</b>`;
+  const fxEl = document.getElementById("stat-fx");
+  if(b.fx_source === "fallback" || b.fx_source === "config"){
+    fxEl.textContent = `⚠️ 匯率用手動值 ${Number(b.fx_jpy_twd).toFixed(3)}`;
+    fxEl.title = "線上匯率抓不到，用 config/settings.yaml 的 fx.jpy_twd";
+  }else{
+    const t = b.fx_updated_at ? new Date(b.fx_updated_at) : null;
+    const hhmm = t ? t.toLocaleTimeString("zh-TW", {hour:"2-digit", minute:"2-digit", hour12:false}) : "–";
+    fxEl.textContent = `匯率 JPY→TWD ${Number(b.fx_jpy_twd).toFixed(3)} · 更新 ${hhmm}`;
+    fxEl.title = `來源 ${b.fx_source}（線上抓到後 12 小時內讀快取）`;
+  }
 }
 
 async function loadStats(){
@@ -2223,11 +2257,10 @@ let wasRunning = false;
 function renderScanStatus(st){
   const pill = document.getElementById("scan-when");
   const btn  = document.getElementById("scan-btn");
-  const btnHigh = document.getElementById("scan-high-btn");
   const btnCatchup = document.getElementById("catchup-btn");
   const last = st.last_run || {};
   const lastAt = last.finished_at || null;
-  // 兩顆按鈕共用同一個全域 scan 狀態（互斥不並跑，見 /api/scan-high 註解）：
+  // 立即掃描與補跑共用同一個全域 scan 狀態（互斥不並跑）：
   // 不論哪一輪在跑，兩顆都要一起 disable，不然使用者按另一顆會被後端拒絕
   // 但前端看起來像沒反應。
   const isHigh = (st.trigger || "").startsWith("dashboard-high") || st.trigger === "high";
@@ -2245,8 +2278,6 @@ function renderScanStatus(st){
     }）\n上一次完成：${doneNote}`;
     btn.disabled = true;
     btn.textContent = "掃描中…";
-    btnHigh.disabled = true;
-    btnHigh.textContent = "掃描中…";
     btnCatchup.disabled = true;
   }else{
     pill.className = "pill" + (st.stale ? " stale" : "");
@@ -2260,8 +2291,6 @@ function renderScanStatus(st){
       : doneNote + (st.error ? `\n最近一次錯誤：${st.error}` : "");
     btn.disabled = false;
     btn.textContent = "立即掃描";
-    btnHigh.disabled = false;
-    btnHigh.textContent = "高價掃描";
     // 補跑是 subprocess 起的 run_daily.sh：要先取鎖、再等網路 ping（最多 60 秒）、
     // 啟動 python 之後才會寫 scan_status。這段空窗 scan_status 還是「沒在跑」，
     // 不能因此把按鈕放行（會被連按兩次），也不能當成「跑完了」。
@@ -2303,46 +2332,21 @@ async function pollScanStatus(){
   scanPollTimer = setTimeout(pollScanStatus, st.running ? 2000 : 15000);
 }
 
-async function scanNow(){
+/** 立即掃描（`/api/scan-both`，2026-10-20 合併）：後端同一個背景任務依序跑
+    低價帶→高價帶，共用全域 scan 狀態，之後沿用 `pollScanStatus`。 */
+async function scanBothNow(){
   const btn = document.getElementById("scan-btn");
-  const btnHigh = document.getElementById("scan-high-btn");
-  // 兩顆一起先鎖，不等 API 回來——雙擊就是在這半秒發生，而且兩條掃描
-  // 共用同一個全域 scan 狀態，另一顆此刻按下去後端也只會回 started:false。
+  // 先鎖，不等 API 回來——雙擊就是在這半秒發生，而且另一輪此刻按下去後端也只會回 started:false。
   btn.disabled = true;
   btn.textContent = "掃描中…";
-  btnHigh.disabled = true;
   try{
-    const r = await api("/api/scan", {method:"POST"});
-    toast(r.started ? "背景掃描已啟動…" : (r.message || "已經有一輪在跑"));
+    const r = await api("/api/scan-both", {method:"POST"});
+    toast(r.started ? "背景掃描已啟動（低價帶 → 高價帶）…" : (r.message || "已經有一輪在跑"));
     wasRunning = true;                     // 讓下一次輪詢的「跑完了」判斷成立
   }catch(e){
     toast("啟動失敗：" + e.message);
     btn.disabled = false;
     btn.textContent = "立即掃描";
-    btnHigh.disabled = false;
-    return;
-  }
-  clearTimeout(scanPollTimer);
-  scanPollTimer = setTimeout(pollScanStatus, 700);
-}
-
-/** 高價掃描（`/api/scan-high`）。與 `scanNow` 同款骨架——共用
-    `pollScanStatus`／全域 scan 狀態，兩顆按鈕互斥（見 renderScanStatus）。 */
-async function scanHighNow(){
-  const btn = document.getElementById("scan-btn");
-  const btnHigh = document.getElementById("scan-high-btn");
-  btnHigh.disabled = true;
-  btnHigh.textContent = "掃描中…";
-  btn.disabled = true;
-  try{
-    const r = await api("/api/scan-high", {method:"POST"});
-    toast(r.started ? "背景高價掃描已啟動…" : (r.message || "已經有一輪在跑"));
-    wasRunning = true;
-  }catch(e){
-    toast("啟動失敗：" + e.message);
-    btnHigh.disabled = false;
-    btnHigh.textContent = "高價掃描";
-    btn.disabled = false;
     return;
   }
   clearTimeout(scanPollTimer);
@@ -2387,7 +2391,9 @@ async function catchupNow(){
     // 交給 pollScanStatus 自己在看到 running 時設；這裡只開 90 秒寬限期鎖按鈕。
     if(r.started) catchupGraceUntil = Date.now() + 90_000;
   }catch(e){
-    toast("啟動失敗：" + e.message);
+    toast(String(e.message).includes("Not Found")
+      ? "後端沒有 /api/daily-run：dashboard 服務還在跑舊版，請重啟（launchctl kickstart -k gui/$UID/com.jim.ygosniper.dashboard）後再按"
+      : "啟動失敗：" + e.message);
     btn.disabled = false; btn.textContent = "補跑 daily";
     return;
   }
@@ -2861,13 +2867,14 @@ let svData = null;
 let svCurrent = null;
 let snipeData = null;   // 狙擊清單快取（setView 會讀，所以宣告在它之前）
 
-/* 三個視圖的切換。**未知的 view 一律退回 signals**（而不是把三個都藏起來）——
+/* 四個視圖（signals／sellers／snipe／other）的切換。**未知的 view 一律退回 signals**（而不是把三個都藏起來）——
    打錯一個字就整頁空白，那與「今天沒標的」外顯一模一樣。 */
 function setView(view){
-  const v = view === "sellers" ? "sellers" : (view === "snipe" ? "snipe" : "signals");
+  const v = view === "sellers" ? "sellers" : (view === "snipe" ? "snipe" : (view === "other" ? "other" : "signals"));
   document.getElementById("signals-view").style.display = v === "signals" ? "" : "none";
   document.getElementById("seller-view").style.display  = v === "sellers" ? "" : "none";
   document.getElementById("snipe-view").style.display   = v === "snipe"   ? "" : "none";
+  document.getElementById("other-view").style.display   = v === "other"   ? "" : "none";
   document.getElementById("filterbar").style.display    = v === "signals" ? "" : "none";
   if(v === "sellers" && !svData) loadSellers();
   if(v === "snipe" && !snipeData) loadSnipe();
