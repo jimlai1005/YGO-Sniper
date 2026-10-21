@@ -171,7 +171,9 @@ launchd 的 `StartCalendarInterval` 牆上時間用 **job 載入時**的時區�
    `schedule_watch._WINDOWS`／`_HIGH_WINDOWS` 一處，時區怎麼換都不影響。
 3. **基準切換的一次性保護**：meta 鍵 `schedule_clock_tz`。不是 `Asia/Taipei`（含不存在）
    時，本輪不做漏跑偵測、不寫視窗帳，只寫新基準——否則部署後第一輪會拿 Chicago 寫的
-   `prev_started` 對台北的 `now` 算出十幾格假漏跑。另外三支 wrapper `export TZ=Asia/Taipei`，
+   `prev_started` 對台北的 `now` 算出十幾格假漏跑。**每帶一把鍵**（低價帶 `schedule_clock_tz`、
+   高價帶 `schedule_clock_tz_high`）：最初全域一把，部署後低價帶先切換、高價帶首輪失去保護而推出
+   假告警（2026-10-21），與第三節第八事故「兩帶各自一本帳」同一條規則。另外三支 wrapper `export TZ=Asia/Taipei`，
    plist 的 `EnvironmentVariables` 也設一次（雙保險，讓 log 時間戳與 `finished_at` 看起來一致）。
 
 **這個修法的第一版閘門自己就是一個靜默失敗**（Step 4b，實作時抓到）：閘門一開始是

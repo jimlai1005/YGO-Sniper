@@ -12,6 +12,7 @@ from ygo_sniper.schedule_watch import (
     _ALL_SLOTS,
     _HIGH_ALL_SLOTS,
     CLOCK_TZ_KEY,
+    CLOCK_TZ_KEY_HIGH,
     PENDING_ALERT_KEY,
     PENDING_ALERT_KEY_HIGH,
     RUN_FINISHED_KEY,
@@ -542,7 +543,7 @@ def test_high_band_alert_delivery_clears_high_key_not_low_key(pipeline, monkeypa
     pipeline.store.set_meta(PENDING_ALERT_KEY, "低價帶自己的舊 pending")
 
     pipeline.store.set_meta(RUN_STARTED_KEY_HIGH, _ANCIENT_START)
-    pipeline.store.set_meta(CLOCK_TZ_KEY, "Asia/Taipei")
+    pipeline.store.set_meta(CLOCK_TZ_KEY_HIGH, "Asia/Taipei")
     pipeline.store.set_meta(RUN_FINISHED_KEY_HIGH, _ANCIENT_FINISH)
     pipeline._update_schedule_state(dry_run=False, watch_only=False, high_band=True)
     assert pipeline._schedule_alert is not None and "漏跑" in pipeline._schedule_alert

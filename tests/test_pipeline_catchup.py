@@ -289,3 +289,33 @@ def test_first_run_after_clock_change_resets_baseline_without_alert(pipe_factory
     # 第二輪開始正常偵測：13:30 → 18:00 之間漏了 15:30、17:30
     pipe._update_schedule_state(dry_run=False, watch_only=False, now=datetime(2026, 10, 21, 18, 0, 30))
     assert pipe._schedule_alert and "漏跑 2 個時段" in pipe._schedule_alert
+
+
+def test_clock_change_protection_is_per_band_high_first_run(pipe_factory):
+    """部署後事故（2026-10-21）：低價帶先切換、全域鍵已是台北，高價帶首輪不能因此失去保護。"""
+    pipe = pipe_factory()
+    pipe.store.set_meta(sw.CLOCK_TZ_KEY, "Asia/Taipei")   # 低價帶已切換
+    pipe.store.set_meta(sw.RUN_STARTED_KEY_HIGH, "2026-10-20T23:00:00")   # 高價帶舊（Chicago）基準
+    pipe.store.set_meta(sw.PENDING_ALERT_KEY_HIGH, "")
+    assert pipe.store.get_meta(sw.CLOCK_TZ_KEY_HIGH) is None
+    pipe._update_schedule_state(
+        dry_run=False, watch_only=False, high_band=True, now=datetime(2026, 10, 21, 14, 0),
+    )
+    assert pipe._schedule_alert is None
+    assert pipe.store.get_meta(sw.PENDING_ALERT_KEY_HIGH) == ""
+    assert pipe.store.get_meta(sw.CLOCK_TZ_KEY_HIGH) == "Asia/Taipei"
+    assert pipe.store.get_meta(sw.RUN_STARTED_KEY_HIGH) == "2026-10-21T14:00:00"
+
+
+def test_clock_change_protection_is_per_band_low_first_run(pipe_factory):
+    """反向：高價帶已切換、低價帶鍵未設 → 低價帶走保護，且不動高價帶的鍵。"""
+    pipe = pipe_factory()
+    pipe.store.set_meta(sw.CLOCK_TZ_KEY_HIGH, "Asia/Taipei")
+    pipe.store.set_meta(sw.RUN_STARTED_KEY, "2026-10-19T09:00:01")
+    pipe.store.set_meta(sw.RUN_FINISHED_KEY, "2026-10-19T10:15:23")
+    pipe._update_schedule_state(dry_run=False, watch_only=False, now=datetime(2026, 10, 21, 13, 30))
+    assert pipe._schedule_alert is None
+    assert pipe.store.get_meta(sw.GAP_WINDOW_KEY) is None
+    assert pipe.store.get_meta(sw.CLOCK_TZ_KEY) == "Asia/Taipei"
+    assert pipe.store.get_meta(sw.RUN_STARTED_KEY) == "2026-10-21T13:30:00"
+    assert pipe.store.get_meta(sw.RUN_STARTED_KEY_HIGH) is None

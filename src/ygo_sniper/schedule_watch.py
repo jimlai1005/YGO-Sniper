@@ -72,8 +72,11 @@ PENDING_ALERT_KEY_HIGH = "schedule_alert_pending_high"
 GAP_WINDOW_KEY = "schedule_gap_window"
 
 #: 排程帳的時鐘基準標記（`clock.SCHEDULE_TZ_NAME`）。讀到的值 ≠ 現行基準（含不存在）
-#: ＝ 帳上的牆上時間是另一個時區寫的，本輪不能拿來對帳。高低價帶共用（基準是全域的）。
+#: ＝ 帳上的牆上時間是另一個時區寫的，本輪不能拿來對帳。**每帶一把**（2026-10-21 事故：
+#: 原本全域一把，低價帶先切換後高價帶失去保護，拿舊時區的 RUN_STARTED_KEY_HIGH 對台北 now
+#: 推出假漏跑告警。每帶的 prev_started 是各自的輪次寫的，切換也要各自認一次）。
 CLOCK_TZ_KEY = "schedule_clock_tz"
+CLOCK_TZ_KEY_HIGH = "schedule_clock_tz_high"
 
 #: 排程表（與 scripts/com.jim.ygosniper.plist 的 StartCalendarInterval 對齊；
 #: 改 plist 時段時這裡要一起改——`tests/test_schedule_watch.py` 的

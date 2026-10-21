@@ -24,6 +24,7 @@ from .parsers import is_candidate, parse_card
 from .queries import load_queries, resolve_category
 from .schedule_watch import (
     CLOCK_TZ_KEY,
+    CLOCK_TZ_KEY_HIGH,
     GAP_WINDOW_KEY,
     PENDING_ALERT_KEY,
     PENDING_ALERT_KEY_HIGH,
@@ -1026,13 +1027,16 @@ class Pipeline:
         self._schedule_alert_pending_key = pending_key
         try:
             now = now or schedule_now()
-            clock_tz = self.store.get_meta(CLOCK_TZ_KEY)
+            # 每帶一把：兩帶的 prev_started 是各自的輪次寫的，切換也要各自認一次
+            # （2026-10-21 事故：全域一把時，低價帶先切換就讓高價帶首輪失去保護）。
+            clock_key = CLOCK_TZ_KEY_HIGH if high_band else CLOCK_TZ_KEY
+            clock_tz = self.store.get_meta(clock_key)
             if clock_tz != SCHEDULE_TZ_NAME:
                 # 排程帳的基準換了（第一次部署台北時鐘，或未來再換）：舊的 prev_started
                 # 是另一個時區的牆上時間，拿來對帳只會生出假漏跑。本輪視為「沒有基準」，
                 # 只寫新基準與標記，從下一輪開始正常偵測。
                 print(f"[schedule] 排程時鐘基準 {clock_tz!r} → {SCHEDULE_TZ_NAME}，本輪不做漏跑偵測")
-                self.store.set_meta(CLOCK_TZ_KEY, SCHEDULE_TZ_NAME)
+                self.store.set_meta(clock_key, SCHEDULE_TZ_NAME)
                 self.store.set_meta(started_key, now.isoformat())
                 self._schedule_alert = None
                 return
