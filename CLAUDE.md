@@ -318,6 +318,7 @@ JSON：這一輪的 exit code、結束時間、失敗通知有沒有送達。下
    （`store.py` 的 `seller_scope_disappeared`，回歸測試見
    `tests/test_venue_study.py`）
 9. **改 `scripts/*.sh` 之前先 `ls data/run_daily.lock data/run_high.lock`，有鎖就等**——bash 邊執行邊依位元組位移讀檔，輪次跑到一半原地改寫會讀錯位移（2026-10-21：同一輪重跑、無結束行、ledger 漏寫，全程無錯誤訊息）；三支 wrapper 已包進 `main()` 結構性防住，但仍不要在正式輪次跑到一半時部署 plist
+10. **shell wrapper 的 `$VAR` 後面接全形標點必須寫 `${VAR}`；每支 wrapper 都要有「stub 成功路徑跑到結束行＋ledger」的沙盒測試，不能只靠 `bash -n`**——`exit=$STATUS）` 的全形「）」會被 bash 吃進識別字，`set -u` 讓腳本死在「結束」行（2026-10-21：高價帶 `run_high.sh` 自 2026-08-22 上線每一輪都這樣——掃描與推播做完了，但沒有結束行、沒有 `last_run_exit_high`、沒有 log 輪替，python exit 0 所以連失敗通知都不會送，兩個月無聲）。`bash -n` 只查語法，抓不到 `set -u` 的執行期錯誤；`run_daily.sh` 有沙盒測試所以躲過，`run_high.sh` 是複製時漏掉註解的那一份。防線：`tests/test_run_high_script.py`（沙盒端到端＋三支 wrapper 的靜態禁令：`$VAR` 緊接非 ASCII 字元直接紅）。新增 wrapper 時把它加進那個參數化清單
 
 ### 漏跑視窗帳與補跑模式（2026-10-20）
 
