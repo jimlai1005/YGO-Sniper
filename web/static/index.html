@@ -452,8 +452,7 @@
       <input type="checkbox" id="p-on">隱藏 P(值得買) &lt;
       <input type="number" id="p-th" min="0" max="99" step="5" value="30">%
     </label>
-    </div>
-    <div class="filter-row">
+    <!-- 2026-10-21 使用者要求：旗標與排序兩個下拉放回第一排最後面；第二排只剩「清除篩選」（有篩選時才出現） -->
     <select id="flag-filter" title="只顯示帶有這個旗標的標的">
       <option value="">任何旗標</option>
     </select>
@@ -468,6 +467,8 @@
       <option value="seen_desc">更新 新→舊</option>
       <option value="seen_asc">更新 舊→新</option>
     </select>
+    </div>
+    <div class="filter-row">
     <button id="filter-reset" style="display:none" title="回到「全部」，不隱藏任何標的">清除篩選</button>
     </div>
     <div class="filter-row">
