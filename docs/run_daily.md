@@ -103,3 +103,19 @@ daily` 早就把完整輸出（comps、掃描摘要、推播、告警）都印�
 自己的 exit code，寫一行到當天的 log：送達了記「已送達（http=200）」，
 沒送達記「本身也沒送成功（curl exit=… http=…）」。這兩個數字也會存進
 `data/last_run_exit`，供第三節的排程監督帳本讀。
+
+## 五、參數透傳與 dashboard 的補跑按鈕（2026-10-20）
+
+**參數透傳**：腳本最後一行是 `ygo-sniper daily "$@"`——額外參數原樣交給 `daily`。launchd 的
+plist 不帶參數，行為不變；手動補跑用 `scripts/run_daily.sh --catchup`。這樣補跑走的是與排程
+完全相同的路徑：鎖、watchdog（`YGO_CYCLE_TIMEOUT`）、log、`data/last_run_exit` 全部免費繼承，
+不需要另外一套「補跑專用」的執行環境。補跑模式本身（多翻頁、強制重挖、回顧訊息）的邏輯
+在 `ygo-sniper daily --catchup`，說明見 CLAUDE.md 第五節「漏跑視窗帳與補跑模式」。
+
+**dashboard 的「補跑 daily」按鈕走這支腳本**：`POST /api/daily-run` 用 `subprocess` 起
+`/bin/bash scripts/run_daily.sh --catchup`（`start_new_session=True`，不隨 web 行程結束）。
+起之前先做兩個**唯讀預檢**——`scan_status` 是否已有一輪在跑、`data/run_daily.lock/pid` 的持有者
+是否還活著——任一成立就回「已經有一輪在跑」而不啟動。理由：腳本遇到鎖會直接跳過，如果 web
+不先檢查，使用者會看到「已啟動」然後什麼都沒發生（靜默失敗）。**預檢不清鎖**，清殘鎖是腳本
+自己的事；鎖的權威仍是腳本。腳本啟動後要先過網路 ping（最多 60 秒）、取鎖、起 python 才會寫
+`scan_status`，所以按鈕有 90 秒寬限期，見 `docs/dashboard.md`。

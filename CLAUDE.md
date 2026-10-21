@@ -133,7 +133,7 @@ Vol.6，正中目標輪廓。它要擋的現代稀有度用 `プリズマティ�
 是競標結標（53.6%）。修法：`comps.sale_kind`（`auction`／`fixed`／`unknown`）
 進同儕鍵，`unknown` 完全不進比較。**「同源」要問到機制那一層，不是問到欄位名為止。**
 
-第八項（2026-08-12，`schedule_watch.gap_alert`）：兩個數字**單位相同**（都是
+第八項（2026-08-12，`schedule_watch.schedule_health`）：兩個數字**單位相同**（都是
 分鐘），第一次不是靠單位不同露餡。`now - prev` 的基準是上一輪*真正*起跑的
 時刻，帶著 launchd 喚醒漂移；`expected` 的基準是理想排程網格的固定間隔——
 同單位、不同基準，於是正常的 ~15 分鐘喚醒漂移疊上任一格晚間漏跑，就會被
@@ -198,6 +198,16 @@ Seller Alpha 一開始的設計是「賣家售價 vs 我們模型的公允價」
 - `_upsert_listing_obs` 無條件覆寫 `seller_id` → 例行掃描把挖回來的賣家抹成 NULL
 - eBay 競標 `price` 是 null → `return None`，整批競標從未進過系統
 - `sold_at` 存的是入庫時間 → 90 天視窗對那批資料形同虛設
+- **`yahoo_direct` 改版後 `parser_broken` 兩週**（2026-10-05 起、2026-10-20 才修）：Yahoo
+  搜尋頁拿掉 `li.Product` 改成 `__NEXT_DATA__` JSON，每輪都判 `PARSER_BROKEN`。**來源告警每天都
+  送了，但「告警有送」不等於「有人修」**——它被看成背景雜訊，這個來源整整兩週零貢獻，外顯
+  只是「今天沒好貨」。修法：搜尋頁／賣家頁／closedsearch 三種 Yahoo 頁面統一走同一條 JSON 路徑
+  （`props.pageProps.initialState.search.items.listing`），`sources/yahoo.py` 共用
+  `_page_nodes`／`_judge_json_health`／`_extract_json_listings`，li 解析整套刪除；舊結構頁面
+  必須判 `PARSER_BROKEN` 而不是靜默 0 筆（守門測試 `test_legacy_li_product_page_is_parser_broken`，
+  舊頁面留在 `tests/fixtures/yahoo_search_legacy_li_product.html`）。fixture 用生產路徑
+  （`CachedFetcher`，httpx 不跑 JS）重抓。**看到同一個來源連續 `parser_broken` 超過一天就當事故修，
+  不要等它自己好。**
 
 **規則**：
 1. 失敗一律**大聲拋出**並分類（transient 可重試 / semantic 不重試 / blocked），
@@ -262,6 +272,33 @@ JSON：這一輪的 exit code、結束時間、失敗通知有沒有送達。下
    `disappeared_at`，不看 `window_exit_at`。與地平線判定平行存在、互不覆蓋
    （`store.py` 的 `seller_scope_disappeared`，回歸測試見
    `tests/test_venue_study.py`）
+
+### 漏跑視窗帳與補跑模式（2026-10-20）
+
+排程漏格（`schedule_watch.schedule_health` 偵測到）以前只推一則告警：使用者知道漏了，但不知道
+**漏的那段時間市場發生了什麼**。現在多一本帳 `schedule_gap_window`（meta 鍵，
+`schedule_watch.GAP_WINDOW_KEY`，JSON：`uncovered_from`／`uncovered_to`／`missed_slots`／
+`first_slot`／`last_slot`／`detected_at`／`caught_up_at`，全是本地 naive ISO）：
+
+- **誰寫**：`pipeline._record_gap_window`，在 `_update_schedule_state` 偵測到漏格時寫，
+  **只記低價帶**（狙擊重挖與回顧只在低價帶 `daily` 跑，高價帶不碰這本帳）。前一個視窗還沒補跑
+  又漏一段 → 合併成一個（from 取最早、格數相加）；已補跑的舊帳直接換掉。它自己包獨立
+  try/except——輔助帳壞掉不能連累排程監督的告警與基準。
+- **誰決定進補跑模式**：`Pipeline._decide_catchup`。帳上有未補跑且 `missed_slots` ≥
+  `scan.catchup_min_missed_slots`（預設 2；1 格常見於上一輪超時佔鎖，不值得）或
+  `daily --catchup` → 每個**發現查詢**多翻 `scan.catchup_extra_pages` 頁（預設 1；實測各來源
+  每日新上架最多 43 筆、最小頁容量 40）。canary 與賣家頁不多翻（賣家頁 1 頁就是完整列舉）。
+  非補跑輪的呼叫形狀與舊版逐字相同（`_mine_snipes_daily(pipe)` 不帶 `force`）。
+- **誰消耗**：`cli._send_gap_review`——推「漏跑期間狙擊卡成交回顧」，**確認送達後**才標
+  `caught_up_at`（第 7 項「送達才消耗」同一條規則）；送失敗就留著，下一輪自動再進補跑模式重送。
+  期間內沒有任何狙擊成交（無訊息可送）則直接標。`notify.enabled=false` 時不標。
+- **同基準**：排程帳是本地 naive，`card_watch_sale.sold_at` 是 UTC aware——`catchup.window_to_utc`
+  先轉再比，不比字串。`sold_at` 為空字串的來源（`buyee_mercari`／`ruten`）無法判定是否在期間內，
+  不計入，回顧訊息會明說。
+
+**這個功能的天花板（寫給之後想「加強」它的人）：期間內上架又成交的商品永遠掃不回來**——
+它們已不在架上，任何事後掃描都撈不到。回顧只是告訴你*錯過了什麼*（成交價、時間），
+補跑多翻的那一頁只能撈回「漏跑前後仍在架」的東西。不要試圖把它做成「重掃過去」。
 
 ---
 
@@ -338,18 +375,23 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 2043 passed，2026-10-16 實測）
+make test                      # pytest（目前 2090 passed，2026-10-20 實測）
                                #   ⚠️ 別自己再加 `-q`：pyproject 的 addopts 已有一個，
                                #   疊成 `-qq` 會**吃掉最後那行 `N passed`**，而 exit code
                                #   仍是 0——「測試沒跑」與「跑了但看不到綠字」外顯一樣。
                                #   `make test`（-v）與裸 `.venv/bin/pytest tests/` 都會印。
 ygo-sniper daily               # 掃描＋推播（launchd 排程跑這個）
+ygo-sniper daily --catchup     # 補跑模式：每個發現查詢多翻一頁、強制重挖狙擊成交、
+                               #   推「漏跑期間狙擊卡成交回顧」（送達才標已補跑）。
+                               #   漏跑達門檻時一般 daily 會自己進這個模式；手動跑請走
+                               #   scripts/run_daily.sh --catchup（鎖／watchdog／log），
+                               #   dashboard 的「補跑 daily」按鈕就是這樣跑的
 ygo-sniper scan --dry-run      # 只掃不寫庫
 ygo-sniper daily-high          # 高價帶那一鍵：¥8,624 動態下限～¥50,000 固定上限、
                                #   只掛 buyee_mercari，只推 ≤7 折＋L1/L2 或狙擊命中
                                #   （獨立排程跑這個，見下方排程時段；自己的監督帳本）
 ygo-sniper scan-high --dry-run # 高價帶只掃不寫庫
-ygo-sniper serve               # dashboard → http://127.0.0.1:8321（含高價掃描按鈕）
+ygo-sniper serve               # dashboard → http://127.0.0.1:8321（含高價掃描按鈕、補跑 daily 按鈕）
                                #   卡片快捷鍵 zxcvbn=觀察/湊單/詢問/出價/購買/略過、m ,=💎🌟、
                                #   j k 移焦點、u 復原（焦點＝滑鼠懸停或 j/k；見 docs/plans/dashboard-hotkeys.md）
 ygo-sniper notify-preview      # 只算不送，調門檻時用這個
