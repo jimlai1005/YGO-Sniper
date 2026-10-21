@@ -31,6 +31,8 @@ class FxRates:
         self.card_markup = float(cfg.fx.get("card_markup", 0.0))
         self.safety_buffer = float(cfg.fx.get("safety_buffer", 0.0))
         self.source = "config"
+        # 匯率最後一次「線上抓到」的 epoch 秒；fallback／config 為 None（前端據此決定顯示警告）
+        self.updated_at: float | None = None
         self._load()
 
     # ------------------------------------------------------------------
@@ -41,6 +43,7 @@ class FxRates:
                 if time.time() - blob.get("ts", 0) < _CACHE_TTL:
                     self._rates.update(blob["rates"])
                     self.source = "cache"
+                    self.updated_at = float(blob.get("ts", 0)) or None
                     return
             except (json.JSONDecodeError, KeyError):
                 pass
@@ -54,10 +57,12 @@ class FxRates:
                     r = client.get(_RATE_URL.format(base=base))
                     r.raise_for_status()
                     self._rates[base] = float(r.json()["rates"]["TWD"])
+            now = time.time()
             self._cache_file.write_text(
-                json.dumps({"ts": time.time(), "rates": self._rates})
+                json.dumps({"ts": now, "rates": self._rates})
             )
             self.source = "live"
+            self.updated_at = now
         except Exception:  # noqa: BLE001 - 任何失敗都退回手動值
             self.source = "fallback"
 

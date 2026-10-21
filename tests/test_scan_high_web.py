@@ -143,3 +143,28 @@ def test_dashboard_html_has_high_scan_button_and_band_chip():
     assert "function bandChip" in html
     assert "it.band === \"high\"" in html
     assert "${bandChip(it)}" in html
+
+
+def test_scan_both_runs_std_then_high_in_one_background_task(client, monkeypatch):
+    """`/api/scan-both`（2026-10-20 合併按鈕）：同一個背景任務依序跑低價帶、高價帶。"""
+    c, _app = client
+    _patch_pipeline(monkeypatch)
+
+    r = c.post("/api/scan-both")
+    assert r.status_code == 200, r.text
+    assert r.json()["started"] is True
+    calls = _DummyPipeline.calls
+    assert [k.get("high_band", False) for k in calls] == [False, True]
+    assert calls[0]["trigger"] == "dashboard"
+    assert calls[1]["trigger"] == "dashboard-high"
+
+
+def test_scan_both_refuses_when_running(client, monkeypatch):
+    c, app_mod = client
+    _patch_pipeline(monkeypatch)
+
+    app_mod.store.begin_scan(trigger="cli")
+    r = c.post("/api/scan-both")
+    assert r.status_code == 200, r.text
+    assert r.json()["started"] is False
+    assert _DummyPipeline.calls == []

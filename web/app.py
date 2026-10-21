@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -454,6 +455,10 @@ def breakeven(target: float | None = None):
     return {
         "target_twd": target or cfg.grading_fee_twd,
         "fx_source": fx.source,
+        "fx_updated_at": (
+            datetime.fromtimestamp(fx.updated_at).astimezone().isoformat() if fx.updated_at else None
+        ),
+        "fx_jpy_twd": fx.rates.get("JPY"),
         "rates": fx.rates,
         "card_markup": fx.card_markup,
         "safety_buffer": fx.safety_buffer,
@@ -1328,6 +1333,47 @@ def trigger_scan_high(tasks: BackgroundTasks):
         "running": True,
         "message": "高價掃描已在背景啟動，完成後清單會自動更新",
     }
+
+
+@app.post("/api/scan-both")
+def trigger_scan_both(tasks: BackgroundTasks):
+    """一顆按鈕跑完低價帶＋高價帶（2026-10-20 使用者要求合併）。
+
+    兩輪**依序**在同一個背景任務裡跑：先 `scan(trigger="dashboard")`，再
+    `scan(high_band=True, trigger="dashboard-high")`。不並行——兩條 pipeline 同時打
+    同一批來源只會更快被擋（見 /api/scan docstring）。每輪各自 `begin_scan`／`finish_scan`，
+    前端的 scan pill 會先顯示「掃描中」再顯示「高價掃描中」。
+    第一輪拋例外時第二輪**仍然跑**：低價帶壞掉不該讓高價帶也沒掃到（兩者是獨立的來源組合），
+    但錯誤要留在 scan 狀態裡讓前端看得到。
+    """
+    st = store.scan_status(timeout_seconds=cfg.scan_timeout_seconds)
+    if st["running"]:
+        return {"ok": True, "started": False, "running": True,
+                "message": f"已經有一輪掃描在跑（{st.get('trigger') or '?'} 觸發），這次不重複啟動", "status": st}
+    started = store.begin_scan(trigger="dashboard")
+
+    def _run_one(*, high_band: bool, trigger: str) -> None:
+        from ygo_sniper.pipeline import Pipeline
+        p = Pipeline(cfg)
+        try:
+            p.scan(high_band=high_band, trigger=trigger)
+        finally:
+            p.close()
+
+    def _run() -> None:
+        errors = []
+        for high_band, trigger in ((False, "dashboard"), (True, "dashboard-high")):
+            try:
+                _run_one(high_band=high_band, trigger=trigger)
+            except Exception as exc:  # noqa: BLE001 - 一輪壞掉不吃掉另一輪，但要留痕
+                errors.append(f"{trigger}: {type(exc).__name__}: {exc}")
+        if errors:
+            store.finish_scan(started, error="；".join(errors))
+            raise RuntimeError("；".join(errors))
+
+    tasks.add_task(_run)
+    return {"ok": True, "started": True, "running": True,
+            "message": "背景掃描已啟動（低價帶 → 高價帶），完成後清單會自動更新"}
 
 
 _spawn_daily = subprocess.Popen  # 測試注入點：測試換成假函式，絕不真的跑腳本
