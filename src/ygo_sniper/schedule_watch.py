@@ -66,10 +66,14 @@ PENDING_ALERT_KEY_HIGH = "schedule_alert_pending_high"
 
 #: 漏跑視窗帳（2026-10-20 補跑模式）。**只記低價帶**——狙擊重挖與成交回顧只在
 #: 低價帶的 `daily` 跑，高價帶的漏跑不進這本帳（`pipeline._update_schedule_state`
-#: 對 `high_band` 不碰它）。JSON；時間全是本地 naive ISO，與 RUN_STARTED_KEY
+#: 對 `high_band` 不碰它）。JSON；時間全是台北 naive ISO，與 RUN_STARTED_KEY
 #: 同基準（`uncovered_from` = 上一輪起跑時刻、`uncovered_to` = 這一輪起跑時刻）。
 #: 與 PENDING_ALERT_KEY 一樣的規矩：`caught_up_at` 只在補跑的結果**確認送達**之後才寫。
 GAP_WINDOW_KEY = "schedule_gap_window"
+
+#: 排程帳的時鐘基準標記（`clock.SCHEDULE_TZ_NAME`）。讀到的值 ≠ 現行基準（含不存在）
+#: ＝ 帳上的牆上時間是另一個時區寫的，本輪不能拿來對帳。高低價帶共用（基準是全域的）。
+CLOCK_TZ_KEY = "schedule_clock_tz"
 
 #: 排程表（與 scripts/com.jim.ygosniper.plist 的 StartCalendarInterval 對齊；
 #: 改 plist 時段時這裡要一起改——`tests/test_schedule_watch.py` 的

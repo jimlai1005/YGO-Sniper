@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .alerts import HEALTH_SEVERITY, Alert, AlertEngine
 from .bidding import is_live_auction
+from .clock import SCHEDULE_TZ_NAME, schedule_now
 from .comps import CompsEngine
 from .config import Config, load_config
 from .costs import max_item_price_jpy
@@ -22,6 +23,7 @@ from .notify import TelegramNotifier
 from .parsers import is_candidate, parse_card
 from .queries import load_queries, resolve_category
 from .schedule_watch import (
+    CLOCK_TZ_KEY,
     GAP_WINDOW_KEY,
     PENDING_ALERT_KEY,
     PENDING_ALERT_KEY_HIGH,
@@ -1023,7 +1025,17 @@ class Pipeline:
         # 給「這輪屬於哪一帶」這個事實用的，那件事在方法一開頭就已知）。
         self._schedule_alert_pending_key = pending_key
         try:
-            now = now or datetime.now()
+            now = now or schedule_now()
+            clock_tz = self.store.get_meta(CLOCK_TZ_KEY)
+            if clock_tz != SCHEDULE_TZ_NAME:
+                # 排程帳的基準換了（第一次部署台北時鐘，或未來再換）：舊的 prev_started
+                # 是另一個時區的牆上時間，拿來對帳只會生出假漏跑。本輪視為「沒有基準」，
+                # 只寫新基準與標記，從下一輪開始正常偵測。
+                print(f"[schedule] 排程時鐘基準 {clock_tz!r} → {SCHEDULE_TZ_NAME}，本輪不做漏跑偵測")
+                self.store.set_meta(CLOCK_TZ_KEY, SCHEDULE_TZ_NAME)
+                self.store.set_meta(started_key, now.isoformat())
+                self._schedule_alert = None
+                return
             prev_started = self.store.get_meta(started_key)
             detected = schedule_health(
                 prev_started,
@@ -1180,7 +1192,7 @@ class Pipeline:
             return
         finished_key = RUN_FINISHED_KEY_HIGH if high_band else RUN_FINISHED_KEY
         try:
-            self.store.set_meta(finished_key, datetime.now().isoformat())
+            self.store.set_meta(finished_key, schedule_now().isoformat())
         except Exception as exc:  # noqa: BLE001 - 記帳壞掉不能拖垮已經跑完的掃描
             print(
                 f"[warn] 排程收尾記帳失敗（不影響本輪掃描結果）："

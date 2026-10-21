@@ -1,7 +1,7 @@
 """補跑模式：漏跑期間狙擊卡成交回顧（catchup.py）。
 
 時間基準是這裡最容易錯的地方：排程帳是本地 naive、`sold_at` 是 UTC aware。
-系統時區不同結果就不同，所以整個檔案釘死 Asia/Taipei，不依賴測試機器的時區。
+系統時區不同結果就不同，所以整個檔案把系統時區故意設成 America/Chicago——排程基準釘台北（clock.py），不看機器時區。
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ WINDOW = ("2026-10-19T09:00:01", "2026-10-19T20:35:34")   # 本地 09:00～20:35
 
 @pytest.fixture(autouse=True)
 def _taipei_tz(monkeypatch):
-    monkeypatch.setenv("TZ", "Asia/Taipei")
+    monkeypatch.setenv("TZ", "America/Chicago")
     time.tzset()
     yield
     monkeypatch.undo()

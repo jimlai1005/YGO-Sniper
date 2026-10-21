@@ -4,23 +4,23 @@
 已不在架上，任何事後掃描都撈不回來（這是本功能存在的前提，不要試圖
 把它做成「重掃過去」）。
 
-同基準條款（CLAUDE.md 第三節）：排程帳是本地 naive ISO，`card_watch_sale.sold_at`
+同基準條款（CLAUDE.md 第三節）：排程帳是台北 naive ISO，`card_watch_sale.sold_at`
 是 UTC aware ISO——先 `window_to_utc` 再比，不比字串。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
+
+from .clock import schedule_naive_to_utc, utc_to_schedule_str
 
 _TIER_RANK = {"exact": 2, "partial": 1}
 _TIER_MARK = {"exact": "🎯", "partial": "👀"}
 
 
 def window_to_utc(local_from: str, local_to: str) -> tuple[datetime, datetime]:
-    """本地 naive ISO → UTC aware。`astimezone()` 對 naive 值採系統時區，這正是排程帳的基準。"""
-    lo = datetime.fromisoformat(local_from).astimezone(UTC)
-    hi = datetime.fromisoformat(local_to).astimezone(UTC)
-    return lo, hi
+    """台北 naive ISO → UTC aware。排程帳的基準固定是台北（`clock.SCHEDULE_TZ`），不看系統時區。"""
+    return schedule_naive_to_utc(local_from), schedule_naive_to_utc(local_to)
 
 
 @dataclass
@@ -68,7 +68,7 @@ def gap_sales(store, local_from: str, local_to: str) -> GapSalesReport:
 
 
 def _fmt_local(dt: datetime) -> str:
-    return dt.astimezone().strftime("%m-%d %H:%M")
+    return utc_to_schedule_str(dt)
 
 
 def _fmt_window(rec: dict) -> str:

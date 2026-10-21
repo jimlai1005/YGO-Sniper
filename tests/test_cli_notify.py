@@ -321,7 +321,7 @@ _GAP_REC = {
 @pytest.fixture(autouse=True)
 def _restore_tz_after_each(monkeypatch):
     """monkeypatch 的 undo 只還原環境變數 TZ，不會重讀 C 層時區——`_catchup_env` 設了
-    Asia/Taipei + tzset() 之後，沒有這個收尾會外洩到同行程後面的測試（2026-10-20 複審 W3）。
+    America/Chicago + tzset() 之後，沒有這個收尾會外洩到同行程後面的測試（2026-10-20 複審 W3）。
     autouse fixture 比測試先建立、後拆除，所以這裡的 undo 在最後，之後再 tzset 一次。
     """
     import time
@@ -367,7 +367,7 @@ def _catchup_env(
     from ygo_sniper.schedule_watch import GAP_WINDOW_KEY
     from ygo_sniper.store import Store
 
-    monkeypatch.setenv("TZ", "Asia/Taipei")
+    monkeypatch.setenv("TZ", "America/Chicago")
     time.tzset()
     rec = gap if gap is not None else _GAP_REC
     store = Store(tmp_path / "t.db")

@@ -219,6 +219,7 @@ def test_gap_record_is_written_by_update_schedule_state(pipe_factory):
     """上一輪 09:00 起跑、這一輪 20:35 起跑 → 帳上出現 10 格的視窗。"""
     pipe = pipe_factory()
     pipe.store.set_meta(sw.RUN_STARTED_KEY, "2026-10-19T09:00:01")
+    pipe.store.set_meta(sw.CLOCK_TZ_KEY, "Asia/Taipei")
     pipe.store.set_meta(sw.RUN_FINISHED_KEY, "2026-10-19T10:15:23")
     pipe._update_schedule_state(dry_run=False, watch_only=False, now=datetime(2026, 10, 19, 20, 35, 34))
     rec = sw.decode_gap_record(pipe.store.get_meta(sw.GAP_WINDOW_KEY))
@@ -257,6 +258,7 @@ def test_gap_record_failure_does_not_block_baseline_or_scan(pipe_factory, monkey
     """寫視窗帳壞掉屬資訊性功能失敗：大聲印、不拋，且不吃掉本輪告警與基準推進。"""
     pipe = pipe_factory()
     pipe.store.set_meta(sw.RUN_STARTED_KEY, "2026-10-19T09:00:01")
+    pipe.store.set_meta(sw.CLOCK_TZ_KEY, "Asia/Taipei")
     pipe.store.set_meta(sw.RUN_FINISHED_KEY, "2026-10-19T10:15:23")
     monkeypatch.setattr(pipeline_mod, "resolve_gap_record",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
@@ -267,3 +269,23 @@ def test_gap_record_failure_does_not_block_baseline_or_scan(pipe_factory, monkey
     assert pipe._schedule_alert and "漏跑" in pipe._schedule_alert
     assert pipe.store.get_meta(sw.RUN_STARTED_KEY) == "2026-10-19T20:35:34"
     assert pipe.store.get_meta(sw.GAP_WINDOW_KEY) is None
+
+
+# ---------------------------------------------------------------------------
+# 排程時鐘基準切換的一次性保護（schedule-pin-taipei Task 1 Step 4）
+# ---------------------------------------------------------------------------
+def test_first_run_after_clock_change_resets_baseline_without_alert(pipe_factory):
+    from ygo_sniper import schedule_watch as sw
+
+    pipe = pipe_factory()
+    pipe.store.set_meta(sw.RUN_STARTED_KEY, "2026-10-19T09:00:01")   # 舊基準（Chicago）
+    pipe.store.set_meta(sw.RUN_FINISHED_KEY, "2026-10-19T10:15:23")
+    assert pipe.store.get_meta(sw.CLOCK_TZ_KEY) is None
+    pipe._update_schedule_state(dry_run=False, watch_only=False, now=datetime(2026, 10, 21, 13, 30))
+    assert pipe._schedule_alert is None
+    assert pipe.store.get_meta(sw.GAP_WINDOW_KEY) is None
+    assert pipe.store.get_meta(sw.CLOCK_TZ_KEY) == "Asia/Taipei"
+    assert pipe.store.get_meta(sw.RUN_STARTED_KEY) == "2026-10-21T13:30:00"
+    # 第二輪開始正常偵測：13:30 → 18:00 之間漏了 15:30、17:30
+    pipe._update_schedule_state(dry_run=False, watch_only=False, now=datetime(2026, 10, 21, 18, 0, 30))
+    assert pipe._schedule_alert and "漏跑 2 個時段" in pipe._schedule_alert

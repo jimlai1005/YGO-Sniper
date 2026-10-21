@@ -11,6 +11,7 @@ from ygo_sniper import schedule_watch as sw
 from ygo_sniper.schedule_watch import (
     _ALL_SLOTS,
     _HIGH_ALL_SLOTS,
+    CLOCK_TZ_KEY,
     PENDING_ALERT_KEY,
     PENDING_ALERT_KEY_HIGH,
     RUN_FINISHED_KEY,
@@ -428,6 +429,7 @@ def test_manual_scan_leaves_pending_for_next_daily_to_deliver(pipeline, monkeypa
 
     # 種一個保證觸發偵測的舊基準，模擬「上一輪很久以前開始、正常收尾」。
     pipeline.store.set_meta(RUN_STARTED_KEY, _ANCIENT_START)
+    pipeline.store.set_meta(CLOCK_TZ_KEY, "Asia/Taipei")
     pipeline.store.set_meta(RUN_FINISHED_KEY, _ANCIENT_FINISH)
 
     # 模擬一次手動 `ygo-sniper scan`：偵測到漏跑、正常收尾，但不推播。
@@ -459,6 +461,7 @@ def test_crashed_run_alert_survives_and_is_delivered_next_time(pipeline, monkeyp
     import ygo_sniper.cli as cli_mod
 
     pipeline.store.set_meta(RUN_STARTED_KEY, _ANCIENT_START)
+    pipeline.store.set_meta(CLOCK_TZ_KEY, "Asia/Taipei")
     pipeline.store.set_meta(RUN_FINISHED_KEY, _ANCIENT_FINISH)
 
     # 這一輪偵測到漏跑（等同 scan() 開頭呼叫 _update_schedule_state），
@@ -498,6 +501,7 @@ def test_failed_push_keeps_pending_for_retry(pipeline, monkeypatch):
     import ygo_sniper.cli as cli_mod
 
     pipeline.store.set_meta(RUN_STARTED_KEY, _ANCIENT_START)
+    pipeline.store.set_meta(CLOCK_TZ_KEY, "Asia/Taipei")
     pipeline.store.set_meta(RUN_FINISHED_KEY, _ANCIENT_FINISH)
     pipeline._update_schedule_state(dry_run=False, watch_only=False)
     assert pipeline._schedule_alert is not None
@@ -520,6 +524,7 @@ def test_high_band_alert_delivery_clears_high_key_not_low_key(pipeline, monkeypa
     pipeline.store.set_meta(PENDING_ALERT_KEY, "低價帶自己的舊 pending")
 
     pipeline.store.set_meta(RUN_STARTED_KEY_HIGH, _ANCIENT_START)
+    pipeline.store.set_meta(CLOCK_TZ_KEY, "Asia/Taipei")
     pipeline.store.set_meta(RUN_FINISHED_KEY_HIGH, _ANCIENT_FINISH)
     pipeline._update_schedule_state(dry_run=False, watch_only=False, high_band=True)
     assert pipeline._schedule_alert is not None and "漏跑" in pipeline._schedule_alert
@@ -542,6 +547,7 @@ def test_low_band_alert_delivery_clears_low_key_not_high_key(pipeline, monkeypat
     pipeline.store.set_meta(PENDING_ALERT_KEY_HIGH, "高價帶自己的舊 pending")
 
     pipeline.store.set_meta(RUN_STARTED_KEY, _ANCIENT_START)
+    pipeline.store.set_meta(CLOCK_TZ_KEY, "Asia/Taipei")
     pipeline.store.set_meta(RUN_FINISHED_KEY, _ANCIENT_FINISH)
     pipeline._update_schedule_state(dry_run=False, watch_only=False, high_band=False)
     assert pipeline._schedule_alert is not None and "漏跑" in pipeline._schedule_alert
@@ -695,6 +701,7 @@ def test_update_schedule_state_folds_watchdog_ledger_into_pending(pipeline):
     # 沒有排程基準（第一次跑）——這一輪的訊息應該完全來自 watchdog 帳本，
     # 不是排程空窗（沒有 prev_started，schedule_health 回 None）。
     assert pipeline.store.get_meta(RUN_STARTED_KEY) is None
+    pipeline.store.set_meta(CLOCK_TZ_KEY, "Asia/Taipei")
 
     pipeline._update_schedule_state(dry_run=False, watch_only=False)
 
