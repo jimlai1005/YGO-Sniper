@@ -376,6 +376,7 @@ def slot_check(band: str = typer.Option("std", help="std（低價帶）或 high�
 
 ## Task 4（主線程）：部署與驗收
 
+> **進度（2026-10-21 14:25 台北）**：Task 5 `917c74a`、全形字修正 `7586afe`、Task 6 `3afa7f1`、Task 7 `73df57e`、Task 8 `a85b16b` 全部 commit，`make test` 2150 passed（主線程親跑）。14:15 刻度：兩帶 launchd runs=2、exit 0、log 無新行（靜默跳過 ✓）。dashboard 已於 Task 8 後重啟。待驗：15:30 真格（哨兵已掛）、隔天回放。
 > **進度（2026-10-21 14:05 台北）**：已 `make unschedule/schedule` 兩帶、重啟 dashboard。plist 驗證：Minute 0/15/30/45、`TZ=Asia/Taipei`、`YGO_SLOT_GATE=1`。14:00 刻度：低價帶 launchd runs=1、exit 0、log 無新行（靜默跳過 ✓）；高價帶如預期跑一次，但因全域保護鍵出假告警（→ Task 6）。
 
 - [ ] `make unschedule && make schedule && make unschedule-high && make schedule-high`（載入新 plist；這會動使用者的 launchd 服務，使用者已在 2026-10-20 要求修這個問題）。
