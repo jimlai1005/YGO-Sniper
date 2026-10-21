@@ -22,6 +22,7 @@ from .notify import TelegramNotifier
 from .parsers import is_candidate, parse_card
 from .queries import load_queries, resolve_category
 from .schedule_watch import (
+    GAP_WINDOW_KEY,
     PENDING_ALERT_KEY,
     PENDING_ALERT_KEY_HIGH,
     RUN_FINISHED_KEY,
@@ -29,7 +30,11 @@ from .schedule_watch import (
     RUN_STARTED_KEY,
     RUN_STARTED_KEY_HIGH,
     _HIGH_ALL_SLOTS,
+    decode_gap_record,
+    detect_missed,
+    gap_needs_catchup,
     resolve_alert,
+    resolve_gap_record,
     schedule_health,
     watchdog_message,
 )
@@ -265,6 +270,11 @@ class Pipeline:
         #: 預設低價帶鍵，維持 `daily`／`scan`（`high_band=False`）呼叫路徑的
         #: 既有行為——這兩者從來不會設成別的值。
         self._schedule_alert_pending_key: str = PENDING_ALERT_KEY
+        #: 補跑模式（`scan()` 決定；漏跑視窗帳＋`catchup=` 參數）。`_scan_source`
+        #: 讀 `_catchup_active` 決定要不要多翻頁；`_catchup_record` 是當時帳上的
+        #: 視窗（可能為 None），隨 result["catchup"] 交給 cli 推回顧用。
+        self._catchup_active: bool = False
+        self._catchup_record: dict | None = None
 
     # ------------------------------------------------------------------
     def valuator(self):
@@ -424,8 +434,15 @@ class Pipeline:
         high_band_max: float | None = None,
         sort: str | None = None,
         category: str | None = None,
+        allow_catchup: bool = True,
     ) -> SearchResult:
         """掃描用的 `run_source_search` 包裝：補上價格上限與分類參數。
+
+        `allow_catchup`：補跑模式（`self._catchup_active`）下，發現查詢的頁數
+        會再加 `scan.catchup_extra_pages`。canary 傳 `allow_catchup=False`——
+        它問的是「還活著嗎」，翻頁不會讓答案更確定。賣家頁列舉不經過這個函式
+        （直接走 `run_source_search`，見 `_scan_watched_sellers`），所以天生不受
+        影響：賣家頁 1 頁就是完整列舉，多翻沒有意義。
 
         `pages=None` 表示「照這個來源的設定翻頁」（`Config.max_pages_for`，
         允許 `sources.<name>.max_pages` 覆寫全域值）。canary 明確傳 1——
@@ -459,6 +476,8 @@ class Pipeline:
         W1）。
         """
         pages = pages if pages is not None else self.cfg.max_pages_for(source_name)
+        if allow_catchup and self._catchup_active:
+            pages += max(0, int(self.cfg.scan.get("catchup_extra_pages", 1)))
         try:
             if high_band_max is not None:
                 ceiling = self._price_ceiling_jpy(src.site)
@@ -730,6 +749,9 @@ class Pipeline:
                 self.store.mark_seller_watch_scanned(key, result=f"跳過：{note}")
                 report["skipped"].append({"seller_key": key, "reason": note})
                 continue
+            # 直接走 run_source_search、不經 `_scan_source`：補跑模式的多翻頁
+            # （allow_catchup）因此天生碰不到賣家頁——1 頁就是完整列舉，
+            # 多翻沒有意義（tests/test_pipeline_catchup.py 釘住）。
             res = run_source_search(
                 source_name, src, "", pages=params.pages, seller=sid
             )
@@ -810,7 +832,9 @@ class Pipeline:
             # 固定 1 頁：canary 問的是「還活著嗎」，多翻頁不會讓答案更確定，
             # 只會讓每輪的請求數跟著 max_pages 一起漲。
             # 不帶價格上限：canary 的答案不可以跟著「今天在架的價格分布」跳動。
-            res = self._scan_source(name, src, keyword, pages=1, price_ceiling=False)
+            res = self._scan_source(
+                name, src, keyword, pages=1, price_ceiling=False, allow_catchup=False,
+            )
             verdict = canary_verdict(res, int((spec or {}).get("canary_min_results", 10)))
             if verdict is not None:
                 extra.append(verdict)
@@ -826,6 +850,7 @@ class Pipeline:
         watch_only: bool = False,
         watch_force: bool = False,
         high_band: bool = False,
+        catchup: bool = False,
     ) -> dict:
         """一輪掃描。**掃描狀態的開始／結束一律在這裡落**，CLI 與 dashboard 共用。
 
@@ -849,9 +874,17 @@ class Pipeline:
         跑在自己的 launchd 網格（Task 6），若共用低價帶的鍵，任一帶跑一輪就會
         推進另一帶的基準，讓另一帶的漏跑偵測失聰（CLAUDE.md 第三節第八事故
         的同一種錯誤）。見 `_update_schedule_state`／`_finish_schedule_state`。
+
+        `catchup`：補跑模式（排程漏跑之後）。帳上（`GAP_WINDOW_KEY`）有未補跑
+        且漏格數 ≥ `scan.catchup_min_missed_slots` 的視窗，或呼叫端傳
+        `catchup=True`，這一輪每個**發現查詢**多翻 `scan.catchup_extra_pages` 頁
+        （canary 與賣家頁不多翻）。`high_band` 與 `watch_only` 永不進補跑模式：
+        前者不碰這本帳（只記低價帶），後者沒有關鍵字查詢。result["catchup"]
+        = `{"active": bool, "record": 帳上視窗或 None}`，給 cli 決定要不要推回顧。
         """
         started = self.store.begin_scan(trigger=trigger, dry_run=dry_run)
         self._update_schedule_state(dry_run=dry_run, watch_only=watch_only, high_band=high_band)
+        self._decide_catchup(catchup=catchup, watch_only=watch_only, high_band=high_band)
         try:
             result = self._scan(
                 started, skip_comps=skip_comps, dry_run=dry_run,
@@ -882,6 +915,29 @@ class Pipeline:
         self._finish_schedule_state(dry_run=dry_run, watch_only=watch_only, high_band=high_band)
         return result
 
+    def _decide_catchup(self, *, catchup: bool, watch_only: bool, high_band: bool) -> None:
+        """決定這一輪是否進補跑模式，結果記在 `self._catchup_*`（`_scan_source` 會讀）。
+
+        讀帳失敗不拖垮掃描：當作沒有帳（`decode_gap_record` 對壞資料本來就回 None）。
+        帳是在 `_update_schedule_state` **之後**讀的——這一輪才剛偵測到的漏跑
+        視窗，本輪就能補跑，不必等下一輪。
+        """
+        rec = None if high_band else decode_gap_record(self.store.get_meta(GAP_WINDOW_KEY))
+        min_slots = int(self.cfg.scan.get("catchup_min_missed_slots", 2))
+        auto = gap_needs_catchup(rec, min_missed_slots=min_slots)
+        self._catchup_active = bool(catchup or auto) and not watch_only and not high_band
+        self._catchup_record = rec
+        if self._catchup_active:
+            extra = max(0, int(self.cfg.scan.get("catchup_extra_pages", 1)))
+            if catchup:
+                why = "--catchup"
+            else:
+                why = (
+                    f"漏跑 {rec['missed_slots']} 格"
+                    f"（{rec['uncovered_from']} ～ {rec['uncovered_to']} 未覆蓋）"
+                )
+            print(f"[catchup] 補跑模式：{why}；每個發現查詢多翻 {extra} 頁")
+
     def _refresh_valuation_cache(self, result: dict) -> None:
         """掃描收尾的估價快取重算（2026-08-24 plan，estimate 快取）。
 
@@ -909,7 +965,12 @@ class Pipeline:
             result["valuation_cache_error"] = msg
 
     def _update_schedule_state(
-        self, *, dry_run: bool, watch_only: bool, high_band: bool = False
+        self,
+        *,
+        dry_run: bool,
+        watch_only: bool,
+        high_band: bool = False,
+        now: datetime | None = None,
     ) -> None:
         """排程空窗偵測的開頭那一半：讀舊基準、算這一輪要不要出聲、寫新基準。
 
@@ -931,6 +992,10 @@ class Pipeline:
         低價帶的三把鍵——兩本帳互不污染（CLAUDE.md 第三節第八事故：兩條掃描
         若共用基準鍵，任一帶跑一輪就會推進另一帶的基準，遮蔽另一帶的漏跑）。
 
+        漏跑視窗帳（`GAP_WINDOW_KEY`，補跑模式用）：**只在低價帶**偵測到漏格時
+        寫，高價帶不碰。`now` 可注入（CLAUDE.md 第六節，時效類判斷要能注入
+        「現在」）；省略時用牆上時鐘。
+
         偵測器本身包一層 `try/except`：它只是資訊性功能，壞掉不能拖垮這一輪
         真正的掃描（見 schedule_watch.py 與 CLAUDE.md 五、靜默失敗）。
         """
@@ -946,13 +1011,16 @@ class Pipeline:
         # 給「這輪屬於哪一帶」這個事實用的，那件事在方法一開頭就已知）。
         self._schedule_alert_pending_key = pending_key
         try:
-            now = datetime.now()
+            now = now or datetime.now()
+            prev_started = self.store.get_meta(started_key)
             detected = schedule_health(
-                self.store.get_meta(started_key),
+                prev_started,
                 self.store.get_meta(finished_key),
                 now,
                 slots,
             )
+            if not high_band:
+                self._record_gap_window(prev_started, now)
             # Fix A：watchdog 帳本（run_daily.sh 寫的 data/last_run_exit）折進
             # 同一條偵測。兩者都算「這一輪偵測到的問題」，合併成一句話一起
             # 進 resolve_alert——共用同一套 pending／送達才消耗的保障，
@@ -988,6 +1056,27 @@ class Pipeline:
         except Exception as exc:  # noqa: BLE001 - 偵測器壞掉不能拖垮本輪掃描
             print(
                 f"[warn] 排程空窗偵測失敗（不影響本輪掃描）："
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    def _record_gap_window(self, prev_started: str | None, now: datetime) -> None:
+        """偵測到漏格 → 寫（或合併）漏跑視窗帳。沒漏格不寫。
+
+        自己包 try/except：視窗帳是補跑模式的輔助資訊，壞掉不能連累同一個偵測
+        區塊裡的告警與基準推進（那兩樣才是排程監督本身）。大聲印，不靜默。
+        """
+        try:
+            missed = detect_missed(prev_started, now)
+            if not missed:
+                return
+            prev_dt = datetime.fromisoformat(prev_started or "")
+            prev_raw = self.store.get_meta(GAP_WINDOW_KEY)
+            new_raw = resolve_gap_record(prev_raw, missed, prev_dt, now)
+            if new_raw is not None and new_raw != prev_raw:
+                self.store.set_meta(GAP_WINDOW_KEY, new_raw)
+        except Exception as exc:  # noqa: BLE001 - 輔助帳壞掉不拖垮排程監督本身
+            print(
+                f"[warn] 漏跑視窗帳寫入失敗（不影響告警與本輪掃描）："
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -1421,6 +1510,12 @@ class Pipeline:
             # 狙擊比對的觀測帳。**追蹤幾張卡／比對幾筆／命中幾筆三個數字分開**：
             # 只報命中數的話，0 分不出「今天沒那張卡」與「比對根本沒跑」
             # （規則 4 的命中表只證明得了「規則有在跑」）。
+            # 補跑模式（scan() 決定）。dry_run／watch_only／high_band 也一律帶，
+            # 值為 active=False——呼叫端不必判 key 存不存在。
+            "catchup": {
+                "active": self._catchup_active,
+                "record": self._catchup_record,
+            },
             "snipe": {
                 "watches": len(self._snipe_matchers()),
                 "compared": self._snipe_stats["compared"],

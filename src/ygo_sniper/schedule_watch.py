@@ -64,6 +64,13 @@ RUN_STARTED_KEY_HIGH = "schedule_run_started_at_high"
 RUN_FINISHED_KEY_HIGH = "schedule_run_finished_at_high"
 PENDING_ALERT_KEY_HIGH = "schedule_alert_pending_high"
 
+#: 漏跑視窗帳（2026-10-20 補跑模式）。**只記低價帶**——狙擊重挖與成交回顧只在
+#: 低價帶的 `daily` 跑，高價帶的漏跑不進這本帳（`pipeline._update_schedule_state`
+#: 對 `high_band` 不碰它）。JSON；時間全是本地 naive ISO，與 RUN_STARTED_KEY
+#: 同基準（`uncovered_from` = 上一輪起跑時刻、`uncovered_to` = 這一輪起跑時刻）。
+#: 與 PENDING_ALERT_KEY 一樣的規矩：`caught_up_at` 只在補跑的結果**確認送達**之後才寫。
+GAP_WINDOW_KEY = "schedule_gap_window"
+
 #: 排程表（與 scripts/com.jim.ygosniper.plist 的 StartCalendarInterval 對齊；
 #: 改 plist 時段時這裡要一起改——`tests/test_schedule_watch.py` 的
 #: `test_windows_match_plist` 會在兩邊不同步時當場失敗，不是只能靠這行註解提醒）。
@@ -237,6 +244,85 @@ def resolve_alert(pending_raw: str | None, detected: str | None) -> tuple[str | 
     return text, json.dumps(record, ensure_ascii=False)
 
 
+def detect_missed(
+    prev_started: str | None, now: datetime, slots: list[int] | None = None
+) -> list[datetime]:
+    """`schedule_health` 第 2 項判定的可重用版本：回傳漏跑的格子。
+
+    輸入壞掉（None／空字串／無法解析的 ISO／naive-aware 混用）一律回空 list，
+    理由同 `schedule_health`：資訊性偵測器不能讓 scan() 因它而中斷。
+    """
+    if not prev_started:
+        return []
+    try:
+        prev = datetime.fromisoformat(prev_started)
+    except (TypeError, ValueError):
+        return []
+    try:
+        return missed_slots_between(prev, now, slots)
+    except TypeError:
+        return []
+
+
+def decode_gap_record(raw: str | None) -> dict | None:
+    """安全解出漏跑視窗帳，壞掉／缺必要欄位一律當「沒有帳」。"""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("missed_slots"), int):
+        return None
+    if not isinstance(data.get("uncovered_from"), str) or not isinstance(
+        data.get("uncovered_to"), str
+    ):
+        return None
+    return data
+
+
+def resolve_gap_record(
+    existing_raw: str | None, missed: list[datetime], prev: datetime, now: datetime
+) -> str | None:
+    """沒漏格 → 回傳原值（呼叫端據此不寫）。有漏格 → 新帳；若舊帳尚未補跑則合併
+    （from 取舊的、格數相加），已補跑的舊帳直接換掉。
+
+    純函式：時間由呼叫端注入（CLAUDE.md 第六節，時效類判斷一律能注入「現在」）。
+    """
+    if not missed:
+        return existing_raw
+    prev_rec = decode_gap_record(existing_raw)
+    merge = prev_rec is not None and prev_rec.get("caught_up_at") is None
+    rec = {
+        "uncovered_from": prev_rec["uncovered_from"] if merge else prev.isoformat(),
+        "uncovered_to": now.isoformat(),
+        "missed_slots": (prev_rec["missed_slots"] if merge else 0) + len(missed),
+        "first_slot": prev_rec.get("first_slot") if merge else missed[0].isoformat(),
+        "last_slot": missed[-1].isoformat(),
+        "detected_at": now.isoformat(),
+        "caught_up_at": None,
+    }
+    return json.dumps(rec, ensure_ascii=False)
+
+
+def mark_gap_caught_up(existing_raw: str | None, when: datetime) -> str | None:
+    """在帳上標 `caught_up_at`。帳壞掉／不存在 → 原值（不憑空生帳）。"""
+    rec = decode_gap_record(existing_raw)
+    if rec is None:
+        return existing_raw
+    rec["caught_up_at"] = when.isoformat()
+    return json.dumps(rec, ensure_ascii=False)
+
+
+def gap_needs_catchup(rec: dict | None, *, min_missed_slots: int) -> bool:
+    """帳上有未補跑、且漏格數達門檻的視窗。"""
+    return (
+        bool(rec)
+        and rec.get("caught_up_at") is None
+        and int(rec.get("missed_slots", 0)) >= int(min_missed_slots)
+    )
+
+
 def schedule_health(
     prev_started: str | None,
     prev_finished: str | None,
@@ -284,12 +370,9 @@ def schedule_health(
             "當機、被 kill 或 watchdog 終止，請看 data/logs/"
         )
 
-    try:
-        missed = missed_slots_between(prev, now, slots)
-    except TypeError:
-        # naive/aware 混用等無法比較的狀況：資訊性偵測器寧可漏報也不能讓
-        # 整輪 scan() 因為 TypeError 而中斷。
-        missed = []
+    # naive/aware 混用等無法比較的狀況由 `detect_missed` 吞掉（回空 list）：
+    # 資訊性偵測器寧可漏報也不能讓整輪 scan() 因為 TypeError 而中斷。
+    missed = detect_missed(prev_started, now, slots)
 
     if missed:
         msgs.append(f"{_format_missed(missed)}——可能筆電睡眠漏跑或鎖被卡住")

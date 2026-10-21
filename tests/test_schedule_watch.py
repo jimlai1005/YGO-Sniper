@@ -1,11 +1,13 @@
 """排程空窗偵測：純函式、假時間，零網路零 store。"""
 
+import json
 import plistlib
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+from ygo_sniper import schedule_watch as sw
 from ygo_sniper.schedule_watch import (
     _ALL_SLOTS,
     _HIGH_ALL_SLOTS,
@@ -742,3 +744,76 @@ def test_dry_run_does_not_consume_watchdog_ledger(pipeline):
 
     assert ledger_path.exists()
     assert pipeline._schedule_alert is None
+
+
+# ---------------------------------------------------------------------------
+# 漏跑視窗帳（schedule_gap_window）：純函式
+# ---------------------------------------------------------------------------
+def test_detect_missed_returns_slots_and_tolerates_bad_input():
+    now = datetime(2026, 10, 19, 20, 35, 34)
+    assert sw.detect_missed("2026-10-19T09:00:01", now) == [
+        datetime(2026, 10, 19, 9, 30), datetime(2026, 10, 19, 11, 30),
+        datetime(2026, 10, 19, 13, 30), datetime(2026, 10, 19, 15, 30),
+        datetime(2026, 10, 19, 17, 30), datetime(2026, 10, 19, 18, 0),
+        datetime(2026, 10, 19, 18, 30), datetime(2026, 10, 19, 19, 0),
+        datetime(2026, 10, 19, 19, 30), datetime(2026, 10, 19, 20, 0),
+    ]
+    assert sw.detect_missed(None, now) == []
+    assert sw.detect_missed("garbage", now) == []
+
+
+def test_gap_record_written_when_missed_and_untouched_when_not():
+    prev = datetime(2026, 10, 19, 9, 0, 1)
+    now = datetime(2026, 10, 19, 20, 35, 34)
+    missed = sw.detect_missed(prev.isoformat(), now)
+    raw = sw.resolve_gap_record(None, missed, prev, now)
+    rec = json.loads(raw)
+    assert rec["missed_slots"] == 10
+    assert rec["uncovered_from"] == prev.isoformat()
+    assert rec["uncovered_to"] == now.isoformat()
+    assert rec["first_slot"] == "2026-10-19T09:30:00"
+    assert rec["last_slot"] == "2026-10-19T20:00:00"
+    assert rec["caught_up_at"] is None
+    # 沒漏格：原帳原封不動（不論是 None 還是舊帳）
+    assert sw.resolve_gap_record(None, [], now, now) is None
+    assert sw.resolve_gap_record(raw, [], now, now) == raw
+
+
+def test_gap_record_extends_uncaught_window():
+    """前一個視窗還沒補跑、又漏一段：合併成一個視窗，from 取最早、格數相加。"""
+    prev1, now1 = datetime(2026, 10, 19, 9, 0), datetime(2026, 10, 19, 20, 35)
+    raw1 = sw.resolve_gap_record(None, sw.detect_missed(prev1.isoformat(), now1), prev1, now1)
+    prev2, now2 = datetime(2026, 10, 19, 20, 35), datetime(2026, 10, 19, 22, 36)
+    missed2 = sw.detect_missed(prev2.isoformat(), now2)   # 21:00 21:30 22:00
+    rec = json.loads(sw.resolve_gap_record(raw1, missed2, prev2, now2))
+    assert rec["uncovered_from"] == prev1.isoformat()
+    assert rec["uncovered_to"] == now2.isoformat()
+    assert rec["missed_slots"] == 13
+    assert rec["last_slot"] == "2026-10-19T22:00:00"
+
+
+def test_gap_record_replaced_after_caught_up():
+    prev1, now1 = datetime(2026, 10, 19, 9, 0), datetime(2026, 10, 19, 20, 35)
+    raw1 = sw.resolve_gap_record(None, sw.detect_missed(prev1.isoformat(), now1), prev1, now1)
+    done = sw.mark_gap_caught_up(raw1, datetime(2026, 10, 19, 21, 15))
+    assert json.loads(done)["caught_up_at"] == "2026-10-19T21:15:00"
+    prev2, now2 = datetime(2026, 10, 19, 20, 35), datetime(2026, 10, 19, 22, 36)
+    rec = json.loads(sw.resolve_gap_record(done, sw.detect_missed(prev2.isoformat(), now2), prev2, now2))
+    assert rec["uncovered_from"] == prev2.isoformat()
+    assert rec["missed_slots"] == 3
+
+
+def test_decode_gap_record_is_lenient():
+    assert sw.decode_gap_record(None) is None
+    assert sw.decode_gap_record("not json") is None
+    assert sw.decode_gap_record('{"missed_slots": "x"}') is None
+
+
+def test_gap_needs_catchup_threshold():
+    rec = {"missed_slots": 1, "caught_up_at": None}
+    assert sw.gap_needs_catchup(rec, min_missed_slots=2) is False
+    rec["missed_slots"] = 2
+    assert sw.gap_needs_catchup(rec, min_missed_slots=2) is True
+    rec["caught_up_at"] = "2026-10-19T21:15:00"
+    assert sw.gap_needs_catchup(rec, min_missed_slots=2) is False
+    assert sw.gap_needs_catchup(None, min_missed_slots=2) is False
