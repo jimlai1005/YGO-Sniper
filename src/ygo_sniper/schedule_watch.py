@@ -78,14 +78,14 @@ GAP_WINDOW_KEY = "schedule_gap_window"
 CLOCK_TZ_KEY = "schedule_clock_tz"
 CLOCK_TZ_KEY_HIGH = "schedule_clock_tz_high"
 
-#: 排程表（與 scripts/com.jim.ygosniper.plist 的 StartCalendarInterval 對齊；
-#: 改 plist 時段時這裡要一起改——`tests/test_schedule_watch.py` 的
-#: `test_windows_match_plist` 會在兩邊不同步時當場失敗，不是只能靠這行註解提醒）。
+#: 排程表（台北時間）。網格只在這裡；plist 每 15 分叫醒、不再寫網格，
+#: `test_plists_fire_every_15_minutes_all_day` 釘 plist 形狀，
+#: `test_all_slots_are_multiples_of_15_minutes` 釘網格每一格都被打得到。
 #: (窗起分鐘, 窗迄分鐘, 間隔分鐘)；22:30 之後到隔日 09:30 是刻意的夜間空窗。
 _WINDOWS = [(9 * 60 + 30, 17 * 60 + 30, 120), (18 * 60, 22 * 60 + 30, 30)]
 
-#: 高價帶自己的排程表（與 scripts/com.jim.ygosniper.high.plist 對齊；
-#: `tests/test_schedule_watch.py::test_high_windows_match_high_plist` 釘死）。
+#: 高價帶自己的排程表（台北時間；同上，plist 不寫網格，形狀由
+#: `test_plists_fire_every_15_minutes_all_day` 與 `test_all_slots_are_multiples_of_15_minutes` 釘死）。
 #: 白天偶數整點 10:00/12:00/14:00/16:00、晚間 :15 的 18:15/20:15/22:15——
 #: 與 `_WINDOWS` 的所有觸發分鐘零重疊（低價帶佔 :30 與 :00/:30，這裡只落
 #: 在 :00 與 :15）。同一組 (起, 迄, 間隔) 表示法就能表達這個不規則時刻表，
@@ -282,8 +282,12 @@ def should_run(
 
     兩個條件任一成立就跑：
     1. `now` 落在網格某一格的 [slot, slot + tolerance) 內——tolerance 吃掉 launchd 的喚醒漂移；
-    2. 上一輪（`prev_started`）之後有格被跳過（`detect_missed`）——筆電睡醒時 launchd
-       只補觸發一次、時間不在格上，不靠這條就永遠補不到。
+    2. `(prev_started, now]` 之間網格上有**任何一格**——即「上一輪之後有格還沒人跑過」。
+       筆電睡醒時 launchd 只補觸發一次、時間不在格上；launchd 晚超過 tolerance 觸發也同理。
+       注意不能用 `missed_slots_between`：它刻意排除 `now` 當下的最近一格（前提是「這一輪
+       自己代表那格」），但閘門不放行時沒有任何輪次代表它，睡過最近一格就永遠補不到，
+       下一輪還會報漏跑。
+    沒有基準（None／壞掉的 ISO／naive-aware 混用）→ 只看條件 1。
     `now` 必須是台北 naive（`clock.schedule_now()`）；`prev_started` 是同基準的 ISO 或 None。
     網格只定義在 `_WINDOWS`／`_HIGH_WINDOWS` 一處；plist 不再知道網格。
     """
@@ -292,7 +296,16 @@ def should_run(
     minute_of_day = now.hour * 60 + now.minute
     if any(0 <= minute_of_day - s < tolerance_minutes for s in slots):
         return True
-    return bool(detect_missed(prev_started, now, slots))
+    if not prev_started:
+        return False
+    try:
+        prev = datetime.fromisoformat(prev_started)
+    except (TypeError, ValueError):
+        return False
+    try:
+        return next_slot_after(prev, slots) <= now
+    except TypeError:
+        return False
 
 
 def decode_gap_record(raw: str | None) -> dict | None:

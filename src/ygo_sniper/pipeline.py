@@ -1039,6 +1039,18 @@ class Pipeline:
                 self.store.set_meta(clock_key, SCHEDULE_TZ_NAME)
                 self.store.set_meta(started_key, now.isoformat())
                 self._schedule_alert = None
+                # 只跳過「漏格偵測」，watchdog 帳本照常折進 pending（exit 124 那類失敗的
+                # 唯一證據就是這個檔；吞掉它＝靜默失敗）。沒有帳本時 pending 原值不動。
+                watchdog_msg, ledger_path = self._read_watchdog_ledger(high_band=high_band)
+                if watchdog_msg:
+                    self._schedule_alert, new_pending = resolve_alert(
+                        self.store.get_meta(pending_key), watchdog_msg
+                    )
+                    if self._schedule_alert:
+                        print(self._schedule_alert)
+                    self.store.set_meta(pending_key, new_pending)
+                    if ledger_path is not None:
+                        self._consume_watchdog_ledger(ledger_path)
                 return
             prev_started = self.store.get_meta(started_key)
             detected = schedule_health(

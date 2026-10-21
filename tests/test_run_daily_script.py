@@ -418,6 +418,25 @@ def test_slot_gate_unexpected_rc_does_not_swallow_the_run(sandbox):
     assert sandbox.marker_file.exists()
 
 
+def test_slot_gate_unexpected_rc_leaves_a_trace_in_the_log(sandbox):
+    """放行是對的，但閘門自己壞掉（rc 非 0 非 3）不能無痕：log 要留一行，事後才查得到。"""
+    sandbox.set_ygo_sniper_stub(_SLOT_CHECK_STUB_TEMPLATE.format(rc=1))
+
+    result = sandbox.run(YGO_SLOT_GATE="1")
+
+    assert result.returncode == 0, result.stderr
+    assert sandbox.marker_file.exists(), "異常放行後應該照掃"
+    assert "slot-check 異常 rc=1" in sandbox.log_text()
+
+
+def test_slot_gate_normal_rc_leaves_no_abnormal_line(sandbox):
+    sandbox.set_ygo_sniper_stub(_SLOT_CHECK_STUB_TEMPLATE.format(rc=0))
+
+    sandbox.run(YGO_SLOT_GATE="1")
+
+    assert "slot-check 異常" not in sandbox.log_text()
+
+
 def test_without_slot_gate_env_a_manual_or_catchup_run_is_never_gated(sandbox):
     """dashboard 補跑按鈕（`run_daily.sh --catchup`）與手動執行沒有 YGO_SLOT_GATE：
     即使 slot-check 會回 3 也必須照常往下跑，否則 dashboard 回「已啟動」卻什麼都沒做。"""

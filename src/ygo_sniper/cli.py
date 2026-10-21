@@ -2614,10 +2614,14 @@ def test_telegram():
 def slot_check(band: str = typer.Option("std", help="std（低價帶）或 high（高價帶）")):
     """launchd 每 15 分鐘叫一次 run_daily.sh／run_high.sh，腳本先問這裡「現在該不該掃」。
 
-    exit 0 = 該掃；exit 3 = 不在台北網格上、也沒有漏格，靜默結束。
-    只讀 meta，不寫任何東西、不印任何東西（一天 96 次呼叫，印了會淹掉 log）。
+    exit 0 = 該掃；exit 3 = 不在台北網格上、也沒有格還沒人跑，靜默結束。
+    以唯讀連線讀 meta 一個鍵（`mode=ro`），不建 Store、不跑 schema、不寫任何東西、
+    不印任何東西（一天 96 次呼叫，印了會淹掉 log；建 Store 會每次取寫鎖）。
+    db 不存在／表不存在／任何 sqlite3.Error → 視為沒有基準，只看是否在格上。
     網格只定義在 `schedule_watch._WINDOWS`／`_HIGH_WINDOWS`，plist 不知道網格。
     """
+    import sqlite3
+
     from .clock import schedule_now
     from .schedule_watch import (
         _HIGH_ALL_SLOTS,
@@ -2628,11 +2632,19 @@ def slot_check(band: str = typer.Option("std", help="std（低價帶）或 high�
 
     if band not in ("std", "high"):
         raise typer.BadParameter("band 只能是 std 或 high", param_hint="--band")
-    store = Store(load_config().db_path)
-    if band == "high":
-        ok = should_run(schedule_now(), store.get_meta(RUN_STARTED_KEY_HIGH), _HIGH_ALL_SLOTS)
-    else:
-        ok = should_run(schedule_now(), store.get_meta(RUN_STARTED_KEY))
+    key = RUN_STARTED_KEY_HIGH if band == "high" else RUN_STARTED_KEY
+    prev_started: str | None = None
+    try:
+        uri = Path(load_config().db_path).absolute().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        try:
+            row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            prev_started = row[0] if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        prev_started = None
+    ok = should_run(schedule_now(), prev_started, _HIGH_ALL_SLOTS if band == "high" else None)
     raise typer.Exit(code=0 if ok else 3)
 
 

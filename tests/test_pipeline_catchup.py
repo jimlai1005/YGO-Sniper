@@ -296,15 +296,36 @@ def test_clock_change_protection_is_per_band_high_first_run(pipe_factory):
     pipe = pipe_factory()
     pipe.store.set_meta(sw.CLOCK_TZ_KEY, "Asia/Taipei")   # 低價帶已切換
     pipe.store.set_meta(sw.RUN_STARTED_KEY_HIGH, "2026-10-20T23:00:00")   # 高價帶舊（Chicago）基準
-    pipe.store.set_meta(sw.PENDING_ALERT_KEY_HIGH, "")
+    old_pending = '{"text":"舊告警","missed":1}'   # 非空：保護分支必須原值不動
+    pipe.store.set_meta(sw.PENDING_ALERT_KEY_HIGH, old_pending)
     assert pipe.store.get_meta(sw.CLOCK_TZ_KEY_HIGH) is None
     pipe._update_schedule_state(
         dry_run=False, watch_only=False, high_band=True, now=datetime(2026, 10, 21, 14, 0),
     )
     assert pipe._schedule_alert is None
-    assert pipe.store.get_meta(sw.PENDING_ALERT_KEY_HIGH) == ""
+    assert pipe.store.get_meta(sw.PENDING_ALERT_KEY_HIGH) == old_pending
     assert pipe.store.get_meta(sw.CLOCK_TZ_KEY_HIGH) == "Asia/Taipei"
     assert pipe.store.get_meta(sw.RUN_STARTED_KEY_HIGH) == "2026-10-21T14:00:00"
+
+
+def test_clock_change_protection_still_folds_watchdog_ledger_into_pending(pipe_factory):
+    """保護分支只跳過「漏格偵測」，不能吞掉 watchdog 帳本（exit 124 的證據只有這個檔）。"""
+    import json
+
+    pipe = pipe_factory()
+    ledger = pipe.cfg.db_path.parent / "last_run_exit"
+    ledger.write_text(json.dumps(
+        {"exit": 124, "notify_attempted": False, "notify_http": "000", "notify_curl_exit": 0}
+    ))
+    pipe.store.set_meta(sw.RUN_STARTED_KEY, "2026-10-19T09:00:01")   # 舊基準
+    assert pipe.store.get_meta(sw.CLOCK_TZ_KEY) is None
+    pipe._update_schedule_state(dry_run=False, watch_only=False, now=datetime(2026, 10, 21, 13, 30))
+    assert pipe._schedule_alert and "watchdog" in pipe._schedule_alert and "124" in pipe._schedule_alert
+    assert "124" in (pipe.store.get_meta(sw.PENDING_ALERT_KEY) or "")
+    assert not ledger.exists()                                      # 已消耗
+    assert pipe.store.get_meta(sw.CLOCK_TZ_KEY) == "Asia/Taipei"
+    assert pipe.store.get_meta(sw.GAP_WINDOW_KEY) is None           # 仍不做漏格偵測
+    assert pipe.store.get_meta(sw.RUN_STARTED_KEY) == "2026-10-21T13:30:00"
 
 
 def test_clock_change_protection_is_per_band_low_first_run(pipe_factory):

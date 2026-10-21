@@ -567,6 +567,32 @@ class TestSlotCheck:
         at("2026-10-21T14:07:00")
         assert self._invoke("--band", "std").exit_code == 0
 
+    def test_missing_db_does_not_raise_nor_create_file(self, env, tmp_path):
+        """唯讀連線：db 不存在 → 沒有基準，只看格上；不拋例外、也不會把檔案建出來。"""
+        import os
+
+        _, at = env
+        os.remove(tmp_path / "sniper.db")
+        at("2026-10-21T13:45:00")
+        r = self._invoke("--band", "std")
+        assert r.exit_code == 3 and r.output == ""
+        at("2026-10-21T13:31:00")
+        r = self._invoke("--band", "std")
+        assert r.exit_code == 0 and r.output == ""
+        assert not (tmp_path / "sniper.db").exists()
+
+    def test_does_not_build_store(self, env, monkeypatch):
+        """slot-check 不得建 Store（建構會跑 schema＋回填 SQL，一天 192 次取寫鎖）。"""
+        from ygo_sniper import cli as cli_mod
+
+        def boom(*a, **k):
+            raise AssertionError("slot-check must not construct Store")
+
+        _, at = env
+        monkeypatch.setattr(cli_mod, "Store", boom)
+        at("2026-10-21T13:31:00")
+        assert self._invoke("--band", "std").exit_code == 0
+
     def test_bands_use_their_own_grid_and_ledger(self, env):
         from ygo_sniper.schedule_watch import RUN_STARTED_KEY, RUN_STARTED_KEY_HIGH
 

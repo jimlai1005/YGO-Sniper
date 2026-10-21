@@ -70,7 +70,12 @@ if [ "${YGO_SLOT_GATE:-0}" = "1" ] && [ -x .venv/bin/ygo-sniper ]; then
     .venv/bin/ygo-sniper slot-check --band std >/dev/null 2>&1
     rc=$?
     if [ "$rc" -eq 3 ]; then exit 0; fi
-    # rc 非 0 非 3（例如 db 壞掉）：放行往下跑，讓既有的失敗路徑大聲報錯，不要在這裡吞掉
+    # rc 非 0 非 3（例如 db 壞掉）：放行往下跑，讓既有的失敗路徑大聲報錯，不要在這裡吞掉；
+    # 但要留痕——閘門自己壞掉卻無痕，事後只會看到「每 15 分鐘都掃一次」而不知道為什麼。
+    # 注意 ${rc} 的大括號：後面緊接全形「，」，裸 $rc 會被 bash 吃進識別字（set -u 死亡）。
+    if [ "$rc" -ne 0 ]; then
+        echo "[$(date '+%H:%M:%S')] slot-check 異常 rc=${rc}，本輪放行照掃（請查 ygo-sniper slot-check）" >> "$LOG_FILE"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

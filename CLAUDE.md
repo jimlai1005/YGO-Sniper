@@ -511,7 +511,9 @@ make schedule-high / make unschedule-high # 高價帶獨立排程（網格一天
 **每 15 分鐘叫醒一次**（Minute 0/15/30/45，沒有 Hour 鍵），`scripts/run_daily.sh` 取鎖之前
 先跑 `ygo-sniper slot-check --band std`——exit 0 往下掃、exit 3 靜默結束。網格只在
 `schedule_watch._WINDOWS`（高價帶 `_HIGH_WINDOWS`）一處；要改時段改那裡，不用動 plist，
-也不用重新 `make schedule`。`slot-check` 只讀 meta、不印任何字（一天 96 次呼叫）。
+也不用重新 `make schedule`。`slot-check` 以唯讀連線讀 meta 一個鍵（不建 Store、不跑 schema、不取寫鎖）、不印任何字（一天 96 次呼叫）；
+放行判準是「`(上一輪起跑, 現在]` 之間網格上有任何一格」（或現在落在某格 `[slot, slot+7 分)`），
+睡過最近一格或 launchd 晚超過 7 分都會補跑。
 `make schedule` 之後 launchd 不再依賴系統時區，使用者出差換時區也不影響。
 `YGO_SLOT_GATE=1` **只在兩支 plist 的 `EnvironmentVariables`**：它是 wrapper 閘門的開關，
 dashboard 補跑按鈕與手動 `run_daily.sh` 沒有它，永遠直接掃（第三節第九項 Step 4b 的教訓）。

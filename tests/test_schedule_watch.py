@@ -232,13 +232,15 @@ def test_should_run_on_grid_slot_with_tolerance():
     prev = "2026-10-21T11:30:00"
     assert sw.should_run(datetime(2026, 10, 21, 13, 30, 0), prev) is True
     assert sw.should_run(datetime(2026, 10, 21, 13, 36, 59), prev) is True    # launchd 漂移 +7 內
-    assert sw.should_run(datetime(2026, 10, 21, 13, 45, 0), prev) is False    # 不在格上、也沒漏格
-    assert sw.should_run(datetime(2026, 10, 21, 12, 0, 0), prev) is False
+    assert sw.should_run(datetime(2026, 10, 21, 13, 45, 0), prev) is True     # 13:30 自 11:30 後沒人跑過
+    assert sw.should_run(datetime(2026, 10, 21, 12, 0, 0), prev) is False     # 11:30 之後、13:30 之前，沒格可補
 
 
 def test_should_run_tolerance_boundary_is_exclusive_at_7_minutes():
-    """[slot, slot + 7)：13:37:00 已過界（分鐘數 7 不小於 tolerance）。"""
-    prev = "2026-10-21T11:30:00"
+    """[slot, slot + 7)：13:37:00 已過界（分鐘數 7 不小於 tolerance）。
+    prev 取 13:31（13:30 那格已有人跑過）才能單獨測容忍邊界——prev 更早時 (prev, now] 內
+    有 13:30 會因為補跑條件放行，測不到邊界。"""
+    prev = "2026-10-21T13:31:00"
     assert sw.should_run(datetime(2026, 10, 21, 13, 36, 0), prev) is True
     assert sw.should_run(datetime(2026, 10, 21, 13, 37, 0), prev) is False
 
@@ -247,6 +249,29 @@ def test_should_run_catches_up_after_sleep():
     """睡醒時 launchd 補觸發一次；即使不在格上，只要上一輪之後有格被跳過就要跑。"""
     prev = "2026-10-21T09:30:00"
     assert sw.should_run(datetime(2026, 10, 21, 14, 7, 0), prev) is True      # 漏了 11:30、13:30
+
+
+@pytest.mark.parametrize(
+    "prev, now, expected, high",
+    [
+        ("2026-10-21T09:30:00", "2026-10-21T11:50:00", True, False),    # 睡過最近一格 11:30
+        ("2026-10-20T22:30:00", "2026-10-21T09:45:00", True, False),    # 隔夜醒來，09:30 沒人跑
+        ("2026-10-21T13:31:00", "2026-10-21T13:45:00", False, False),   # 剛跑過，沒格可補
+        ("2026-10-21T13:31:00", "2026-10-21T15:38:00", True, False),    # launchd 晚 8 分（15:30 格）
+        ("2026-10-21T18:00:00", "2026-10-21T18:40:00", True, False),    # 18:30 被睡掉
+        ("2026-10-21T10:00:00", "2026-10-21T12:20:00", True, True),     # 高價帶 12:00 被睡掉
+    ],
+)
+def test_should_run_catches_up_latest_slot_missed(prev, now, expected, high):
+    """(prev, now] 之間網格上有任何一格就跑——包含「最近一格」本身
+    （missed_slots_between 排除它是因為那一輪自己代表它，閘門不放行時沒人代表）。"""
+    slots = sw._HIGH_ALL_SLOTS if high else None
+    assert sw.should_run(datetime.fromisoformat(now), prev, slots) is expected
+
+
+def test_should_run_garbage_baseline_falls_back_to_slot_only():
+    assert sw.should_run(datetime(2026, 10, 21, 13, 45, 0), "not-a-date") is False
+    assert sw.should_run(datetime(2026, 10, 21, 13, 31, 0), "not-a-date") is True
 
 
 def test_should_run_without_baseline_runs_only_on_slot():

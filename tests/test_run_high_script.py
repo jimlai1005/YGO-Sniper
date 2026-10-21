@@ -173,3 +173,17 @@ def test_run_high_notify_failure_line_survives_fullwidth_punctuation(high):
     ledger = high.last_run_ledger()
     assert ledger["notify_attempted"] is True
     assert ledger["notify_curl_exit"] == 6
+
+
+def test_run_high_slot_gate_unexpected_rc_leaves_a_trace_in_the_log(high):
+    """閘門自己壞掉（rc=1）→ 放行照掃，但 log 要有一行 `slot-check 異常 rc=1`。"""
+    from test_run_daily_script import _SLOT_CHECK_STUB_TEMPLATE
+
+    high.set_ygo_sniper_stub(_SLOT_CHECK_STUB_TEMPLATE.format(rc=1))
+
+    result = high.run(YGO_SLOT_GATE="1")
+
+    assert "unbound variable" not in result.stderr, result.stderr
+    assert result.returncode == 0, result.stderr
+    assert high.marker_file.exists(), "異常放行後應該照掃"
+    assert "slot-check 異常 rc=1" in high.log_text()
