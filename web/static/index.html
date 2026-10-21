@@ -2363,7 +2363,8 @@ async function pollGap(){
   }catch(e){ return; }
   const pill = document.getElementById("gap-pill");
   if(!g){ pill.hidden = true; return; }
-  const win = `${g.uncovered_from.slice(5,16).replace("T"," ")} ～ ${g.uncovered_to.slice(5,16).replace("T"," ")}`;
+  // 排程帳是台北 naive ISO（clock.schedule_now），不是瀏覽器／機器時區——文字明寫，出差換時區也不會誤讀
+  const win = `台北 ${g.uncovered_from.slice(5,16).replace("T"," ")} ～ ${g.uncovered_to.slice(5,16).replace("T"," ")}`;
   pill.hidden = false;
   if(g.caught_up_at){
     pill.className = "pill";

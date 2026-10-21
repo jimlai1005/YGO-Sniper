@@ -114,7 +114,7 @@ Vol.6，正中目標輪廓。它要擋的現代稀有度用 `プリズマティ�
 
 ## 三、比較的兩個值必須同源、同基準（本專案最常犯的錯）
 
-全域工程原則第一條在這個專案出現了**八次**，每次換一個地方：
+全域工程原則第一條在這個專案出現了**九次**，每次換一個地方：
 
 | 事故 | 混了什麼 | 症狀 |
 |---|---|---|
@@ -126,6 +126,7 @@ Vol.6，正中目標輪廓。它要擋的現代稀有度用 `プリズマティ�
 | 價格上限 | 日圓算出的上限套到 eBay 的美元／台幣 | 過濾條件整個錯位 |
 | 成交型態混池 | 競標結標價（買家搶到多高）vs 定價成交（賣家開多少） | 排行榜第 5 名的 60.6 分**三個計分點全是混池** |
 | 排程空窗判準 | `now - prev`（帶漂移的經過時間）vs `expected`（理想網格的固定間隔） | 正常喚醒漂移＋一格漏跑＝**完全無聲**，18-22 點結標高峰尤其致命 |
+| 排程時區 | launchd 的台北網格 vs Python `datetime.now()` 的機器時區 | 連續 12 天每天假報「漏跑 9-10 個時段」，沒人抓到 |
 
 第七項（2026-08-06）值得單獨記：`basis="sold"` 看起來已經是「同一把尺」了，
 但那一桶裡混著**兩種價格形成機制**——ヤフオク落札價是買家喊上去的（賣家只設了
@@ -144,6 +145,48 @@ Vol.6，正中目標輪廓。它要擋的現代稀有度用 `プリズマティ�
 漏了哪幾格**而不是「經過了幾小時」——`_SLACK_MINUTES` 因此整條刪除，不是調鬆。
 **同單位不代表同基準**：兩個數字都是「分鐘」不保證可以互相比大小，要問的是
 「這個數字的零點／錨點是哪裡」。
+
+第九項（2026-10-20 回放發現，同日修復）是第八項的續集，而且形狀更陰：**時鐘本身
+就是基準**。使用者 2026-10 出差（Dallas → LA → 台北），macOS 自動換了系統時區。
+launchd 的 `StartCalendarInterval` 牆上時間用 **job 載入時**的時區解讀（2026-08
+載入時是台北），所以照台北網格觸發；Python 的 `datetime.now()` 與 `schedule_watch`
+卻跟著**現在的**系統時區（America/Chicago）走。兩邊都是「牆上幾點幾分」、同單位，
+基準差 13 小時：自 10-08 起 `schedule_health` 連續 12 天每天報「漏跑 9-10 個時段
+（09:30～20:00）」——那段 Chicago 時間是台北深夜，本來就不排程。**12 天沒人抓到**的
+原因：告警文字每天一模一樣、讀起來完全合理（筆電睡眠漏幾格再正常不過），而「假警報
+天天響」會讓人學會忽略它——這是第八項「警報沒響」的鏡像，同樣只能靠回放
+`data/logs/daily-*.log` 的實際起跑時刻對帳才抓得到（使用者 10-19 收到的那則是引爆點）。
+副作用：漏跑視窗帳每天寫一筆假帳，補跑模式（第五節）因此天天空轉。
+
+修法三層（`docs/plans/schedule-pin-taipei.md`），缺一不可：
+
+1. **Python 單一時鐘** `clock.py`：`schedule_now()` 回台北 naive datetime，排程監督、
+   視窗帳、補跑回顧所有 `datetime.now()` 一律走它；與 UTC aware 的 `sold_at` 比較
+   經 `schedule_naive_to_utc()`。
+2. **launchd 不再持有網格**：兩支 plist 只寫 `Minute` 0/15/30/45（省略 `Hour`＝每小時），
+   每 15 分叫醒一次，`run_daily.sh`／`run_high.sh` 在取鎖之前先問
+   `ygo-sniper slot-check --band std|high`——台北現在落在網格上（±7 分容忍喚醒漂移）
+   或上一輪之後有格被跳過（筆電睡醒補觸發）→ exit 0 往下掃；否則 exit 3 靜默結束
+   （不寫 log、不碰鎖、不碰帳本，一天 96 次觸發有 81 次走這條）。網格**只**定義在
+   `schedule_watch._WINDOWS`／`_HIGH_WINDOWS` 一處，時區怎麼換都不影響。
+3. **基準切換的一次性保護**：meta 鍵 `schedule_clock_tz`。不是 `Asia/Taipei`（含不存在）
+   時，本輪不做漏跑偵測、不寫視窗帳，只寫新基準——否則部署後第一輪會拿 Chicago 寫的
+   `prev_started` 對台北的 `now` 算出十幾格假漏跑。另外三支 wrapper `export TZ=Asia/Taipei`，
+   plist 的 `EnvironmentVariables` 也設一次（雙保險，讓 log 時間戳與 `finished_at` 看起來一致）。
+
+**這個修法的第一版閘門自己就是一個靜默失敗**（Step 4b，實作時抓到）：閘門一開始是
+無條件地跑在 wrapper 最前面，結果 dashboard 的「補跑 daily」按鈕（`run_daily.sh --catchup`）
+與使用者手動執行，只要當下不在網格上就被 `slot-check` 靜默吞掉，而 dashboard 還回
+「已啟動」——「使用者明確要求跑」與「閘門說不用跑」外顯一模一樣（第五節同一個病）。
+修法：閘門包在 `YGO_SLOT_GATE=1` 條件裡，且這個變數**只**由兩支 plist 的
+`EnvironmentVariables` 設定；dashboard subprocess 與手動 shell 沒有它，永遠直接往下跑。
+`tests/test_run_daily_script.py` 釘住（設了且 stub 回 3 → 靜默結束；沒設時 stub 回 3
+也照跑；plist 必須設它）。**不要把 `YGO_SLOT_GATE` 設進 shell profile 或 wrapper 本身。**
+
+**規則（第九項的判準）：時鐘也是基準。** 兩個牆上時間要比大小或相減之前，先問
+「這是哪個時區的牆」，以及「這個時區是誰決定的、會不會變」——launchd 載入時、
+Python 呼叫時、使用者出差時，可以是三個答案。排程相關的時間一律走 `clock.py`，
+不用 `datetime.now()`；要跟 UTC 值比先換算，不比字串。
 
 **症狀的共同點：混源比較的錯誤方向通常是「看起來很划算」，但第八項是反例**——
 它驅動的是警報而不是價格，錯誤方向因此變成「看起來很安全」：告警閾值沒被
@@ -278,7 +321,7 @@ JSON：這一輪的 exit code、結束時間、失敗通知有沒有送達。下
 排程漏格（`schedule_watch.schedule_health` 偵測到）以前只推一則告警：使用者知道漏了，但不知道
 **漏的那段時間市場發生了什麼**。現在多一本帳 `schedule_gap_window`（meta 鍵，
 `schedule_watch.GAP_WINDOW_KEY`，JSON：`uncovered_from`／`uncovered_to`／`missed_slots`／
-`first_slot`／`last_slot`／`detected_at`／`caught_up_at`，全是本地 naive ISO）：
+`first_slot`／`last_slot`／`detected_at`／`caught_up_at`，全是台北 naive ISO（`clock.schedule_now()` 基準））：
 
 - **誰寫**：`pipeline._record_gap_window`，在 `_update_schedule_state` 偵測到漏格時寫，
   **只記低價帶**（狙擊重挖與回顧只在低價帶 `daily` 跑，高價帶不碰這本帳）。前一個視窗還沒補跑
@@ -298,8 +341,8 @@ JSON：這一輪的 exit code、結束時間、失敗通知有沒有送達。下
   期間內沒有任何狙擊成交（無訊息可送）則直接標。`notify.enabled=false` 時不標。
   **`caught_up_at` 因此有兩種來源**（這裡的送達，與下一條的「未達門檻收尾」）；dashboard pill 與
   `/api/schedule/gap` 的 `min_missed_slots` 把兩者說成不同的話，不要都叫「已補跑」。
-- **同基準**：排程帳是本地 naive，`card_watch_sale.sold_at` 是 UTC aware——`catchup.window_to_utc`
-  先轉再比，不比字串。`sold_at` 為空字串的來源（`buyee_mercari`／`ruten`）無法判定是否在期間內，
+- **同基準**：排程帳是台北 naive，`card_watch_sale.sold_at` 是 UTC aware——`catchup.window_to_utc`
+  （經 `clock.schedule_naive_to_utc`）先轉再比，不比字串。`sold_at` 為空字串的來源（`buyee_mercari`／`ruten`）無法判定是否在期間內，
   不計入，回顧訊息會明說。
 
 **這個功能的天花板（寫給之後想「加強」它的人）：期間內上架又成交的商品永遠掃不回來**——
@@ -444,8 +487,8 @@ ygo-sniper expiry-stats        # 清除功能自己的誤殺率（清掉的有�
 ygo-sniper clear-departed      # 清離場標的：逐筆開頁實證，只清 SOLD/DELISTED
                                #   --state watching|asked_seller|offer_sent
                                #   --dry-run 只驗不寫（與 dashboard 清除按鈕同路徑）
-make schedule / make unschedule # launchd 排程（分時段，一天 15 個觸發點）
-make schedule-high / make unschedule-high # 高價帶獨立排程（一天 7 個觸發點，
+make schedule / make unschedule # launchd 排程（每 15 分叫醒，slot-check 依台北網格決定掃不掃；網格一天 15 格）
+make schedule-high / make unschedule-high # 高價帶獨立排程（網格一天 7 格，
                                #   與低價帶零重疊，見下方排程時段）
 ```
 
@@ -458,16 +501,26 @@ make schedule-high / make unschedule-high # 高價帶獨立排程（一天 7 個
   只抓「醒著卡死」。
 - `YGO_REQ_LOG=0` —— 關掉逐請求的 `[req]` log（預設開）。見 `sources/base.py:69`。
 
-排程時段：白天 09:30-17:30 每 2 小時（抓新上架）、**18:00-22:30 每 30 分**
+排程時段（**一律台北時間**）：白天 09:30-17:30 每 2 小時（抓新上架）、**18:00-22:30 每 30 分**
 （結標高峰，實測所有競標都在台灣時間 18-22 點結標）、夜間不跑。
-`scripts/run_daily.sh` 現在把整輪掃描包進 watchdog（見上）；`scripts/com.jim.ygosniper.plist`
-的時段與 `schedule_watch._WINDOWS` 被 `tests/test_schedule_watch.py::test_windows_match_plist`
-釘死——改 plist 時段沒有同步改 `_WINDOWS`，測試會直接紅，不會等到排程空窗才發現。
+**launchd 不持有網格**（2026-10-21 起，第三節第九項）：`scripts/com.jim.ygosniper.plist` 只負責
+**每 15 分鐘叫醒一次**（Minute 0/15/30/45，沒有 Hour 鍵），`scripts/run_daily.sh` 取鎖之前
+先跑 `ygo-sniper slot-check --band std`——exit 0 往下掃、exit 3 靜默結束。網格只在
+`schedule_watch._WINDOWS`（高價帶 `_HIGH_WINDOWS`）一處；要改時段改那裡，不用動 plist，
+也不用重新 `make schedule`。`slot-check` 只讀 meta、不印任何字（一天 96 次呼叫）。
+`make schedule` 之後 launchd 不再依賴系統時區，使用者出差換時區也不影響。
+`YGO_SLOT_GATE=1` **只在兩支 plist 的 `EnvironmentVariables`**：它是 wrapper 閘門的開關，
+dashboard 補跑按鈕與手動 `run_daily.sh` 沒有它，永遠直接掃（第三節第九項 Step 4b 的教訓）。
+wrapper 另 `export TZ=Asia/Taipei`，log 時間戳與 `last_run_exit.finished_at` 因此也是台北。
+`scripts/run_daily.sh` 把整輪掃描包進 watchdog（見上）。plist 與 `_WINDOWS` 之間現在**沒有**
+「手抄一致」的關係，舊的 `test_windows_match_plist`／`test_high_windows_match_high_plist`
+已刪；改由 `tests/test_schedule_watch.py::test_plists_fire_every_15_minutes_all_day`
+釘「plist 每 15 分、整天都叫醒」，`should_run` 的容忍窗與補格另有單元測試。
 
 高價帶（2026-08-22）排程另開一張表、時刻刻意與低價帶錯開：白天偶數整點
 `10:00 / 12:00 / 14:00 / 16:00`、晚間 `18:15 / 20:15 / 22:15`（避開低價帶
-的 :00/:30），一天 7 次，`scripts/com.jim.ygosniper.high.plist` 與
-`schedule_watch._HIGH_WINDOWS` 被 `test_high_windows_match_high_plist` 釘死。
+的 :00/:30），一天 7 次，網格只在 `schedule_watch._HIGH_WINDOWS`；`scripts/com.jim.ygosniper.high.plist`
+同樣只每 15 分叫醒、由 `run_high.sh` 的 `slot-check --band high` 決定（見上）。
 **兩帶的排程監督帳本完全分離**（各自的 `RUN_STARTED_KEY`／`PENDING_ALERT_KEY`
 與 `_HIGH` 版本、各自的 `data/last_run_exit`／`data/last_run_exit_high`）——
 `_send_schedule_alert` 一律清「偵測出這則告警的那本帳」（`pipe._schedule_alert_pending_key`），

@@ -77,9 +77,9 @@ daily` 早就把完整輸出（comps、掃描摘要、推播、告警）都印�
 
 - `exit`：這一輪 `ygo-sniper daily` 的結束碼（0 = 成功；124 = watchdog
   強制終止；其他 = 一般失敗）。
-- `finished_at`：本機時間、naive ISO（跟 `schedule_watch.py` 全域使用
-  naive local datetime 的慣例一致——不要混用 UTC，否則就是又一次
-  「兩個數字不同源」的錯，見 CLAUDE.md 第三節）。
+- `finished_at`：台北時間、naive ISO（wrapper 開頭 `export TZ=Asia/Taipei`，與
+  `clock.schedule_now()` 同基準——不要混用 UTC 或機器時區，否則就是又一次
+  「兩個數字不同源」的錯，見 CLAUDE.md 第三節第九項）。
 - `notify_attempted`／`notify_http`／`notify_curl_exit`：這一輪失敗通知的
   curl 有沒有真的打出去、拿到的 HTTP 狀態碼、curl 自己的 exit code。
 
@@ -119,3 +119,40 @@ plist 不帶參數，行為不變；手動補跑用 `scripts/run_daily.sh --catc
 不先檢查，使用者會看到「已啟動」然後什麼都沒發生（靜默失敗）。**預檢不清鎖**，清殘鎖是腳本
 自己的事；鎖的權威仍是腳本。腳本啟動後要先取鎖、再過網路 ping（最多 60 秒）、起 python 才會寫
 `scan_status`，所以按鈕有 90 秒寬限期，見 `docs/dashboard.md`。
+
+## 六、排程時鐘：釘台北，launchd 不持有網格（2026-10-21）
+
+**為什麼**：機器時區會跟著使用者出差換（2026-10 Dallas → LA → 台北）。launchd 的
+`StartCalendarInterval` 用 job *載入時*的時區解讀，Python `datetime.now()` 用*現在的*系統時區，
+兩者差 13 小時時 `schedule_health` 連續 12 天每天假報漏跑（CLAUDE.md 第三節第九項）。
+
+**三層**：
+1. `src/ygo_sniper/clock.py`：`schedule_now()` 回台北 naive datetime，排程監督／視窗帳／補跑回顧
+   全走它；與 UTC aware 值比較經 `schedule_naive_to_utc()`。
+2. plist 只寫 `Minute` 0/15/30/45（省略 `Hour`＝每小時），**每 15 分鐘叫醒**；網格只在
+   `schedule_watch._WINDOWS`（低價帶）／`_HIGH_WINDOWS`（高價帶）。`run_daily.sh`／`run_high.sh`
+   在取鎖之前先跑 `ygo-sniper slot-check --band std|high`。
+3. meta `schedule_clock_tz`：不是 `Asia/Taipei`（含不存在）時，第一輪不做漏跑偵測、不寫視窗帳，
+   只寫新基準，避免拿舊時區寫的 `prev_started` 算出假漏格。
+
+**`slot-check` 的 exit code**：`0` = 該掃（台北現在落在網格某一格的 `[slot, slot+7 分)`，
+或上一輪之後有格被跳過，如筆電睡醒只補觸發一次）；`3` = 不在格上也沒漏格，**靜默結束**
+（不寫 log、不碰鎖、不碰帳本，一天 96 次裡低價帶有 81 次走這條）。只讀 meta、不印任何字。
+其他 exit code（例如 db 壞掉）wrapper **放行往下跑**，讓既有失敗路徑大聲報錯，不在閘門吞掉。
+
+**`YGO_SLOT_GATE=1` 只由 plist 設定**：wrapper 的閘門寫成
+`if [ "${YGO_SLOT_GATE:-0}" = "1" ] ...`。第一版閘門是無條件的，結果 dashboard 的「補跑 daily」
+（第五節，`run_daily.sh --catchup`）與手動執行只要不在網格上就被靜默吞掉，dashboard 還回
+「已啟動」——靜默失敗。現在只有 launchd 觸發（plist `EnvironmentVariables` 有這個變數）才過閘門；
+補跑按鈕與手動執行永遠直接掃。**不要把它放進 shell profile 或 wrapper。**
+
+**部署步驟**（改 plist 或第一次套用本機制時）：
+```bash
+make unschedule && make schedule && make unschedule-high && make schedule-high   # 載入新 plist
+launchctl kickstart -k gui/$(id -u)/com.jim.ygosniper.dashboard                  # dashboard 吃到 clock.py
+launchctl print gui/$(id -u)/com.jim.ygosniper | grep "last exit"                # 應為 0
+.venv/bin/ygo-sniper slot-check --band std; echo $?                              # 只印 0 或 3
+```
+改**時段**（網格）只改 `schedule_watch._WINDOWS`／`_HIGH_WINDOWS`，不必重載 plist。
+驗證：`grep -h "開始 =====" data/logs/daily-<日期>.log` 的時刻（台北）應全部落在網格 ±7 分內；
+第一輪真正掃描應印 `[schedule] 排程時鐘基準 None → Asia/Taipei，本輪不做漏跑偵測` 且無排程監督告警。
