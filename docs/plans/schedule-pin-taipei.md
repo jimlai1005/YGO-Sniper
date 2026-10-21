@@ -324,6 +324,21 @@ def slot_check(band: str = typer.Option("std", help="std（低價帶）或 high�
 
 ---
 
+## Task 5 @inline：wrapper 腳本防「執行中被改寫」（2026-10-21 事故，部署前做）
+
+**事故：** Task 2 的 builder 在 00:36 CDT 原地改寫 `scripts/run_daily.sh`，當時 00:30 那輪正在跑（bash 卡在等 python）。bash 是**邊執行邊依位元組位移讀檔**的：python 回來後 bash 從舊位移 8752 繼續讀，新檔案在那裡是 `write_last_run_ledger` 函式中間 → 接著讀到「開始」echo 與 python 那行 → **同一輪又跑了一次 daily**（log 00:37:08 第二個「開始」），而第一輪沒有「結束」行、ledger 沒寫（`data/last_run_exit` 停在 10-20 22:34）。外顯是「多推一次、監督帳本漏一筆」，沒有任何錯誤訊息——靜默失敗。
+
+**修法（結構性，不靠「記得別改」）：** 三支 wrapper 把 `set -uo pipefail` 之後的**全部內容**包進 `main() { … }`，檔案最後一行 `main "$@"; exit $?`。bash 必須讀完整個 `main` 的定義（到閉合大括號）才會開始執行，之後檔案怎麼改都與這次執行無關。注意：
+- `trap 'rm -rf "$LOCK_DIR"' EXIT` 留在 `main` 內原位即可（trap 是行程層級，不受函式作用域影響）。
+- `exit 0`／`exit 1`／`exit $STATUS` 在函式內照樣結束整個腳本，不用改成 `return`。
+- 函式內的 `local` 不要亂加到原本的全域變數上（`NOTIFY_ATTEMPTED` 等要被 `write_last_run_ledger` 讀到）。
+- `main "$@"` 必須是檔案**最後一個非空行**；測試用正規式釘住：`tests/test_run_daily_script.py` 加一條，對三支 wrapper 斷言（a）存在 `^main\(\) \{` 行，（b）最後一個非空行是 `main "$@"; exit $?`，（c）`set -uo pipefail` 之後、`main() {` 之前沒有任何非註解的可執行行（只允許註解與空行）。
+- 既有的 run_daily 沙盒測試全部要照常綠（行為零變化）。
+
+**附帶規則（寫進 CLAUDE.md 第五節，一行）：** 改 `scripts/*.sh` 之前先 `ls data/run_daily.lock data/run_high.lock`，有鎖就等；就算有 `main()` 保護，也不要在正式輪次跑到一半時部署 plist。
+
+驗收：`bash -n` 三支；`.venv/bin/pytest tests/test_run_daily_script.py` 全綠（含新測試先紅後綠）；`make test` 全綠；commit：`fix(scripts): wrapper 全部包進 main()，杜絕執行中被改寫導致 bash 讀錯位移（2026-10-21 重跑事故）`。
+
 ## Task 4（主線程）：部署與驗收
 
 - [ ] `make unschedule && make schedule && make unschedule-high && make schedule-high`（載入新 plist；這會動使用者的 launchd 服務，使用者已在 2026-10-20 要求修這個問題）。
