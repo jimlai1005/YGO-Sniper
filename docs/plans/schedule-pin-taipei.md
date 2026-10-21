@@ -288,6 +288,10 @@ def slot_check(band: str = typer.Option("std", help="std（低價帶）或 high�
     （`run_high.sh` 用 `--band high`。）`.venv` 不存在的情況留給既有的檢查（它會送失敗通知）。
   - `Makefile:49` echo 改成「每 15 分鐘叫醒一次，由 ygo-sniper slot-check 依台北網格決定是否掃描」。
 
+- [ ] **Step 4b（2026-10-21 主線程裁決，builder 抓到 plan 的靜默失敗）: 閘門只在 launchd 觸發時生效**
+  原 Step 4 的閘門無條件跑在 `acquire_lock` 之前，會把 dashboard 的 `run_daily.sh --catchup`（`web/app.py` 的補跑按鈕）與使用者手動執行一起靜默吞掉——dashboard 回「已啟動」但什麼都沒跑，正是 CLAUDE.md 第五節的病。修法：閘門包在 `if [ "${YGO_SLOT_GATE:-0}" = "1" ]; then … fi` 裡，`YGO_SLOT_GATE=1` **只**由兩支 plist 的 `EnvironmentVariables` 設定；dashboard subprocess 與手動 shell 沒有這個變數，永遠直接往下跑。`tests/test_run_daily_script.py` 既有兩條（watchdog 124、重入跳過）因此不受影響、不改；另加兩條：(a) `YGO_SLOT_GATE=1` 且 stub 的 `slot-check` 回 3 → wrapper exit 0、log 無新行、無鎖目錄、ledger 未寫；(b) 未設變數時即使 stub 回 3 也照常往下跑。
+  附帶：`plutil -lint` 對 XML 註解內的 `--` 放行但 `plistlib` 會拒絕，plist 的驗收以 pytest（`plistlib.load`）為準；`Makefile` 的 `schedule-high` echo 一併改正（plan 漏列）。
+
 - [ ] **Step 5: plist**
   兩支 plist 的 `StartCalendarInterval` 陣列改成：
   ```xml
