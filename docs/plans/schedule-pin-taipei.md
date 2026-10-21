@@ -355,6 +355,25 @@ def slot_check(band: str = typer.Option("std", help="std（低價帶）或 high�
 3. `CLAUDE.md` 第五節加一項：shell wrapper 裡 `$VAR` 後面接全形標點必須寫 `${VAR}`；每支 wrapper 都要有一條「stub 成功路徑跑到結束行＋ledger」的沙盒測試，不能只靠 `bash -n`（`bash -n` 抓不到 `set -u` 的執行期錯誤）。
 驗收：新測試對修正前的 `run_high.sh`（`git show 917c74a:scripts/run_high.sh`）要紅、對現在的要綠；`.venv/bin/pytest tests/test_run_daily_script.py tests/test_run_high_script.py` 全綠；`make test` 全綠；commit：`test(scripts): run_high.sh 沙盒端到端 + 禁止 $VAR 緊接全形字（高價帶自上線以來每輪尾段靜默死亡）`。
 
+## Task 8 @inline：複審修正（2026-10-21 reviewer：1 Critical、2 Warning、3 Suggestion）
+
+- [ ] **C1 `should_run` 對「最近一格被睡掉」不補跑**（`schedule_watch.py` 約 271–292）。`missed_slots_between` 刻意排除 `_latest_slot_at_or_before(now)` 那一格（前提是「這一輪自己代表這格」），但閘門不放行時沒有任何輪次代表它。實跑：prev 09:30、11:50 睡醒 → False；launchd 晚 8 分（13:38）觸發 → False；下一輪推「漏跑 1 個時段」。**修法**：判準改成「`(prev, now]` 之間網格上有沒有任何一格」——
+  ```python
+  if on_slot: return True
+  if not prev_started: return False
+  try: prev = datetime.fromisoformat(prev_started)
+  except (TypeError, ValueError): return False
+  try: return next_slot_after(prev, slots) <= now
+  except TypeError: return False
+  ```
+  `tests/test_schedule_watch.py:235` 那條 `should_run(13:45, prev=11:30) is False` 是錯的預期，改成 `True`（13:30 自 11:30 後沒人跑過）；補測試：prev 09:30／now 11:50 → True；prev 前一天 22:30／now 09:45 → True；prev 13:31（剛跑過）／now 13:45 → False；prev 13:31／now 15:38（晚 8 分）→ True；prev 18:00／now 18:40 → True；高價帶 prev 10:00／now 12:20 → True。`should_run` docstring 改寫判準。
+- [ ] **W1 slot-check rc 非 0 非 3 時放行但無痕跡**（`run_daily.sh`／`run_high.sh` 閘門段）。放行是對的，但要留痕：`rc` 非 0 非 3 時 `echo "[$(date '+%H:%M:%S')] slot-check 異常 rc=${rc}，本輪放行照掃（請查 ygo-sniper slot-check）" >> "$LOG_FILE"`（注意 `${rc}` 加大括號，後面是全形「，」）。沙盒測試（`test_run_daily_script.py`／`test_run_high_script.py`）：`YGO_SLOT_GATE=1`、stub 回 rc=1 → 照掃、log 含 `slot-check 異常 rc=1`。
+- [ ] **W2 `slot-check` 不是唯讀**（`cli.py` 的 `slot_check`，`Store(...)` 建構會跑 `executescript(_SCHEMA)` 與回填 SQL，一天 192 次取寫鎖）。改成直接 `sqlite3.connect(db_path, timeout=5)` 讀 `SELECT value FROM meta WHERE key = ?`，表不存在／任何 `sqlite3.Error` → 視為 `None`（沒有基準 → 只看格上）；不建 `Store`。docstring、`CLAUDE.md:514` 附近、`docs/run_daily.md:140` 附近的「只讀 meta」改成「以唯讀連線讀 meta 一個鍵，不建 Store、不跑 schema」。`TestSlotCheck` 補一條：db 檔不存在時 rc 為 3（不在格上）或 0（在格上），不拋例外。
+- [ ] **S1 過時註解**：`schedule_watch.py:81-88` 關於「與 plist 對齊」「`test_windows_match_plist`」的註解改成「網格只在這裡；plist 每 15 分叫醒，`test_plists_fire_every_15_minutes_all_day` 釘 plist 形狀，`test_all_slots_are_multiples_of_15_minutes` 釘網格可被打到」。
+- [ ] **S2 保護分支吞掉 watchdog 帳本**（`pipeline.py` 約 1033–1042）：保護分支 return 之前，照正常路徑把 `_read_watchdog_ledger(high_band=…)` 折進 pending（`resolve_alert(pending_raw, watchdog_msg)` → `set_meta(pending_key, …)` → `_consume_watchdog_ledger`），只是不做漏格偵測。測試：保護分支＋存在的 `last_run_exit`（exit 124）→ pending 含 watchdog 訊息、檔案被消耗。
+- [ ] **S3 測試強度**：`test_clock_change_protection_is_per_band_high_first_run` 的 pending 預設改成非空 JSON（`{"text":"舊告警","missed":1}`），斷言保護分支後 pending **原值不變**（S2 做完後：沒有 watchdog 帳本時原值不變）。
+- [ ] 驗收：`TZ=America/Chicago` 與 `TZ=Asia/Taipei` 各跑 `tests/test_schedule_watch.py tests/test_pipeline_catchup.py tests/test_cli_notify.py tests/test_run_daily_script.py tests/test_run_high_script.py` 全綠；`.venv/bin/ygo-sniper slot-check --band std; echo $?` 仍只印 rc；`make test` 全綠；commit：`fix(schedule): should_run 改為「(prev, now] 有格就跑」（睡過最近一格不補跑）；slot-check 唯讀連線；閘門異常留痕；保護分支保留 watchdog 帳本`。**純 Python＋wrapper，不需重載 plist**（wrapper 是執行時讀檔；改之前先確認無鎖）。
+
 ## Task 4（主線程）：部署與驗收
 
 > **進度（2026-10-21 14:05 台北）**：已 `make unschedule/schedule` 兩帶、重啟 dashboard。plist 驗證：Minute 0/15/30/45、`TZ=Asia/Taipei`、`YGO_SLOT_GATE=1`。14:00 刻度：低價帶 launchd runs=1、exit 0、log 無新行（靜默跳過 ✓）；高價帶如預期跑一次，但因全域保護鍵出假告警（→ Task 6）。
