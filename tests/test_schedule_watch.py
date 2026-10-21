@@ -764,6 +764,20 @@ def test_update_schedule_state_keeps_ledger_when_pending_write_fails(pipeline, m
     但 `_schedule_alert` 也不會被設成新值——這是可接受的降級：寧可這一輪
     沒看到告警文字，也不要在 pending 沒寫成功的情況下先把唯一的證據刪掉。
     """
+    # 2026-10-21 複審抓到：fixture 沒設時鐘鍵時這條測試走的是「基準切換保護分支」，
+    # 正常路徑的順序根本沒人守。先把鍵設好，讓它真的走正常路徑；保護分支另有下一條。
+    pipeline.store.set_meta(CLOCK_TZ_KEY, "Asia/Taipei")
+    _assert_ledger_survives_pending_write_failure(pipeline, monkeypatch)
+
+
+def test_clock_change_branch_also_keeps_ledger_when_pending_write_fails(pipeline, monkeypatch):
+    """同一個順序，在基準切換保護分支（時鐘鍵未設）上也要成立——S2 讓保護分支
+    照樣折 watchdog 帳本，所以它也有「先落帳、再刪證據」的義務。"""
+    assert pipeline.store.get_meta(CLOCK_TZ_KEY) is None
+    _assert_ledger_survives_pending_write_failure(pipeline, monkeypatch)
+
+
+def _assert_ledger_survives_pending_write_failure(pipeline, monkeypatch):
     ledger_path = pipeline.cfg.db_path.parent / "last_run_exit"
     ledger_path.write_text(
         '{"exit": 124, "notify_attempted": false, "notify_http": "000", '
