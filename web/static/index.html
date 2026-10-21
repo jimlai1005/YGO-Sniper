@@ -2351,14 +2351,23 @@ async function scanHighNow(){
 
 /** 漏跑視窗狀態（`/api/schedule/gap`）。沒有紀錄就隱藏；有但未補跑用 stale 色。 */
 async function pollGap(){
-  let g; try{ g = (await api("/api/schedule/gap")).gap; }catch(e){ return; }
+  let g, minSlots;
+  try{
+    const r = await api("/api/schedule/gap");
+    g = r.gap; minSlots = Number(r.min_missed_slots) || 2;
+  }catch(e){ return; }
   const pill = document.getElementById("gap-pill");
   if(!g){ pill.hidden = true; return; }
   const win = `${g.uncovered_from.slice(5,16).replace("T"," ")} ～ ${g.uncovered_to.slice(5,16).replace("T"," ")}`;
   pill.hidden = false;
   if(g.caught_up_at){
     pill.className = "pill";
-    pill.textContent = `上次漏跑 ${g.missed_slots} 格（${win}），已於 ${g.caught_up_at.slice(5,16).replace("T"," ")} 補跑`;
+    // caught_up_at 有兩種來源：達門檻 → 補跑模式跑過且回顧送達；未達門檻 → 正常輪掃完
+    // 直接收掉（沒多翻頁、沒回顧）。兩件事不能都叫「已補跑」。
+    const when = g.caught_up_at.slice(5,16).replace("T"," ");
+    pill.textContent = (g.missed_slots < minSlots)
+      ? `上次漏跑 ${g.missed_slots} 格（${win}），未達補跑門檻 ${minSlots}，已由 ${when} 的正常掃描收尾`
+      : `上次漏跑 ${g.missed_slots} 格（${win}），已於 ${when} 補跑`;
   }else{
     pill.className = "pill stale";
     pill.textContent = `⚠️ 漏跑 ${g.missed_slots} 格（${win}），尚未補跑`;

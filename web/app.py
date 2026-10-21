@@ -1384,7 +1384,15 @@ def trigger_daily_run():
 
 @app.get("/api/schedule/gap")
 def schedule_gap():
-    """漏跑視窗帳（`schedule_watch.GAP_WINDOW_KEY`）。null = 沒有紀錄。"""
+    """漏跑視窗帳（`schedule_watch.GAP_WINDOW_KEY`）。null = 沒有紀錄。
+
+    一併回 `min_missed_slots`：`caught_up_at` 有兩種來源——達門檻的帳是回顧**送達**後
+    標的，未達門檻的帳是正常輪掃完直接收掉的（沒有多翻頁、沒有回顧）。前端要靠
+    門檻值把兩種說成不同的話，不能都叫「已補跑」（兩本帳不能合併，CLAUDE.md 第五節）。
+    """
     from ygo_sniper.schedule_watch import GAP_WINDOW_KEY, decode_gap_record
 
-    return {"gap": decode_gap_record(store.get_meta(GAP_WINDOW_KEY))}
+    return {
+        "gap": decode_gap_record(store.get_meta(GAP_WINDOW_KEY)),
+        "min_missed_slots": int(cfg.scan.get("catchup_min_missed_slots", 2)),
+    }

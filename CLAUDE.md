@@ -296,6 +296,8 @@ JSON：這一輪的 exit code、結束時間、失敗通知有沒有送達。下
 - **誰消耗**：`cli._send_gap_review`——推「漏跑期間狙擊卡成交回顧」，**確認送達後**才標
   `caught_up_at`（第 7 項「送達才消耗」同一條規則）；送失敗就留著，下一輪自動再進補跑模式重送。
   期間內沒有任何狙擊成交（無訊息可送）則直接標。`notify.enabled=false` 時不標。
+  **`caught_up_at` 因此有兩種來源**（這裡的送達，與下一條的「未達門檻收尾」）；dashboard pill 與
+  `/api/schedule/gap` 的 `min_missed_slots` 把兩者說成不同的話，不要都叫「已補跑」。
 - **同基準**：排程帳是本地 naive，`card_watch_sale.sold_at` 是 UTC aware——`catchup.window_to_utc`
   先轉再比，不比字串。`sold_at` 為空字串的來源（`buyee_mercari`／`ruten`）無法判定是否在期間內，
   不計入，回顧訊息會明說。

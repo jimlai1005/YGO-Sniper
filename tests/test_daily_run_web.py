@@ -104,7 +104,9 @@ def test_schedule_gap_endpoint_returns_record_or_null(client):
     from ygo_sniper.schedule_watch import GAP_WINDOW_KEY
 
     c, app_mod = client
-    assert c.get("/api/schedule/gap").json() == {"gap": None}
+    first = c.get("/api/schedule/gap").json()
+    assert first["gap"] is None
+    assert first["min_missed_slots"] == int(app_mod.cfg.scan.get("catchup_min_missed_slots", 2))
     rec = {"uncovered_from": "2026-10-19T09:00:01", "uncovered_to": "2026-10-19T20:35:34",
            "missed_slots": 10, "first_slot": "2026-10-19T09:30:00", "last_slot": "2026-10-19T20:00:00",
            "detected_at": "2026-10-19T20:35:34", "caught_up_at": None}
