@@ -246,6 +246,8 @@ git commit -m "feat(dashboard): 版面重整——合併掃描按鈕、拿掉重
 
 ---
 
+> **進度（2026-10-20 23:15 CDT）**：Task 1 `2b9d63c`、Task 2 `2f003c2` 完成。Task 3 主線程：`launchctl kickstart -k` 重啟後新行程 pid 84779，`openapi.json` 含 `/api/scan-both`、`/api/daily-run`、`/api/schedule/gap`；Chrome 實看 8321：一顆「立即掃描」＋「補跑 daily」、無重新整理、統計只剩「待處理 71」與「匯率 JPY→TWD 0.206 · 更新 22:03」、分頁 待處理／已出價／觀察中／全部＋賣家／狙擊／其他、篩選三排、71 張卡正常、鑑價留訊號頁；「其他」分頁含攤提／破口價／怎麼用／關鍵字搜尋／平台研究。全部符合九項。沒有實際按補跑（會再跑一輪推 Telegram），路由存在已由 openapi 證實。
+
 ## Task 3（主線程）：重啟 8321 dashboard 服務並用瀏覽器驗收
 
 - [ ] `launchctl kickstart -k gui/$(id -u)/com.jim.ygosniper.dashboard`，`sleep 3`，`curl -s -o /dev/null -w "%{http_code}" localhost:8321/api/schedule/gap` 必須 200（舊行程回 404）。
