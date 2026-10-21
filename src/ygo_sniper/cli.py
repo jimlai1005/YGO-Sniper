@@ -56,21 +56,31 @@ def _seller_cell(seller_key: str) -> str:
 def daily(
     skip_comps: bool = typer.Option(False, help="跳過行情更新（快速重跑用）"),
     no_notify: bool = typer.Option(False, help="只掃不推播"),
+    catchup: bool = typer.Option(
+        False, "--catchup",
+        help="補跑模式：每個查詢多翻一頁、強制重挖狙擊成交、推漏跑期間成交回顧",
+    ),
 ):
-    """每小時那一鍵：更新行情 → 掃描 → 推播 Telegram（沒好貨就完全靜默）。
+    """排程那一鍵（時段見 scripts/com.jim.ygosniper.plist）：更新行情 → 掃描 → 推播 Telegram（沒好貨就完全靜默）。
 
-    指令名維持 `daily` 是為了不破壞既有的 launchd plist 與任何手動習慣；
-    實際排程已改成每小時（scripts/com.jim.ygosniper.plist）。
+    指令名維持 `daily` 是為了不破壞既有的 launchd plist 與任何手動習慣。
+    漏跑達門檻時（或帶 `--catchup`）自動進補跑模式，見 catchup.py。
     """
     pipe = Pipeline()
     try:
-        result = pipe.scan(skip_comps=skip_comps)
+        result = pipe.scan(skip_comps=skip_comps, catchup=catchup)
         _print_scan(result)
-        _mine_snipes_daily(pipe)
+        cu = result.get("catchup") or {}
+        if cu.get("active"):
+            _mine_snipes_daily(pipe, force=True)
+        else:
+            _mine_snipes_daily(pipe)
         _backfill_comps_daily(pipe)
         _refresh_market_drift_daily(pipe)
         if not no_notify:
             _run_notifications(pipe, result, band="std")
+            if cu.get("active"):
+                _send_gap_review(pipe, cu.get("record"))
     finally:
         pipe.close()
 
@@ -146,8 +156,11 @@ def _print_rule_counts(outcome) -> None:
 _SNIPE_MINE_META_KEY = "snipe_last_mined_date"
 
 
-def _mine_snipes_daily(pipe) -> None:
+def _mine_snipes_daily(pipe, *, force: bool = False) -> None:
     """每天重挖一次市場成交檔案。**失敗只警告，絕不影響掃描與推播。**
+
+    `force=True`（補跑模式）略過「今天挖過了」的門：漏跑期間成交的東西
+    要趕在平台檔案滾掉前進表，回顧訊息也是讀這張表。
 
     重挖的理由不是「怕漏新成交」（新成交在架時就會被規則 4 抓到），而是
     **平台的檔案會滾掉**：150-180 天前的成交會被 Yahoo 刪除，沒存下來就
@@ -161,8 +174,10 @@ def _mine_snipes_daily(pipe) -> None:
     if not watches:
         return
     today = datetime.now(UTC).date().isoformat()
-    if pipe.store.get_meta(_SNIPE_MINE_META_KEY) == today:
+    if not force and pipe.store.get_meta(_SNIPE_MINE_META_KEY) == today:
         return
+    if force:
+        print("[catchup] 強制重挖狙擊成交檔案（補跑模式）")
     problems = 0
     for w in watches:
         try:
@@ -402,6 +417,36 @@ def _send_schedule_alert(pipe: Pipeline) -> None:
         console.print("[yellow]已推播排程監督告警[/yellow]")
     else:
         console.print("[red]排程監督告警送出失敗——留在 pending 帳裡，下一輪會一併重送[/red]")
+
+
+def _send_gap_review(pipe, rec: dict | None) -> None:
+    """補跑模式的收尾：推「漏跑期間狙擊卡成交回顧」，**送達才標 caught_up**。
+
+    沒有帳（`--catchup` 手動跑、帳上沒視窗）→ 什麼都不送、不標。
+    訊息為 None（期間內沒有任何狙擊卡成交）→ 不送，但標 caught_up（沒有東西需要送達）。
+    送失敗 → 不標，下一輪 `daily` 會因帳上仍是未補跑而再次進補跑模式重試
+    （與 `_send_schedule_alert`「送達才消耗」同一條規則）。
+    """
+    from datetime import datetime
+
+    from .catchup import format_gap_review, gap_sales
+    from .schedule_watch import GAP_WINDOW_KEY, mark_gap_caught_up
+
+    if not rec:
+        return
+    if not bool(pipe.cfg.notify.get("enabled", True)):
+        console.print("[yellow]補跑回顧未送出（notify.enabled=false），視窗保留為未補跑[/yellow]")
+        return
+    text = format_gap_review(rec, gap_sales(pipe.store, rec["uncovered_from"], rec["uncovered_to"]))
+    if text is None:
+        console.print("[dim]漏跑期間沒有狙擊卡成交，無回顧可送；視窗標記為已補跑[/dim]")
+        pipe.store.set_meta(GAP_WINDOW_KEY, mark_gap_caught_up(pipe.store.get_meta(GAP_WINDOW_KEY), datetime.now()))
+        return
+    if pipe.notifier.send_alert(text):
+        pipe.store.set_meta(GAP_WINDOW_KEY, mark_gap_caught_up(pipe.store.get_meta(GAP_WINDOW_KEY), datetime.now()))
+        console.print("[yellow]已推播漏跑期間狙擊卡成交回顧，視窗標記為已補跑[/yellow]")
+    else:
+        console.print("[red]漏跑回顧送出失敗——視窗保留為未補跑，下一輪會重試[/red]")
 
 
 @app.command()

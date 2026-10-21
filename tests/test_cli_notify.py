@@ -306,3 +306,156 @@ def test_notifier_send_is_blocked_at_the_boundary(monkeypatch):
     # conftest 的 autouse fixture 把 send 換成會爆的 stub，所以這裡叫的是
     # 模組載入時就抓住的**原始**函式：它必須自己回 False 且完全不碰 httpx。
     assert _ORIGINAL_SEND(n, "hi") is False
+
+
+# ---------------------------------------------------------------------------
+# 補跑模式（daily --catchup）：強制重挖、回顧訊息、送達才標已補跑
+# ---------------------------------------------------------------------------
+_GAP_REC = {
+    "uncovered_from": "2026-10-19T09:00:01", "uncovered_to": "2026-10-19T20:35:34",
+    "missed_slots": 10, "first_slot": "2026-10-19T09:30:00", "last_slot": "2026-10-19T20:00:00",
+    "detected_at": "2026-10-19T20:35:34", "caught_up_at": None,
+}
+
+
+class _CatchupPipe:
+    """daily() 會碰到的面：真的 Store（才能驗帳）＋假 notifier、假 scan。"""
+
+    def __init__(self, store, *, alert_ok: bool, active: bool = True, rec=_GAP_REC):
+        self.cfg = FakeCfg()
+        self.store = store
+        self.notifier = FakeNotifier(alert_ok=alert_ok)
+        self.sources = {}
+        self._cu = {"active": active, "record": rec}
+        self.scan_kwargs: dict = {}
+        self.closed = False
+
+    def scan(self, **kw):
+        self.scan_kwargs = kw
+        return {**make_result(), "catchup": self._cu}
+
+    def close(self):
+        self.closed = True
+
+
+def _catchup_env(monkeypatch, tmp_path, *, alert_ok: bool, active: bool = True, with_sale: bool = True):
+    """回傳 (pipe, mine_calls)。除了 `_send_gap_review` 之外的 daily 子步驟全部換成記錄替身。"""
+    import json
+    import time
+
+    from ygo_sniper import cli
+    from ygo_sniper.schedule_watch import GAP_WINDOW_KEY
+    from ygo_sniper.store import Store
+
+    monkeypatch.setenv("TZ", "Asia/Taipei")
+    time.tzset()
+    store = Store(tmp_path / "t.db")
+    store.set_meta(GAP_WINDOW_KEY, json.dumps(_GAP_REC))
+    if with_sale:
+        wid = store.insert_card_watch(grader="ARS", grade=10.0, grade_label="10", name_ja="魔法の筒")
+        store.upsert_card_watch_sale(
+            wid, "buyee_yahoo:a1", tier="exact", title="t", url="https://example.invalid/a1",
+            site="buyee_yahoo", seller_id="", price_native=3441, currency="JPY",
+            sold_at="2026-10-19T03:00:00+00:00", bid_count=1, sale_kind="auction", source="yahoo_closed",
+        )
+    pipe = _CatchupPipe(store, alert_ok=alert_ok, active=active)
+    mine_calls: list[dict] = []
+    monkeypatch.setattr(cli, "Pipeline", lambda: pipe)
+    monkeypatch.setattr(cli, "_print_scan", lambda r: None)
+    monkeypatch.setattr(cli, "_mine_snipes_daily", lambda p, **kw: mine_calls.append(kw))
+    monkeypatch.setattr(cli, "_backfill_comps_daily", lambda p: None)
+    monkeypatch.setattr(cli, "_refresh_market_drift_daily", lambda p: None)
+    monkeypatch.setattr(cli, "_run_notifications", lambda p, r, band: None)
+    return pipe, mine_calls
+
+
+def _caught_up(pipe):
+    from ygo_sniper.schedule_watch import GAP_WINDOW_KEY, decode_gap_record
+    return decode_gap_record(pipe.store.get_meta(GAP_WINDOW_KEY))["caught_up_at"]
+
+
+def test_daily_catchup_forces_mining_and_marks_caught_up_only_after_delivery(monkeypatch, tmp_path):
+    from ygo_sniper import cli
+
+    pipe, mine_calls = _catchup_env(monkeypatch, tmp_path, alert_ok=True)
+    cli.daily(skip_comps=False, no_notify=False, catchup=True)
+    assert pipe.scan_kwargs == {"skip_comps": False, "catchup": True}
+    assert mine_calls == [{"force": True}]
+    assert len(pipe.notifier.alerts) == 1 and "漏跑期間狙擊卡成交回顧" in pipe.notifier.alerts[0]
+    assert "3,441" in pipe.notifier.alerts[0]
+    assert _caught_up(pipe) is not None
+    assert pipe.closed
+
+
+def test_daily_catchup_send_failure_keeps_window_uncaught(monkeypatch, tmp_path):
+    from ygo_sniper import cli
+
+    pipe, mine_calls = _catchup_env(monkeypatch, tmp_path, alert_ok=False)
+    cli.daily(skip_comps=False, no_notify=False, catchup=True)
+    assert len(pipe.notifier.alerts) == 1          # 確實嘗試送過
+    assert _caught_up(pipe) is None                # 但沒送達 → 帳不動，下一輪重試
+
+
+def test_daily_catchup_nothing_to_review_marks_without_sending(monkeypatch, tmp_path):
+    from ygo_sniper import cli
+
+    pipe, _ = _catchup_env(monkeypatch, tmp_path, alert_ok=True, with_sale=False)
+    cli.daily(skip_comps=False, no_notify=False, catchup=False)
+    assert pipe.notifier.alerts == []
+    assert _caught_up(pipe) is not None
+
+
+def test_daily_without_catchup_does_not_force_or_review(monkeypatch, tmp_path):
+    from ygo_sniper import cli
+
+    pipe, mine_calls = _catchup_env(monkeypatch, tmp_path, alert_ok=True, active=False)
+    cli.daily(skip_comps=False, no_notify=False, catchup=False)
+    assert mine_calls == [{}]            # 非補跑：維持原呼叫形狀，不帶 force
+    assert pipe.notifier.alerts == []
+    assert _caught_up(pipe) is None
+
+
+def test_daily_catchup_no_notify_does_not_consume_the_window(monkeypatch, tmp_path):
+    from ygo_sniper import cli
+
+    pipe, _ = _catchup_env(monkeypatch, tmp_path, alert_ok=True)
+    cli.daily(skip_comps=False, no_notify=True, catchup=True)
+    assert pipe.notifier.alerts == [] and _caught_up(pipe) is None
+
+
+def test_gap_review_not_sent_when_notify_disabled(monkeypatch, tmp_path):
+    from ygo_sniper import cli
+
+    pipe, _ = _catchup_env(monkeypatch, tmp_path, alert_ok=True)
+    pipe.cfg = FakeCfg(enabled=False)
+    cli._send_gap_review(pipe, _GAP_REC)
+    assert pipe.notifier.alerts == [] and _caught_up(pipe) is None
+
+
+def test_mine_snipes_force_bypasses_once_a_day_gate(monkeypatch, tmp_path):
+    from datetime import UTC, datetime
+
+    from ygo_sniper import card_snipe, cli
+    from ygo_sniper.store import Store
+
+    store = Store(tmp_path / "t.db")
+    store.insert_card_watch(grader="ARS", grade=10.0, grade_label="10", name_ja="魔法の筒")
+    store.set_meta(cli._SNIPE_MINE_META_KEY, datetime.now(UTC).date().isoformat())   # 今天已挖過
+    calls: list[int] = []
+
+    class _Res:
+        new_sales = 0
+        ok = True
+        problems: list = []
+
+    monkeypatch.setattr(card_snipe, "mine_sold_archive", lambda *a, **k: calls.append(1) or _Res())
+
+    class _P:
+        pass
+
+    pipe = _P()
+    pipe.store, pipe.sources = store, {}
+    cli._mine_snipes_daily(pipe)
+    assert calls == []                       # 預設：今天挖過就跳過
+    cli._mine_snipes_daily(pipe, force=True)
+    assert calls == [1]                      # 補跑模式：強制重挖

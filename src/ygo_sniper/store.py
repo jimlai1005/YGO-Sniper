@@ -2053,6 +2053,14 @@ class Store:
         with self._conn() as c:
             return [dict(r) for r in c.execute(q, params).fetchall()]
 
+    def card_watch_sale_undated_sources(self) -> list[str]:
+        """成交表裡 `sold_at` 為空字串的來源清單（排序）。回顧訊息據此誠實標註哪些管道算不進去。"""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT source FROM card_watch_sale WHERE sold_at = '' ORDER BY source"
+            ).fetchall()
+        return [r[0] for r in rows if r[0]]
+
     def upsert_card_watch_evidence(
         self, watch_id: int, url: str, *, status: str, title: str = "",
         price_native: float | None = None, currency: str = "JPY",
