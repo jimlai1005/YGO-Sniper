@@ -2,7 +2,7 @@
 
 import json
 import plistlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -110,7 +110,7 @@ def test_missed_slots_between_lists_exact_missed_times():
         "2026-08-10T15:45:00", "2026-08-10T15:48:00", _dt("2026-08-10T18:30:00")
     )
     assert msg is not None
-    assert "漏跑 2 個時段（17:30、18:00）" in msg
+    assert "漏跑 2 個時段（台北 17:30、18:00）" in msg
 
 
 def test_missed_slots_between_excludes_the_current_runs_own_slot():
@@ -158,7 +158,7 @@ def test_alert_when_evening_slots_were_skipped():
         "2026-08-10T20:00:00", "2026-08-10T20:49:00", _dt("2026-08-10T23:00:44")
     )
     assert msg is not None
-    assert "漏跑 4 個時段（20:30、21:00、21:30、22:00）" in msg
+    assert "漏跑 4 個時段（台北 20:30、21:00、21:30、22:00）" in msg
 
 
 def test_alert_when_previous_run_never_finished():
@@ -220,47 +220,65 @@ def test_resolve_alert_only_caller_can_clear_pending():
 
 
 # ---------------------------------------------------------------------------
-# Fix 5：_ALL_SLOTS 是 plist 的手抄本，兩邊必須實測相等，不能只靠註解提醒
-#
-# **必須比對 `_ALL_SLOTS` 本尊**，不能自己重新展開 `_WINDOWS` 再比一份副本
-# ——`next_slot_after` 讀的是 `_ALL_SLOTS`，測試比另一份獨立算出來的複本，
-# 等於守門守在偵測器根本不會走到的地方（跟這次修的 Fix 1 同一種錯：拿
-# 「重新推導出來的值」冒充「真正被使用的那個值」去比較）。
-# 2026-08-12 複查時用 mutant 證實過：只改 `_ALL_SLOTS` 漏掉 22:30、
-# `_WINDOWS` 與 plist 都不動，若測試比的是重新展開的 `_WINDOWS`，這條測試
-# 仍然綠燈，但 22:30 那個尖峰時段的偵測會真的失聰。
+# 2026-10-21 排程時鐘釘台北（docs/plans/schedule-pin-taipei.md Task 2）：
+# 取代舊的 test_windows_match_plist／test_high_windows_match_high_plist。
+# 舊設計把網格手抄進 plist（StartCalendarInterval 的 Hour/Minute 是 launchd 依
+# 系統時區解讀的牆上時間），所以要釘「code 網格 == plist 網格」。新設計網格只活在
+# `_WINDOWS`／`_HIGH_WINDOWS` 一處（台北基準，由 `slot-check` 判斷），plist 只負責
+# 每 15 分叫醒，舊的比對測試釘的是已不存在的設計，刪除。
 # ---------------------------------------------------------------------------
-def test_windows_match_plist():
-    with open(_PLIST, "rb") as f:
-        plist = plistlib.load(f)
-    plist_slots = {
-        e["Hour"] * 60 + e["Minute"] for e in plist["StartCalendarInterval"]
-    }
-    code_slots = set(_ALL_SLOTS)
-    assert code_slots == plist_slots, (
-        f"schedule_watch._ALL_SLOTS 與 {_PLIST.name} 的 StartCalendarInterval 不同步：\n"
-        f"code only: {sorted(code_slots - plist_slots)}\n"
-        f"plist only: {sorted(plist_slots - code_slots)}"
-    )
+def test_should_run_on_grid_slot_with_tolerance():
+    prev = "2026-10-21T11:30:00"
+    assert sw.should_run(datetime(2026, 10, 21, 13, 30, 0), prev) is True
+    assert sw.should_run(datetime(2026, 10, 21, 13, 36, 59), prev) is True    # launchd 漂移 +7 內
+    assert sw.should_run(datetime(2026, 10, 21, 13, 45, 0), prev) is False    # 不在格上、也沒漏格
+    assert sw.should_run(datetime(2026, 10, 21, 12, 0, 0), prev) is False
 
 
-# ---------------------------------------------------------------------------
-# Task 6（高價帶排程）：_HIGH_ALL_SLOTS 是 com.jim.ygosniper.high.plist 的手抄本，
-# 與低價帶 test_windows_match_plist 同一套理由與同一種 mutant 防線。
-# ---------------------------------------------------------------------------
-def test_high_windows_match_high_plist():
-    with open(_HIGH_PLIST, "rb") as f:
-        plist = plistlib.load(f)
-    plist_slots = {
-        e["Hour"] * 60 + e["Minute"] for e in plist["StartCalendarInterval"]
-    }
-    code_slots = set(_HIGH_ALL_SLOTS)
-    assert code_slots == plist_slots, (
-        f"schedule_watch._HIGH_ALL_SLOTS 與 {_HIGH_PLIST.name} 的 "
-        f"StartCalendarInterval 不同步：\n"
-        f"code only: {sorted(code_slots - plist_slots)}\n"
-        f"plist only: {sorted(plist_slots - code_slots)}"
-    )
+def test_should_run_tolerance_boundary_is_exclusive_at_7_minutes():
+    """[slot, slot + 7)：13:37:00 已過界（分鐘數 7 不小於 tolerance）。"""
+    prev = "2026-10-21T11:30:00"
+    assert sw.should_run(datetime(2026, 10, 21, 13, 36, 0), prev) is True
+    assert sw.should_run(datetime(2026, 10, 21, 13, 37, 0), prev) is False
+
+
+def test_should_run_catches_up_after_sleep():
+    """睡醒時 launchd 補觸發一次；即使不在格上，只要上一輪之後有格被跳過就要跑。"""
+    prev = "2026-10-21T09:30:00"
+    assert sw.should_run(datetime(2026, 10, 21, 14, 7, 0), prev) is True      # 漏了 11:30、13:30
+
+
+def test_should_run_without_baseline_runs_only_on_slot():
+    assert sw.should_run(datetime(2026, 10, 21, 13, 30, 0), None) is True
+    assert sw.should_run(datetime(2026, 10, 21, 13, 45, 0), None) is False
+
+
+def test_should_run_high_band_uses_high_grid():
+    assert sw.should_run(datetime(2026, 10, 21, 18, 15, 0), None, slots=_HIGH_ALL_SLOTS) is True
+    assert sw.should_run(datetime(2026, 10, 21, 18, 0, 0), None, slots=_HIGH_ALL_SLOTS) is False
+
+
+def test_all_slots_are_multiples_of_15_minutes():
+    """plist 改成每 15 分觸發後，網格每一格都必須打得到。"""
+    assert all(m % 15 == 0 for m in _ALL_SLOTS)
+    assert all(m % 15 == 0 for m in _HIGH_ALL_SLOTS)
+
+
+def test_plists_fire_every_15_minutes_all_day():
+    """取代舊的 test_windows_match_plist／test_high_windows_match_high_plist：
+    網格不再寫在 plist 裡（會跟著系統時區跑），plist 只負責每 15 分叫醒 slot-check。"""
+    for path in (_PLIST, _HIGH_PLIST):
+        with open(path, "rb") as f:
+            intervals = plistlib.load(f)["StartCalendarInterval"]
+        assert [d.get("Minute") for d in intervals] == [0, 15, 30, 45]
+        assert all("Hour" not in d for d in intervals)
+
+
+def test_plists_pin_taipei_timezone_env():
+    for path in (_PLIST, _HIGH_PLIST):
+        with open(path, "rb") as f:
+            assert plistlib.load(f)["EnvironmentVariables"]["TZ"] == "Asia/Taipei"
+
 
 
 def test_high_windows_do_not_overlap_low_band_windows():
@@ -840,3 +858,12 @@ def test_gap_needs_catchup_threshold():
     rec["caught_up_at"] = "2026-10-19T21:15:00"
     assert sw.gap_needs_catchup(rec, min_missed_slots=2) is False
     assert sw.gap_needs_catchup(None, min_missed_slots=2) is False
+
+
+def test_format_missed_labels_taipei_in_both_shapes():
+    """告警文字的時間是台北牆上時間；使用者人在 Dallas/LA 時看到「17:30」會以為是當地時間。"""
+    few = [_dt("2026-10-21T15:30:00"), _dt("2026-10-21T17:30:00")]
+    assert sw._format_missed(few) == "漏跑 2 個時段（台北 15:30、17:30）"
+    many = [datetime(2026, 10, 20, 9, 30) + timedelta(hours=2 * i) for i in range(7)]
+    text = sw._format_missed(many)
+    assert text.startswith("漏跑 7 個時段（台北 ")

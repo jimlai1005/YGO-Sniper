@@ -19,6 +19,11 @@
 
 set -uo pipefail
 
+# 排程時鐘釘台北（docs/plans/schedule-pin-taipei.md）：bash 的 date、ledger 的 finished_at、
+# Python 內所有未指定時區的 datetime.now() 都跟著變成台北。Python 端排程邏輯另有
+# clock.schedule_now() 自己釘，這行只是讓 log 與帳本看起來一致。
+export TZ=Asia/Taipei
+
 PROJECT_DIR="$HOME/projects/ygo-sniper"
 LOG_DIR="$PROJECT_DIR/data/logs"
 # log 仍然一天一個檔（現在是一天 24 段而不是 1 段），14 天輪替邏輯照舊可用
@@ -44,6 +49,23 @@ mkdir -p "$LOG_DIR"
 # 另一個可能失敗的動作，不值得——真的踩到這裡，代表機器本身出了問題，
 # 不是這支腳本能自己說清楚的層級。
 cd "$PROJECT_DIR" || exit 1
+
+# ---------------------------------------------------------------------------
+# 每 15 分鐘被 launchd 叫醒一次；不在台北網格上、也沒有漏格就靜默結束。
+# exit 0：這條路一天走 81 次，不寫 log、不碰鎖、不碰 ledger。
+# 網格只定義在 schedule_watch（Python），這裡不知道也不該知道。
+#
+# 只在 launchd 觸發時生效：YGO_SLOT_GATE=1 只由 plist 的 EnvironmentVariables 設定。
+# dashboard 的補跑按鈕（web/app.py 呼叫 `run_daily.sh --catchup`）與手動執行沒有這個
+# 變數，永遠直接往下跑——否則「使用者明確要求跑」會被閘門靜默吞掉，dashboard 還回
+# 「已啟動」（CLAUDE.md 第五節的靜默失敗）。
+# ---------------------------------------------------------------------------
+if [ "${YGO_SLOT_GATE:-0}" = "1" ] && [ -x .venv/bin/ygo-sniper ]; then
+    .venv/bin/ygo-sniper slot-check --band std >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 3 ]; then exit 0; fi
+    # rc 非 0 非 3（例如 db 壞掉）：放行往下跑，讓既有的失敗路徑大聲報錯，不要在這裡吞掉
+fi
 
 # ---------------------------------------------------------------------------
 # 防重入。改成每小時之後這是必需品：一輪掃描要開 Playwright（chromium），

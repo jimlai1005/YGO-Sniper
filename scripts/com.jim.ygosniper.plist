@@ -20,8 +20,8 @@
   但「醒來後立刻跑一次」很有價值——它抓的是當下的最新狀態，而且讓你闔蓋
   再打開就有結果，不必乾等一小時。兩個效果由同一個機制提供，所以選它。
 
-  想改時段就改下方 StartCalendarInterval 的 array。
-  改完要 unload 再 load 一次才生效。
+  想改時段改 schedule_watch._WINDOWS（網格不在這支 plist，見下方 StartCalendarInterval 的說明）。
+  改這支 plist 本身要 unload 再 load 一次才生效。
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,44 +38,27 @@
     </array>
 
     <!--
-      ── 排程按「日本拍賣實際的結標時刻」設計，不是均勻分佈 ──
+      ── 2026-10-21 起：launchd 只負責「每 15 分鐘叫醒一次」，網格不寫在這裡 ──
 
-      實測 63 筆競標的結標時刻（台灣時間）：18:00 有 12 筆、19:00 有 2 筆、
-      20:00 有 6 筆、21:00 有 22 筆、22:00 有 21 筆，**其餘 19 個小時全部是 0**。
-      日本賣家把結標時間排在當地晚上流量最高的時段（JST 19-23 = TPE 18-22）。
+      網格（台北時間）定義在 src/ygo_sniper/schedule_watch.py 的 `_WINDOWS`，唯一一處：
+        09:30-17:30 每 2 小時（抓新上架）、18:00-22:30 每 30 分（結標高峰：實測 63 筆
+        競標全部在台灣時間 18-22 點結標）、23:00-08:00 不跑。
+      run_daily.sh 取鎖之前先跑 `ygo-sniper slot-check（band=std）`：台北現在落在網格上
+      （±7 分容忍喚醒漂移），或上一輪之後有網格被跳過（筆電睡醒補觸發）→ 往下掃；
+      否則靜默結束（exit 0、不寫 log、不碰鎖、不碰帳本）。
 
-      使用者的作息：白天靠 Telegram、晚上 21-24 點才開 dashboard。
-      兩者疊起來的結論：
-
-      * 09:00-17:00 每 2 小時 —— 這個時段沒有任何標的結標，跑掃描是為了
-        「新上架的即決標的」（先搶先贏）。每 2 小時足夠，跑更密只是浪費請求。
-      * 18:00-22:00 每 30 分鐘 —— 結標高峰。競標急件通知要夠即時，
-        而且 18-20 點使用者還沒開 dashboard，只能靠 Telegram。
-      * 23:00-08:00 不跑 —— 日本賣家也在睡：沒有新上架，也沒有結標。
-        少跑 9 個時段，總請求數比「每小時跑」還低約三成。
-
-      改時段就改下面的 array。每個 dict 是一個觸發點；只給 Minute 不給 Hour
-      代表「每小時的那一分」，這裡刻意每個都寫死 Hour 以免又變成整天跑。
+      為什麼不再把 Hour/Minute 寫在這裡：StartCalendarInterval 的牆上時間由 launchd 依
+      「系統時區」解讀，使用者旅行時 macOS 會自動換時區（2026-10 Dallas → LA → 台北），
+      launchd 的網格就與 Python 的台北時鐘脫鉤——連續 12 天每天假報「漏跑 9-10 個時段」
+      （CLAUDE.md 第三節第九事故）。現在 launchd 不知道網格，時區怎麼換都不影響。
+      想改時段：改 `_WINDOWS`，不要改這裡。Hour 鍵刻意不寫（省略＝每小時都觸發）。
     -->
     <key>StartCalendarInterval</key>
     <array>
-        <!-- 白天：每 2 小時，抓新上架 -->
-        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
-        <!-- 結標高峰：每 30 分鐘 -->
-        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Minute</key><integer>45</integer></dict>
     </array>
 
     <!-- 載入時不要立刻跑一次，等排程時間到（最多等 1 小時，可接受） -->
@@ -97,6 +80,12 @@
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>LANG</key>
         <string>en_US.UTF-8</string>
+        <!-- 與 run_daily.sh／run_high.sh 開頭的 export TZ 雙保險：排程相關的牆上時間一律台北 -->
+        <key>TZ</key>
+        <string>Asia/Taipei</string>
+        <!-- 只有 launchd 觸發才啟用 run_*.sh 的 slot-check 閘門；dashboard 補跑與手動執行不設，永遠直接掃 -->
+        <key>YGO_SLOT_GATE</key>
+        <string>1</string>
     </dict>
 
     <!--

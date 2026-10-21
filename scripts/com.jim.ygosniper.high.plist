@@ -37,20 +37,20 @@
     </array>
 
     <!--
-      白天偶數整點（新上架）＋晚間 :15（結標高峰前後，避開低價帶的 :00/:30）。
+      2026-10-21 起：launchd 只負責「每 15 分鐘叫醒一次」，網格不寫在這裡。
+      網格（台北時間）在 src/ygo_sniper/schedule_watch.py 的 `_HIGH_WINDOWS`：
+      白天偶數整點 10/12/14/16:00＋晚間 18:15/20:15/22:15（避開低價帶的 :00/:30），
       共 7 次/日 × 4 查詢 × 1 來源（buyee_mercari）＝ 28 請求/日。
+      run_high.sh 取鎖之前先跑 `ygo-sniper slot-check（band=high）` 決定本次要不要掃
+      （落在網格 ±7 分、或上一輪後有格被跳過才掃；否則靜默結束）。
+      理由見 com.jim.ygosniper.plist 的同位置註解（launchd 網格會跟系統時區脫鉤）。
     -->
     <key>StartCalendarInterval</key>
     <array>
-        <!-- 白天：偶數整點，抓新上架 -->
-        <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
-        <!-- 晚間：:15，避開低價帶結標高峰的 :00/:30 -->
-        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>15</integer></dict>
-        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>15</integer></dict>
-        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Minute</key><integer>45</integer></dict>
     </array>
 
     <!-- 載入時不要立刻跑一次，等排程時間到 -->
@@ -72,6 +72,12 @@
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>LANG</key>
         <string>en_US.UTF-8</string>
+        <!-- 與 run_daily.sh／run_high.sh 開頭的 export TZ 雙保險：排程相關的牆上時間一律台北 -->
+        <key>TZ</key>
+        <string>Asia/Taipei</string>
+        <!-- 只有 launchd 觸發才啟用 run_*.sh 的 slot-check 閘門；dashboard 補跑與手動執行不設，永遠直接掃 -->
+        <key>YGO_SLOT_GATE</key>
+        <string>1</string>
     </dict>
 
     <!--

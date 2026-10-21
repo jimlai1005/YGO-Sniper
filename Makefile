@@ -46,7 +46,7 @@ schedule:
 	cp scripts/com.jim.ygosniper.plist ~/Library/LaunchAgents/
 	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.plist 2>/dev/null || true
 	launchctl load ~/Library/LaunchAgents/com.jim.ygosniper.plist
-	@echo "✅ 已排程每天 09:30。用 launchctl list | grep ygosniper 確認"
+	@echo "✅ 已排程：每 15 分鐘叫醒一次，由 ygo-sniper slot-check 依台北網格決定是否掃描。用 launchctl list | grep ygosniper 確認"
 
 unschedule:
 	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.plist
@@ -59,7 +59,7 @@ schedule-high:
 	cp scripts/com.jim.ygosniper.high.plist ~/Library/LaunchAgents/
 	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.high.plist 2>/dev/null || true
 	launchctl load ~/Library/LaunchAgents/com.jim.ygosniper.high.plist
-	@echo "✅ 高價帶已排程（白天偶數整點＋晚間 :15）。用 launchctl list | grep ygosniper.high 確認"
+	@echo "✅ 高價帶已排程：每 15 分鐘叫醒一次，由 ygo-sniper slot-check --band high 依台北網格決定是否掃描。用 launchctl list | grep ygosniper.high 確認"
 
 unschedule-high:
 	launchctl unload ~/Library/LaunchAgents/com.jim.ygosniper.high.plist

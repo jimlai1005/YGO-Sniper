@@ -8,6 +8,11 @@
 
 set -uo pipefail
 
+# 排程時鐘釘台北（docs/plans/schedule-pin-taipei.md）：bash 的 date、ledger 的 finished_at、
+# Python 內所有未指定時區的 datetime.now() 都跟著變成台北。Python 端排程邏輯另有
+# clock.schedule_now() 自己釘，這行只是讓 log 與帳本看起來一致。
+export TZ=Asia/Taipei
+
 PROJECT_DIR="$HOME/projects/ygo-sniper"
 LOG_DIR="$PROJECT_DIR/data/logs"
 LOG_FILE="$LOG_DIR/dashboard.log"

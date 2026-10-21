@@ -187,8 +187,8 @@ def _format_missed(slots: list[datetime]) -> str:
     一整週沒開機時，Telegram 訊息被幾十個時間戳灌爆。"""
     if len(slots) <= 6:
         listed = "、".join(f"{s:%H:%M}" for s in slots)
-        return f"漏跑 {len(slots)} 個時段（{listed}）"
-    return f"漏跑 {len(slots)} 個時段（{slots[0]:%m-%d %H:%M} ～ {slots[-1]:%m-%d %H:%M}）"
+        return f"漏跑 {len(slots)} 個時段（台北 {listed}）"
+    return f"漏跑 {len(slots)} 個時段（台北 {slots[0]:%m-%d %H:%M} ～ {slots[-1]:%m-%d %H:%M}）"
 
 
 def expected_next_gap_minutes(prev: datetime, slots: list[int] | None = None) -> int:
@@ -266,6 +266,30 @@ def detect_missed(
         return missed_slots_between(prev, now, slots)
     except TypeError:
         return []
+
+
+def should_run(
+    now: datetime,
+    prev_started: str | None,
+    slots: list[int] | None = None,
+    *,
+    tolerance_minutes: int = 7,
+) -> bool:
+    """launchd 每 15 分鐘叫一次，這裡決定這一次要不要真的掃。
+
+    兩個條件任一成立就跑：
+    1. `now` 落在網格某一格的 [slot, slot + tolerance) 內——tolerance 吃掉 launchd 的喚醒漂移；
+    2. 上一輪（`prev_started`）之後有格被跳過（`detect_missed`）——筆電睡醒時 launchd
+       只補觸發一次、時間不在格上，不靠這條就永遠補不到。
+    `now` 必須是台北 naive（`clock.schedule_now()`）；`prev_started` 是同基準的 ISO 或 None。
+    網格只定義在 `_WINDOWS`／`_HIGH_WINDOWS` 一處；plist 不再知道網格。
+    """
+    if slots is None:
+        slots = _ALL_SLOTS
+    minute_of_day = now.hour * 60 + now.minute
+    if any(0 <= minute_of_day - s < tolerance_minutes for s in slots):
+        return True
+    return bool(detect_missed(prev_started, now, slots))
 
 
 def decode_gap_record(raw: str | None) -> dict | None:

@@ -2610,6 +2610,32 @@ def test_telegram():
     console.print("[green]已送出[/green]" if ok else "[red]送出失敗[/red]")
 
 
+@app.command("slot-check")
+def slot_check(band: str = typer.Option("std", help="std（低價帶）或 high（高價帶）")):
+    """launchd 每 15 分鐘叫一次 run_daily.sh／run_high.sh，腳本先問這裡「現在該不該掃」。
+
+    exit 0 = 該掃；exit 3 = 不在台北網格上、也沒有漏格，靜默結束。
+    只讀 meta，不寫任何東西、不印任何東西（一天 96 次呼叫，印了會淹掉 log）。
+    網格只定義在 `schedule_watch._WINDOWS`／`_HIGH_WINDOWS`，plist 不知道網格。
+    """
+    from .clock import schedule_now
+    from .schedule_watch import (
+        _HIGH_ALL_SLOTS,
+        RUN_STARTED_KEY,
+        RUN_STARTED_KEY_HIGH,
+        should_run,
+    )
+
+    if band not in ("std", "high"):
+        raise typer.BadParameter("band 只能是 std 或 high", param_hint="--band")
+    store = Store(load_config().db_path)
+    if band == "high":
+        ok = should_run(schedule_now(), store.get_meta(RUN_STARTED_KEY_HIGH), _HIGH_ALL_SLOTS)
+    else:
+        ok = should_run(schedule_now(), store.get_meta(RUN_STARTED_KEY))
+    raise typer.Exit(code=0 if ok else 3)
+
+
 # ---------------------------------------------------------------------------
 # 卡片主檔與估價模型
 # ---------------------------------------------------------------------------

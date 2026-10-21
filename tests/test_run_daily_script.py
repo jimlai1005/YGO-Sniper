@@ -365,3 +365,99 @@ def test_reentrancy_skips_when_lock_owner_is_alive(sandbox):
     finally:
         holder.terminate()
         holder.wait(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-21 排程時鐘釘台北（docs/plans/schedule-pin-taipei.md Task 2）：
+# launchd 每 15 分叫醒，wrapper 取鎖前用 `slot-check` 問 Python「現在該不該掃」。
+# 閘門只在 YGO_SLOT_GATE=1（plist 設定）時生效——dashboard 補跑按鈕與手動執行
+# 沒有這個變數，不能被閘門靜默吞掉。
+# ---------------------------------------------------------------------------
+_SLOT_CHECK_STUB_TEMPLATE = (
+    '#!/bin/bash\n'
+    'if [ "${{1:-}}" = "slot-check" ]; then\n'
+    '    exit {rc}\n'
+    'fi\n'
+    'touch "$YGO_TEST_MARKER"\n'
+    'exit 0\n'
+)
+
+
+def test_slot_gate_off_grid_exits_silently_without_log_lock_or_ledger(sandbox):
+    """launchd 路徑（YGO_SLOT_GATE=1）且 slot-check 回 3：一天走 81 次的靜默分支。
+    不寫 log、不碰鎖、不寫帳本，也沒有真的去掃。"""
+    sandbox.set_ygo_sniper_stub(_SLOT_CHECK_STUB_TEMPLATE.format(rc=3))
+
+    result = sandbox.run(YGO_SLOT_GATE="1")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not sandbox.marker_file.exists(), "閘門回 3 卻還是跑了掃描"
+    assert list(sandbox.log_dir.glob("daily-*.log")) == [], "靜默分支不該寫 log"
+    assert not sandbox.lock_dir.exists(), "靜默分支不該碰鎖"
+    assert not sandbox.last_run_file.exists(), "靜默分支不該寫排程監督帳本"
+    sandbox.assert_no_network_call()
+
+
+def test_slot_gate_on_grid_proceeds_to_scan(sandbox):
+    sandbox.set_ygo_sniper_stub(_SLOT_CHECK_STUB_TEMPLATE.format(rc=0))
+
+    result = sandbox.run(YGO_SLOT_GATE="1")
+
+    assert result.returncode == 0, result.stderr
+    assert sandbox.marker_file.exists(), "閘門回 0 應該往下掃描"
+    assert "開始" in sandbox.log_text()
+
+
+def test_slot_gate_unexpected_rc_does_not_swallow_the_run(sandbox):
+    """slot-check 自己壞掉（rc 非 0 非 3，例如 db 壞）→ 放行往下跑，讓既有失敗路徑出聲。"""
+    sandbox.set_ygo_sniper_stub(_SLOT_CHECK_STUB_TEMPLATE.format(rc=1))
+
+    result = sandbox.run(YGO_SLOT_GATE="1")
+
+    assert result.returncode == 0, result.stderr
+    assert sandbox.marker_file.exists()
+
+
+def test_without_slot_gate_env_a_manual_or_catchup_run_is_never_gated(sandbox):
+    """dashboard 補跑按鈕（`run_daily.sh --catchup`）與手動執行沒有 YGO_SLOT_GATE：
+    即使 slot-check 會回 3 也必須照常往下跑，否則 dashboard 回「已啟動」卻什麼都沒做。"""
+    sandbox.set_ygo_sniper_stub(_SLOT_CHECK_STUB_TEMPLATE.format(rc=3))
+
+    result = sandbox.run()   # 沒有 YGO_SLOT_GATE
+
+    assert result.returncode == 0, result.stderr
+    assert sandbox.marker_file.exists(), "沒有 YGO_SLOT_GATE 卻被閘門吞掉了"
+    assert "開始" in sandbox.log_text()
+
+
+@pytest.mark.parametrize(
+    "name,band", [("run_daily.sh", "std"), ("run_high.sh", "high")]
+)
+def test_scan_wrappers_pin_taipei_and_gate_before_taking_the_lock(name, band):
+    text = (REPO_ROOT / "scripts" / name).read_text()
+    assert "export TZ=Asia/Taipei" in text
+    gate_pos = text.index(f"slot-check --band {band}")
+    assert gate_pos < text.index("if ! acquire_lock"), "閘門必須在取鎖之前"
+    # 閘門必須由 YGO_SLOT_GATE=1 包住（手動／dashboard 補跑不設，不可被吞）
+    assert re.search(
+        r'if \[ "\$\{YGO_SLOT_GATE:-0\}" = "1" \][^\n]*\n\s*\.venv/bin/ygo-sniper slot-check --band '
+        + band,
+        text,
+    )
+
+
+def test_dashboard_wrapper_pins_taipei():
+    assert "export TZ=Asia/Taipei" in (REPO_ROOT / "scripts" / "run_dashboard.sh").read_text()
+
+
+@pytest.mark.parametrize(
+    "plist", ["com.jim.ygosniper.plist", "com.jim.ygosniper.high.plist"]
+)
+def test_launchd_plists_enable_the_slot_gate(plist):
+    """閘門只靠 plist 的環境變數開啟：變數掉了 → 閘門永遠不跑 → 每 15 分鐘都掃一次。"""
+    import plistlib
+
+    with open(REPO_ROOT / "scripts" / plist, "rb") as f:
+        env = plistlib.load(f)["EnvironmentVariables"]
+    assert env["YGO_SLOT_GATE"] == "1"
+    assert env["TZ"] == "Asia/Taipei"

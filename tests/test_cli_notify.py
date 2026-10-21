@@ -512,3 +512,77 @@ def test_mine_snipes_force_bypasses_once_a_day_gate(monkeypatch, tmp_path):
     assert calls == []                       # 預設：今天挖過就跳過
     cli._mine_snipes_daily(pipe, force=True)
     assert calls == [1]                      # 補跑模式：強制重挖
+
+
+# ---------------------------------------------------------------------------
+# slot-check：launchd 每 15 分叫醒，腳本先問這裡該不該掃（exit 0 該掃 / 3 靜默結束）
+# 一天呼叫 96 次，所以另一條重要性質是「什麼都不印、什麼都不寫」。
+# ---------------------------------------------------------------------------
+class TestSlotCheck:
+    @pytest.fixture
+    def env(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        from ygo_sniper import cli as cli_mod
+        from ygo_sniper import clock
+        from ygo_sniper.store import Store
+
+        db = tmp_path / "sniper.db"
+        monkeypatch.setattr(cli_mod, "load_config", lambda *a, **k: SimpleNamespace(db_path=db))
+        store = Store(db)
+
+        def at(iso: str):
+            from datetime import datetime
+
+            monkeypatch.setattr(clock, "schedule_now", lambda: datetime.fromisoformat(iso))
+
+        return store, at
+
+    def _invoke(self, *args):
+        from typer.testing import CliRunner
+
+        from ygo_sniper import cli as cli_mod
+
+        return CliRunner().invoke(cli_mod.app, ["slot-check", *args])
+
+    def test_on_slot_exits_0_silently(self, env):
+        _, at = env
+        at("2026-10-21T13:31:00")
+        r = self._invoke("--band", "std")
+        assert r.exit_code == 0
+        assert r.output == ""
+
+    def test_off_slot_exits_3_silently(self, env):
+        _, at = env
+        at("2026-10-21T13:45:00")
+        r = self._invoke("--band", "std")
+        assert r.exit_code == 3
+        assert r.output == ""
+
+    def test_missed_slot_since_last_start_exits_0(self, env):
+        from ygo_sniper.schedule_watch import RUN_STARTED_KEY
+
+        store, at = env
+        store.set_meta(RUN_STARTED_KEY, "2026-10-21T09:30:00")
+        at("2026-10-21T14:07:00")
+        assert self._invoke("--band", "std").exit_code == 0
+
+    def test_bands_use_their_own_grid_and_ledger(self, env):
+        from ygo_sniper.schedule_watch import RUN_STARTED_KEY, RUN_STARTED_KEY_HIGH
+
+        store, at = env
+        # 低價帶有帳（剛跑完 18:00），高價帶沒有帳
+        store.set_meta(RUN_STARTED_KEY, "2026-10-21T18:00:00")
+        at("2026-10-21T18:15:00")
+        assert self._invoke("--band", "std").exit_code == 3    # 18:15 不在低價帶網格上
+        assert self._invoke("--band", "high").exit_code == 0   # 但在高價帶網格上
+        store.set_meta(RUN_STARTED_KEY_HIGH, "2026-10-21T16:00:00")
+        at("2026-10-21T18:00:00")
+        assert self._invoke("--band", "high").exit_code == 3   # 16:00 之後 18:00 前沒有高價帶格被跳過
+
+    def test_unknown_band_is_a_loud_error_not_0_or_3(self, env):
+        _, at = env
+        at("2026-10-21T13:30:00")
+        r = self._invoke("--band", "xyz")
+        assert r.exit_code not in (0, 3)
+        assert "std" in r.output and "high" in r.output
