@@ -153,6 +153,10 @@ def test_first_run_after_clock_change_resets_baseline_without_alert(pipe_factory
     assert pipe._schedule_alert and "漏跑 2 個時段" in pipe._schedule_alert
 ```
 
+- [ ] **Step 4b（2026-10-21 主線程裁決）: 既有 8 個測試補寫基準鍵**
+  Step 4 的保護對「全新 store、直接寫舊 `RUN_STARTED_KEY` 再期待本輪偵測」的測試是預期內的紅燈：它們的前提少了「排程帳已經是台北基準」這件事。修法：在這 8 個測試寫入 `RUN_STARTED_KEY`／`RUN_STARTED_KEY_HIGH` 的那一行旁補 `store.set_meta(sw.CLOCK_TZ_KEY, "Asia/Taipei")`（或對應的 `pipe.store`），**斷言一字不改**。清單：`tests/test_pipeline_catchup.py::test_gap_record_is_written_by_update_schedule_state`、`::test_gap_record_failure_does_not_block_baseline_or_scan`；`tests/test_schedule_watch.py::test_manual_scan_leaves_pending_for_next_daily_to_deliver`、`::test_crashed_run_alert_survives_and_is_delivered_next_time`、`::test_failed_push_keeps_pending_for_retry`、`::test_high_band_alert_delivery_clears_high_key_not_low_key`、`::test_low_band_alert_delivery_clears_low_key_not_high_key`、`::test_update_schedule_state_folds_watchdog_ledger_into_pending`。
+  不採用 autouse fixture 自動預寫：那會讓「保護分支」在測試裡變成看不見的例外路徑，新的保護測試還要 opt-out。
+
 - [ ] **Step 5: 既有測試改成「系統時區是 Chicago 也要過」**
   `tests/test_catchup.py:20-24` 與 `tests/test_cli_notify.py:324-331, 370-371` 目前把 `TZ` 設成 `Asia/Taipei` 才讓錨值成立——改成 `America/Chicago`。改完這些測試仍必須全綠，這就是「釘死台北」的證據。
 
