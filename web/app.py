@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -1326,3 +1328,63 @@ def trigger_scan_high(tasks: BackgroundTasks):
         "running": True,
         "message": "高價掃描已在背景啟動，完成後清單會自動更新",
     }
+
+
+_spawn_daily = subprocess.Popen  # 測試注入點：測試換成假函式，絕不真的跑腳本
+
+
+def _lock_holder_alive(lock_dir: Path) -> int | None:
+    """`data/run_daily.lock/pid` 的持有者還活著就回 pid，否則 None（含鎖不存在）。
+    只讀不清——清殘鎖是腳本的事。"""
+    try:
+        pid = int((lock_dir / "pid").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        return pid  # 行程存在、只是不屬於我們
+    except OSError:
+        return None
+    return pid
+
+
+@app.post("/api/daily-run")
+def trigger_daily_run():
+    """從 dashboard 跑一輪完整的 `daily`（補跑模式）——走 `scripts/run_daily.sh --catchup`。
+
+    與 `/api/scan` 的差別：那顆只掃不推、不挖狙擊成交（行程內 Pipeline）；這顆要的是
+    「排程漏跑之後把該做的全做一遍並推 Telegram」，所以直接跑 launchd 用的那支腳本，
+    鎖／watchdog／log／ledger 一個都不少（CLAUDE.md 第六節：測試路徑＝生產路徑）。
+    用途：關機重開、或鎖被卡住手動清掉之後。睡眠醒來的情境 launchd 會自己補觸發，
+    那一輪本身就會進補跑模式，不需要按這顆。
+
+    兩個唯讀預檢只是為了讓使用者得到「已有一輪在跑」而不是「已啟動」然後什麼都沒
+    發生（腳本因鎖而跳過——那正是靜默失敗）；鎖的權威仍是腳本自己。
+    """
+    st = store.scan_status(timeout_seconds=cfg.scan_timeout_seconds)
+    if st["running"]:
+        return {"ok": True, "started": False, "running": True,
+                "message": f"已經有一輪掃描在跑（{st.get('trigger') or '?'} 觸發），這次不重複啟動", "status": st}
+    lock_dir = cfg.db_path.parent / "run_daily.lock"
+    pid = _lock_holder_alive(lock_dir)
+    if pid is not None:
+        return {"ok": True, "started": False, "running": True,
+                "message": f"run_daily.sh 的鎖仍由 pid {pid} 持有（上一輪還在跑），這次不重複啟動"}
+    _spawn_daily(
+        ["/bin/bash", "scripts/run_daily.sh", "--catchup"],
+        cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"ok": True, "started": True, "running": True,
+            "message": "補跑已在背景啟動（走 run_daily.sh，log 在 data/logs/daily-*.log），完成後會推 Telegram"}
+
+
+@app.get("/api/schedule/gap")
+def schedule_gap():
+    """漏跑視窗帳（`schedule_watch.GAP_WINDOW_KEY`）。null = 沒有紀錄。"""
+    from ygo_sniper.schedule_watch import GAP_WINDOW_KEY, decode_gap_record
+
+    return {"gap": decode_gap_record(store.get_meta(GAP_WINDOW_KEY))}

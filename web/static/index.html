@@ -384,12 +384,16 @@
     <span class="pill" id="stat-drift" title="市場漂移：同卡重複成交，近 4 週 vs 前 8 週（只顯示，不進估價）">漂移 <b>–</b></span>
     <span class="pill" id="stat-fx">匯率 <b>–</b></span>
     <div style="margin-left:auto" class="row">
+      <span class="pill" id="gap-pill" hidden></span>
       <span class="pill" id="scan-when" title="還沒讀到掃描狀態">最後掃描 <b>–</b></span>
       <button id="scan-btn" onclick="scanNow()">立即掃描</button>
       <!-- 獨立按鈕、不併進「立即掃描」：與高價帶 plan 的隔離哲學一致——
            兩條管線的失敗模式不互綁。共用同一個全域 scan 狀態，互斥不並跑
            （見 pollScanStatus／renderScanStatus，任一輪在跑時兩顆一起 disable）。 -->
       <button id="scan-high-btn" onclick="scanHighNow()" title="掃 ¥8,624～50,000 高價帶（只掛 Mercari）">高價掃描</button>
+      <!-- 補跑 daily：走 scripts/run_daily.sh --catchup（與 launchd 同一條路：鎖、watchdog、log、ledger）。
+           跟上面兩顆不同——那兩顆是行程內 Pipeline、不推播、不挖狙擊成交。 -->
+      <button id="catchup-btn" onclick="catchupNow()" title="走 run_daily.sh --catchup：完整 daily（掃描＋狙擊重挖＋推播），給關機重開或鎖卡住後用">補跑 daily</button>
       <button onclick="loadAll()">重新整理</button>
     </div>
   </div>
@@ -2220,6 +2224,7 @@ function renderScanStatus(st){
   const pill = document.getElementById("scan-when");
   const btn  = document.getElementById("scan-btn");
   const btnHigh = document.getElementById("scan-high-btn");
+  const btnCatchup = document.getElementById("catchup-btn");
   const last = st.last_run || {};
   const lastAt = last.finished_at || null;
   // 兩顆按鈕共用同一個全域 scan 狀態（互斥不並跑，見 /api/scan-high 註解）：
@@ -2242,6 +2247,7 @@ function renderScanStatus(st){
     btn.textContent = "掃描中…";
     btnHigh.disabled = true;
     btnHigh.textContent = "掃描中…";
+    btnCatchup.disabled = true;
   }else{
     pill.className = "pill" + (st.stale ? " stale" : "");
     const rel = ago(lastAt);
@@ -2256,6 +2262,8 @@ function renderScanStatus(st){
     btn.textContent = "立即掃描";
     btnHigh.disabled = false;
     btnHigh.textContent = "高價掃描";
+    btnCatchup.disabled = false;
+    btnCatchup.textContent = "補跑 daily";
   }
 }
 
@@ -2267,6 +2275,7 @@ async function pollScanStatus(){
     return;  // 後端暫時連不上不該把按鈕鎖死，下一輪再試
   }
   renderScanStatus(st);
+  pollGap();   // 跑完那一輪會把漏跑帳標成已補跑，pill 要跟著變
 
   if(st.running){
     wasRunning = true;
@@ -2327,6 +2336,40 @@ async function scanHighNow(){
   }
   clearTimeout(scanPollTimer);
   scanPollTimer = setTimeout(pollScanStatus, 700);
+}
+
+/** 漏跑視窗狀態（`/api/schedule/gap`）。沒有紀錄就隱藏；有但未補跑用 stale 色。 */
+async function pollGap(){
+  let g; try{ g = (await api("/api/schedule/gap")).gap; }catch(e){ return; }
+  const pill = document.getElementById("gap-pill");
+  if(!g){ pill.hidden = true; return; }
+  const win = `${g.uncovered_from.slice(5,16).replace("T"," ")} ～ ${g.uncovered_to.slice(5,16).replace("T"," ")}`;
+  pill.hidden = false;
+  if(g.caught_up_at){
+    pill.className = "pill";
+    pill.textContent = `上次漏跑 ${g.missed_slots} 格（${win}），已於 ${g.caught_up_at.slice(5,16).replace("T"," ")} 補跑`;
+  }else{
+    pill.className = "pill stale";
+    pill.textContent = `⚠️ 漏跑 ${g.missed_slots} 格（${win}），尚未補跑`;
+  }
+}
+
+/** 補跑 daily（`/api/daily-run`）：後端 subprocess 跑 run_daily.sh --catchup，
+    之後沿用 `pollScanStatus`（跨行程的 scan_status 會顯示 cli 觸發的那一輪）。 */
+async function catchupNow(){
+  const btn = document.getElementById("catchup-btn");
+  btn.disabled = true; btn.textContent = "啟動中…";
+  try{
+    const r = await api("/api/daily-run", {method:"POST"});
+    toast(r.message || (r.started ? "補跑已啟動" : "已經有一輪在跑"));
+    wasRunning = true;
+  }catch(e){
+    toast("啟動失敗：" + e.message);
+    btn.disabled = false; btn.textContent = "補跑 daily";
+    return;
+  }
+  clearTimeout(scanPollTimer);
+  scanPollTimer = setTimeout(pollScanStatus, 1500);
 }
 
 /* ---------------------------------------------------------------- 鑑價 */
@@ -3413,6 +3456,7 @@ syncFilterUI();
 initSections();
 loadAll();
 pollScanStatus();
+pollGap();
 // 頁面載入時也探一次驗證清除的狀態：背景驗證還在跑（例如使用者重新整理了頁面）
 // 就讓按鈕直接進入輪詢，不要讓使用者以為沒在動、再按一次
 pollVerifyClearStatus();

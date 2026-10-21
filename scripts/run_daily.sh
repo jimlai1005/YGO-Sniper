@@ -9,6 +9,8 @@
 #   3. 要記 log，不然半夜失敗你永遠不會知道，只會以為「今天沒好貨」
 #   4. 需要防重入 —— 見下面的鎖
 #
+# 額外參數原樣透傳給 `ygo-sniper daily`（dashboard 的補跑按鈕用 `--catchup`）。
+#
 # 排程監督（`data/last_run_exit`）的事故背景，以及 watchdog／孤兒視窗的
 # 細節分析，都移到 docs/run_daily.md 了——這支腳本
 # 本身只留「這裡在做什麼」，不留「為什麼」的長篇分析，避免這個檔案繼續
@@ -162,7 +164,7 @@ done
 # `.venv/bin/python` 而非裸 `python` 的理由都寫在
 # docs/run_daily.md，這裡不重複。
 .venv/bin/python scripts/run_with_timeout.py "${YGO_CYCLE_TIMEOUT:-1500}" \
-    ygo-sniper daily >> "$LOG_FILE" 2>&1
+    ygo-sniper daily "$@" >> "$LOG_FILE" 2>&1
 STATUS=$?
 
 if [ $STATUS -ne 0 ]; then
