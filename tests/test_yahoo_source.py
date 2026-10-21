@@ -10,9 +10,15 @@
 測試裡的 404 情境必須走真的 MockTransport 回 404，確認 allow_statuses
 讓它活著到 parser、判成 EMPTY_CONFIRMED、而且**不進快取**。
 
-全部請求走 httpx.MockTransport，零網路；HTML 是 Phase 0 實抓的 fixture。
+全部請求走 httpx.MockTransport，零網路；HTML 是生產路徑（httpx，不跑 JS）實抓的 fixture。
+2026-10-05 起搜尋頁改成 Next.js：商品在 `<script id="__NEXT_DATA__">` 的 JSON 裡
+（與賣家頁／closedsearch 同一條節點路徑），`yahoo_search_ok.html` 是 2026-10-20 重抓的
+新頁面；改版前的 `li.Product` 頁面存在 `yahoo_search_legacy_li_product.html`，
+解析器遇到它必須判 PARSER_BROKEN（不是靜默 0 筆）。
 """
 
+import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,14 +33,21 @@ from ygo_sniper.sources.yahoo import _AUCTION_ID_RE, YahooAuctionSource
 FIXTURES = Path(__file__).parent / "fixtures"
 OK_HTML = (FIXTURES / "yahoo_search_ok.html").read_text(encoding="utf-8")
 EMPTY_HTML = (FIXTURES / "yahoo_search_empty.html").read_text(encoding="utf-8")
+LEGACY_HTML = (FIXTURES / "yahoo_search_legacy_li_product.html").read_text(encoding="utf-8")
 
 KEYWORD = "遊戯王 psa 初期"
 BUYEE_PREFIX = "https://buyee.jp/item/yahoo/auction/"
 
-# RECON §2 實測比對表的樣本 id（與 Buyee 商品頁逐円核對過）
-BUYOUT_ID = "s1238539612"      # 現在 3,440 / 即決 30,000
-PURE_BID_ID = "m1238496717"    # 現在 20,305 / 無即決
-NUMERIC_ID = "1239234527"      # 純數字 id、純競標（現在 1円）
+# 2026-10-20 重抓的 yahoo_search_ok.html 樣本（關鍵字「遊戯王 psa 初期」，直接讀 JSON 節點挑的；
+# RECON.md 的對照表是改版前舊頁面的，不要再引用舊 id）
+BUYOUT_ID = "p1248808068"      # 現在 15,164 / 即決 15,164；endTime 2026-10-24T01:28:10+09:00、0 出價
+PURE_BID_ID = "w1249105337"    # 現在 1 / 無即決；endTime 2026-10-25T23:32:38+09:00、0 出價
+NUMERIC_ID = "1248740217"      # 純數字 id、純競標（現在 2,450、12 出價）
+# fixture 組成：50 個唯一 id = 6 フリマ（全有即決）＋ 2 即決拍賣 ＋ 42 純競標；total 441
+FIXTURE_ITEMS = 50
+FIXTURE_FLEA = 6
+FIXTURE_BUYOUT = 2
+FIXTURE_PURE_BID = 42
 
 
 @pytest.fixture
@@ -62,6 +75,35 @@ def make_source(cfg, tmp_path):
 
 def serve(status: int, body: str):
     return lambda request: httpx.Response(status, text=body)
+
+
+def _nextdata_payload(html: str) -> dict:
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    return json.loads(m.group(1))
+
+
+def _html_with_payload(html: str, payload: dict) -> str:
+    head, _, rest = html.partition('<script id="__NEXT_DATA__"')
+    _, _, tail = rest.partition("</script>")
+    return (head + '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload, ensure_ascii=False) + "</script>" + tail)
+
+
+def _html_with_listing(html: str, **overrides) -> str:
+    """把 ok fixture 的 listing 節點改掉再塞回頁面（測交叉比對用）。"""
+    payload = _nextdata_payload(html)
+    node = payload["props"]["pageProps"]["initialState"]["search"]["items"]["listing"]
+    node.update(overrides)
+    return _html_with_payload(html, payload)
+
+
+def _html_mutating_items(html: str, mutate) -> str:
+    """對每個 item 套 mutate(item) 再塞回頁面。"""
+    payload = _nextdata_payload(html)
+    node = payload["props"]["pageProps"]["initialState"]["search"]["items"]["listing"]
+    for it in node["items"]:
+        mutate(it)
+    return _html_with_payload(html, payload)
 
 
 def include_live(cfg_sources: dict) -> dict:
@@ -296,9 +338,10 @@ def test_parse_ok_page_buyout_only(make_source, cfg):
     result = src.search_detailed(KEYWORD, pages=1)
 
     assert result.health is ParseHealth.OK
-    # fixture：50 個唯一 id = 13 有即決 + 37 純競標；關掉開關時只收即決
-    assert len(result.listings) == 13
-    assert "排除純競標 37 筆" in result.detail
+    # fixture：50 個唯一 id；關掉開關時只收即決拍賣，フリマ標的走別的 ID 空間不收
+    assert len(result.listings) == FIXTURE_BUYOUT
+    assert f"排除純競標 {FIXTURE_PURE_BID} 筆" in result.detail
+    assert f"排除フリマ標的 {FIXTURE_FLEA} 筆" in result.detail
 
     by_id = {x.external_id: x for x in result.listings}
     for lst in result.listings:
@@ -309,12 +352,64 @@ def test_parse_ok_page_buyout_only(make_source, cfg):
         assert lst.source == "yahoo_direct"
         assert lst.raw["price_kind"] == "buyout"
 
-    # RECON 樣本：s1238539612 的可成交價是即決 30,000，不是現在 3,440
-    assert by_id[BUYOUT_ID].price == 30_000
-    assert by_id[BUYOUT_ID].raw["current_bid"] == 3_440
+    # 可成交價是即決價；current_bid 是另存的「現在価格」
+    assert by_id[BUYOUT_ID].price == 15_164
+    assert by_id[BUYOUT_ID].raw["current_bid"] == 15_164
     # 純競標不得產出——現在価格不是付得出去的價格
     assert PURE_BID_ID not in by_id
     assert NUMERIC_ID not in by_id
+
+
+def test_buyout_price_wins_over_current_bid(make_source, cfg):
+    """價格語意分流的對照組：現在価格 ≠ 即決価格時，price 必須是即決価格。
+
+    fixture 的即決樣本兩個價格剛好相等，單看它抓不到「拿錯欄位」——所以把
+    現在価格改成 999 再看：price 仍是 15,164，current_bid 才是 999。
+    """
+    def mutate(it):
+        if it["auctionId"] == BUYOUT_ID:
+            it["price"] = 999
+
+    html = _html_mutating_items(OK_HTML, mutate)
+    src = make_source(serve(200, html), sources_cfg=exclude_live(cfg.sources))
+    by_id = {x.external_id: x for x in src.search_detailed(KEYWORD, pages=1).listings}
+
+    assert by_id[BUYOUT_ID].price == 15_164
+    assert by_id[BUYOUT_ID].raw["price_kind"] == "buyout"
+    assert by_id[BUYOUT_ID].raw["current_bid"] == 999
+
+
+def test_nextdata_page_parses_listings(make_source, cfg):
+    src = make_source(serve(200, OK_HTML), sources_cfg=include_live(cfg.sources))
+    res = src.search_detailed(KEYWORD, pages=1)
+    assert res.health is ParseHealth.OK, res.detail
+    assert res.parsed_count == FIXTURE_ITEMS
+    ids = {x.external_id for x in res.listings}
+    assert BUYOUT_ID in ids and PURE_BID_ID in ids and NUMERIC_ID in ids
+    assert all(x.url.startswith(BUYEE_PREFIX) for x in res.listings)
+    # 搜尋頁沒有 seller 參數：seller_id 只能來自節點自己的 seller.userId，不猜
+    assert all(x.seller_id for x in res.listings)
+    by_id = {x.external_id: x for x in res.listings}
+    assert by_id[NUMERIC_ID].seller_id == "13unCMsQyTixBUEkMisEyFbiSjw9t"
+
+
+def test_missing_seller_userid_is_none_not_empty_string(make_source, cfg):
+    def mutate(it):
+        it["seller"] = {}
+
+    html = _html_mutating_items(OK_HTML, mutate)
+    src = make_source(serve(200, html), sources_cfg=include_live(cfg.sources))
+    listings = src.search_detailed(KEYWORD, pages=1).listings
+    assert listings and all(x.seller_id is None for x in listings)
+
+
+def test_cross_page_duplicates_are_counted_once(make_source, cfg):
+    """第 2 頁整頁重複（推廣位）→ 不重複產出、parsed_count 也不數兩次。"""
+    src = make_source(serve(200, OK_HTML), sources_cfg=include_live(cfg.sources))
+    res = src.search_detailed(KEYWORD, pages=2)
+    assert res.pages_fetched == 2
+    assert res.parsed_count == FIXTURE_ITEMS
+    assert len(res.listings) == FIXTURE_ITEMS - FIXTURE_FLEA
 
 
 # ---------------------------------------------------------------------------
@@ -329,28 +424,62 @@ def test_empty_404_page_is_empty_confirmed(make_source):
 
 
 # ---------------------------------------------------------------------------
-# 4. Product class 全滅 → PARSER_BROKEN
+# 4. 結構全變 → PARSER_BROKEN（舊 li.Product 頁面是真實的「改版前」頁面）
 # ---------------------------------------------------------------------------
-def test_renamed_product_classes_is_parser_broken(make_source):
-    broken = OK_HTML.replace("Product", "Produkt")  # 模擬對方全面改版 class 名
-    src = make_source(serve(200, broken))
+def test_legacy_li_product_page_is_parser_broken(make_source):
+    src = make_source(serve(200, LEGACY_HTML))
     result = src.search_detailed(KEYWORD, pages=1)
+
+    assert result.health is ParseHealth.PARSER_BROKEN
+    assert "__NEXT_DATA__" in result.detail
+    assert result.parsed_count == 0
+    assert result.listings == []
+
+
+def test_renamed_nextdata_script_is_parser_broken(make_source):
+    """對照組：JSON 還在、但 script id 被改名 → 同樣是 PARSER_BROKEN，不是 0 筆。"""
+    broken = OK_HTML.replace('id="__NEXT_DATA__"', 'id="__NEXT_DATA_V2__"')
+    result = make_source(serve(200, broken)).search_detailed(KEYWORD, pages=1)
+
+    assert result.health is ParseHealth.PARSER_BROKEN
+    assert result.parsed_count == 0
+
+
+def test_renamed_listing_path_is_parser_broken(make_source):
+    """JSON 節點路徑改名（search.items.listing → search.items.list）。"""
+    payload = _nextdata_payload(OK_HTML)
+    items_node = payload["props"]["pageProps"]["initialState"]["search"]["items"]
+    items_node["list"] = items_node.pop("listing")
+    result = make_source(serve(200, _html_with_payload(OK_HTML, payload))).search_detailed(
+        KEYWORD, pages=1
+    )
 
     assert result.health is ParseHealth.PARSER_BROKEN
     assert result.listings == []
 
 
 # ---------------------------------------------------------------------------
-# 5. 命中數交叉比對：頁面說 142 件、商品卻解析 0 筆 → 必定 PARSER_BROKEN
+# 5. 命中數交叉比對：頁面說 7999 件、商品卻解析 0 筆 → 必定 PARSER_BROKEN
 # ---------------------------------------------------------------------------
 def test_hits_crosscheck_catches_dead_selector(make_source):
-    # 只改掉商品容器 class，命中數元素（Tab__subText: 142件）原封不動
-    broken = OK_HTML.replace('li class="Product"', 'li class="ProductRenamed"')
-    src = make_source(serve(200, broken))
-    result = src.search_detailed(KEYWORD, pages=1)
+    # 同一份 JSON：totalResultsAvailable 原封不動說有 7999 件，items 卻是空的
+    html = _html_with_listing(OK_HTML, items=[], totalResultsAvailable=7999)
+    result = make_source(serve(200, html)).search_detailed(KEYWORD, pages=1)
 
     assert result.health is ParseHealth.PARSER_BROKEN
-    assert "142" in result.detail  # 判定依據要說得出來：頁面標示 vs 解析數
+    assert "7999" in result.detail  # 判定依據要說得出來：頁面標示 vs 解析數
+
+
+def test_items_missing_required_fields_do_not_count_as_parsed(make_source):
+    """欄位全被改名（auctionId → id）：total 仍 > 0 → parsed 0 → 不可算 OK。"""
+    def mutate(it):
+        it["id"] = it.pop("auctionId")
+
+    html = _html_mutating_items(OK_HTML, mutate)
+    result = make_source(serve(200, html)).search_detailed(KEYWORD, pages=1)
+
+    assert result.parsed_count == 0
+    assert result.listings == []
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +500,7 @@ def test_external_id_matches_buyee_extraction(make_source, cfg):
         "兩條發現管道並存會讓同一標的被抓兩次，請確認是有意為之"
     )
 
-    # 字母開頭 id
+    # 字母開頭 id（p 開頭＝店家即決）
     lst = by_id[BUYOUT_ID]
     m = _AUCTION_ID_RE.search(lst.url)
     assert m and m.group(1) == lst.external_id == BUYOUT_ID
@@ -411,15 +540,17 @@ def test_include_live_auctions_emits_current_bid(make_source, cfg):
     result = src.search_detailed(KEYWORD, pages=1)
 
     assert result.health is ParseHealth.OK
-    assert len(result.listings) == 50  # 13 即決 + 37 純競標，全收
+    assert len(result.listings) == FIXTURE_BUYOUT + FIXTURE_PURE_BID  # 即決 + 純競標，全收
     assert "排除純競標" not in result.detail
 
     by_id = {x.external_id: x for x in result.listings}
-    # RECON 樣本：m1238496717 無即決，price 必須是現在価格 20,305
-    assert by_id[PURE_BID_ID].price == 20_305
+    # 無即決的純競標，price 必須是現在価格
+    assert by_id[PURE_BID_ID].price == 1
     assert by_id[PURE_BID_ID].raw["price_kind"] == "current_bid"
+    assert by_id[NUMERIC_ID].price == 2_450
+    assert by_id[NUMERIC_ID].raw["price_kind"] == "current_bid"
     # 有即決的照舊用即決価格，不受開關影響
-    assert by_id[BUYOUT_ID].price == 30_000
+    assert by_id[BUYOUT_ID].price == 15_164
     assert by_id[BUYOUT_ID].raw["price_kind"] == "buyout"
 
 
@@ -432,12 +563,12 @@ def test_include_live_auctions_emits_current_bid(make_source, cfg):
 # 兩個數字必須分得開，健康判定才有得挑。
 # ---------------------------------------------------------------------------
 def test_parsed_count_is_before_commercial_filter(make_source, cfg):
-    """同一份 fixture：解析 50 個商品、商業篩選後只剩 13 筆。"""
+    """同一份 fixture：解析 50 個商品、商業篩選後只剩 2 筆。"""
     src = make_source(serve(200, OK_HTML), sources_cfg=exclude_live(cfg.sources))
     result = src.search_detailed(KEYWORD, pages=1)
 
     assert result.parsed_count == 50           # 解析器：50 個商品都認得
-    assert len(result.listings) == 13          # 商業篩選：只有 13 筆有即決価格
+    assert len(result.listings) == 2           # 商業篩選：只有 2 筆是即決拍賣
     assert result.parsed_count != len(result.listings), "兩個數字混成一個就沒有意義了"
     assert "解析 50 筆" in result.detail        # 排錯線索要說得出兩個數字
 
@@ -452,16 +583,15 @@ def test_parsed_count_unchanged_when_filter_opens(make_source, cfg):
     result = src.search_detailed(KEYWORD, pages=1)
 
     assert result.parsed_count == 50
-    assert len(result.listings) == 50
+    assert len(result.listings) == FIXTURE_BUYOUT + FIXTURE_PURE_BID   # フリマ標的仍不收（路由決定）
 
 
 # ---------------------------------------------------------------------------
 # 10. 結標時間與出價數（競標視圖的地基）
 #
 # 競標是時間敏感的：沒有結標時間的競標標的在清單上毫無用處。
-# 來源必須是 `data-auction-endtime`（epoch 秒），**不是**看得見的
-# 「残り 1日／10時間」文字——那是四捨五入過的相對時間，反推會差好幾小時，
-# 而競標最後五分鐘才是決勝點。
+# 來源是 JSON 的 `endTime`（帶時區的 ISO），**不是**任何「残り 1日」之類的相對文字
+# ——那是四捨五入過的，反推會差好幾小時，而競標最後五分鐘才是決勝點。
 # ---------------------------------------------------------------------------
 def test_end_time_and_bids_are_parsed(make_source, cfg):
     from datetime import UTC, datetime
@@ -469,13 +599,16 @@ def test_end_time_and_bids_are_parsed(make_source, cfg):
     src = make_source(serve(200, OK_HTML), sources_cfg=include_live(cfg.sources))
     by_id = {x.external_id: x for x in src.search_detailed(KEYWORD, pages=1).listings}
 
-    # fixture 實測值：data-auction-endtime=1785679082、Product__bid=11
+    # fixture 實測值：endTime=2026-10-24T01:28:10+09:00（= 10-23 16:28:10Z）、bidCount=0
     lst = by_id[BUYOUT_ID]
-    assert lst.end_time == datetime.fromtimestamp(1785679082, UTC)
+    assert lst.end_time == datetime(2026, 10, 23, 16, 28, 10, tzinfo=UTC)
     assert lst.end_time.tzinfo is not None, "沒有時區的結標時間會讓倒數差 9 小時"
-    assert lst.bids == 11
+    assert lst.bids == 0
+    # 另一筆：12 出價（確認 bids 不是寫死 0）
+    assert by_id[NUMERIC_ID].bids == 12
+    assert by_id[NUMERIC_ID].end_time == datetime(2026, 10, 24, 14, 42, 36, tzinfo=UTC)
 
-    # 每一筆都要有——缺一筆就代表 selector 只對某些版型有效
+    # 每一筆都要有——缺一筆就代表只對某些版型有效
     assert all(x.end_time is not None for x in by_id.values())
     assert all(x.bids is not None for x in by_id.values())
     # 出價數 0 是真的 0（剛開標、還沒有人出價），不是「抽不到」
@@ -483,14 +616,27 @@ def test_end_time_and_bids_are_parsed(make_source, cfg):
 
 
 def test_missing_end_time_is_none_not_guessed(make_source, cfg):
-    """抽不到 epoch 就回 None——**絕不用「現在＋残り文字」猜一個絕對時間**。"""
-    stripped = OK_HTML.replace("data-auction-endtime", "data-auction-endtime-x")
-    src = make_source(serve(200, stripped), sources_cfg=include_live(cfg.sources))
+    """抽不到 endTime 就回 None——**絕不猜一個絕對時間**。"""
+    def mutate(it):
+        it.pop("endTime", None)
+
+    html = _html_mutating_items(OK_HTML, mutate)
+    src = make_source(serve(200, html), sources_cfg=include_live(cfg.sources))
     listings = src.search_detailed(KEYWORD, pages=1).listings
 
     assert listings, "拿掉結標時間不該讓整批標的消失"
     assert all(x.end_time is None for x in listings)
-    assert all(x.bids is not None for x in listings)  # 出價數是另一個 selector，不該連坐
+    assert all(x.bids is not None for x in listings)  # 出價數是另一個欄位，不該連坐
+
+
+def test_garbled_end_time_is_none_not_guessed(make_source, cfg):
+    def mutate(it):
+        it["endTime"] = "soon"
+
+    html = _html_mutating_items(OK_HTML, mutate)
+    src = make_source(serve(200, html), sources_cfg=include_live(cfg.sources))
+    listings = src.search_detailed(KEYWORD, pages=1).listings
+    assert listings and all(x.end_time is None for x in listings)
 
 
 def test_shipped_config_includes_live_auctions(cfg):
@@ -503,8 +649,7 @@ def test_shipped_config_includes_live_auctions(cfg):
 
 def test_parsed_count_is_zero_when_parser_dies(make_source):
     """對照組：真的壞掉時 parsed_count 必須是 0（否則 canary 永遠不會叫）。"""
-    broken = OK_HTML.replace("Product", "Produkt")
-    result = make_source(serve(200, broken)).search_detailed(KEYWORD, pages=1)
+    result = make_source(serve(200, LEGACY_HTML)).search_detailed(KEYWORD, pages=1)
 
     assert result.parsed_count == 0
     assert result.health is ParseHealth.PARSER_BROKEN

@@ -111,7 +111,7 @@ SELLER_PAGE_SOURCE: dict[str, str] = {
     "ebay": "ebay",
     "buyee_paypay": "paypay_direct",
     # 2026-08-04 補上（名單上分數最高的三個賣家都是這一站）。賣家頁的
-    # `__NEXT_DATA__` 與 closedsearch 同一條路徑，見 yahoo.py `_SELLER_LISTING_PATH`。
+    # `__NEXT_DATA__` 與 closedsearch 同一條路徑，見 yahoo.py `_LISTING_PATH`。
     "buyee_yahoo": "yahoo_direct",
     # 2026-08-09 補上（釘選軌 Phase 2）：Buyee Mercari 鏡像的賣家頁
     # `buyee.jp/mercari/search?seller={id}`，見 buyee.BuyeeSource.search_seller。

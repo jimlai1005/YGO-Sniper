@@ -13,11 +13,11 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
 import pytest
-from bs4 import BeautifulSoup
 
 from ygo_sniper.store import Store
 
@@ -49,28 +49,26 @@ def batch(rows, *, site="buyee_paypay", healthy=True):
 # 1. 解析端：fixture（生產路徑實抓）→ seller_id
 # ---------------------------------------------------------------------------
 def test_yahoo_search_cards_carry_the_seller_attr():
-    """搜尋頁 53/53 張卡都有 data-auction-auc-seller-id（Phase 0 實測）。"""
+    """搜尋頁 JSON 每一筆都帶 seller.userId（2026-10-20 新 fixture 50/50）。掉到 0 代表 Yahoo 又改版。"""
     from ygo_sniper.sources.yahoo import YahooAuctionSource
 
     html = (FIXTURES / "yahoo_search_ok.html").read_text(encoding="utf-8")
-    products = BeautifulSoup(html, "html.parser").select("li.Product")
-    sellers = [YahooAuctionSource._parse_seller(li) for li in products]
-    assert len(sellers) == 53
-    assert all(sellers), "每張卡片都該有賣家 ID——掉到 0 代表 Yahoo 改版了"
-    # 混淆 ID 的形狀：28-29 字英數（不是舊式帳號名）
-    assert {len(s) for s in sellers} <= {28, 29}
-    # RECON §2 的比對樣本 s1238539612 屬於 fixture 裡的已知賣家
-    by_id = {}
-    for li in products:
-        a = li.select_one("a.Product__titleLink")
-        node = li.select_one(".Product__bonus")
-        if a and node:
-            by_id[node.get("data-auction-id")] = node.get("data-auction-auc-seller-id")
-    assert by_id["s1238539612"] == "13unCMsQyTixBUEkMisEyFbiSjw9t"
+    node, _profile = YahooAuctionSource._page_nodes(html)
+    items = node["items"]
+    sellers = [(it.get("seller") or {}).get("userId") for it in items]
+    assert len(sellers) == 50
+    assert all(sellers), "每一筆都該有賣家 ID——掉到 0 代表 Yahoo 改版了"
+    # 兩個 ID 空間（與 closedsearch 一致）：拍賣是 28-29 字混淆 ID，フリマ是 p\d+
+    for it in items:
+        uid = it["seller"]["userId"]
+        if it.get("isFleamarketItem"):
+            assert re.fullmatch(r"p\d+", uid), uid
+        else:
+            assert len(uid) in (28, 29), uid
 
 
 def test_yahoo_search_listing_has_seller_id(cfg):
-    """走完整 `_extract_listings`，Listing.seller_id 真的被填上。"""
+    """走完整 `_extract_json_listings`，Listing.seller_id 真的被填上（不傳 seller_id，逼它從 seller.userId 取）。"""
     from dataclasses import replace
 
     from ygo_sniper.sources.yahoo import YahooAuctionSource
@@ -79,11 +77,11 @@ def test_yahoo_search_listing_has_seller_id(cfg):
         cfg,
         sources={**cfg.sources, "yahoo_direct": {"include_live_auctions": True}},
     )
-    src = YahooAuctionSource(scoped, fetcher=object())  # 不打網路，直接餵 soup
+    src = YahooAuctionSource(scoped, fetcher=object())  # 不打網路，直接餵 JSON
     html = (FIXTURES / "yahoo_search_ok.html").read_text(encoding="utf-8")
-    products = BeautifulSoup(html, "html.parser").select("li.Product")
-    listings, _excluded, parsed = src._extract_listings(products)
-    assert parsed > 0
+    node, _profile = YahooAuctionSource._page_nodes(html)
+    listings, stats = src._extract_json_listings(node["items"], set())
+    assert stats["parsed"] > 0 and listings
     assert all(lst.seller_id for lst in listings)
 
 
