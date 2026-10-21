@@ -181,6 +181,29 @@ def test_catchup_not_activated_after_caught_up(pipe_factory):
     assert pipe.scan(dry_run=True, skip_comps=True)["catchup"]["active"] is False
 
 
+def test_manual_catchup_does_not_adopt_an_already_caught_up_record(pipe_factory):
+    """W1：已補跑的帳不是「這一輪要回顧的對象」——--catchup 仍多翻頁，但 record 為 None。"""
+    pipe = pipe_factory(scan_overrides={"catchup_min_missed_slots": 2})
+    pipe.store.set_meta(sw.GAP_WINDOW_KEY, _gap(10, caught_up_at="2026-10-19T21:15:00"))
+    result = pipe.scan(catchup=True, dry_run=True, skip_comps=True)
+    assert result["catchup"]["active"] is True
+    assert result["catchup"]["record"] is None
+    discovery, _ = _split(pipe.src)
+    assert all(c["pages"] == FETCH_PAGES + 1 for c in discovery)
+
+
+def test_broken_catchup_config_does_not_take_down_the_scan(pipe_factory, capsys):
+    """S1：設定壞掉（鍵留空）→ 警告＋本輪不補跑，掃描照跑完、scan_status 不卡在 running。"""
+    pipe = pipe_factory(scan_overrides={"catchup_min_missed_slots": None})
+    pipe.store.set_meta(sw.GAP_WINDOW_KEY, _gap(10))
+    result = pipe.scan(dry_run=True, skip_comps=True)
+    assert result["catchup"]["active"] is False
+    assert result["catchup"]["record"] is None
+    assert "補跑模式判定失敗" in capsys.readouterr().out
+    discovery, _ = _split(pipe.src)
+    assert discovery and all(c["pages"] == FETCH_PAGES for c in discovery)
+
+
 def test_high_band_and_watch_only_never_catch_up(pipe_factory):
     """高價帶不碰這本帳；watch-scan 沒有關鍵字查詢，補跑沒有意義。"""
     pipe = pipe_factory()

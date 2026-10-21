@@ -2262,7 +2262,7 @@ function renderScanStatus(st){
     btn.textContent = "立即掃描";
     btnHigh.disabled = false;
     btnHigh.textContent = "高價掃描";
-    // 補跑是 subprocess 起的 run_daily.sh：要先等網路 ping（最多 60 秒）、取鎖、
+    // 補跑是 subprocess 起的 run_daily.sh：要先取鎖、再等網路 ping（最多 60 秒）、
     // 啟動 python 之後才會寫 scan_status。這段空窗 scan_status 還是「沒在跑」，
     // 不能因此把按鈕放行（會被連按兩次），也不能當成「跑完了」。
     if(Date.now() < catchupGraceUntil){
@@ -2373,7 +2373,7 @@ async function catchupNow(){
   try{
     const r = await api("/api/daily-run", {method:"POST"});
     toast(r.message || (r.started ? "補跑已啟動" : "已經有一輪在跑"));
-    // 刻意**不**設 wasRunning：腳本要過 ping／取鎖／起 python 才會寫 scan_status，
+    // 刻意**不**設 wasRunning：腳本要先取鎖、再過 ping、起 python 才會寫 scan_status，
     // 現在就設的話，下一次輪詢看到「沒在跑」會誤彈「掃描完成」並重載清單。
     // 交給 pollScanStatus 自己在看到 running 時設；這裡只開 90 秒寬限期鎖按鈕。
     if(r.started) catchupGraceUntil = Date.now() + 90_000;

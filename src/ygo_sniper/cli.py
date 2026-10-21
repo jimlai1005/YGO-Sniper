@@ -81,6 +81,8 @@ def daily(
             _run_notifications(pipe, result, band="std")
             if cu.get("active"):
                 _send_gap_review(pipe, cu.get("record"))
+        if not cu.get("active"):
+            _close_below_threshold_gap(pipe, cu.get("record"))
     finally:
         pipe.close()
 
@@ -419,6 +421,27 @@ def _send_schedule_alert(pipe: Pipeline) -> None:
         console.print("[red]排程監督告警送出失敗——留在 pending 帳裡，下一輪會一併重送[/red]")
 
 
+def _close_below_threshold_gap(pipe, rec: dict | None) -> None:
+    """正常輪收尾：漏格數未達補跑門檻的未補跑視窗，由這一輪的正常掃描收掉。
+
+    沒有這一步，漏 1 格的帳永遠不被消耗，pill 一直顯示「尚未補跑」，之後的帳也會
+    被它拖著（2026-10-20 複審 W2）。沒有要送達的東西，所以不違反「送達才消耗」。
+    達門檻的視窗不動——那是補跑模式的對象。
+    """
+    from datetime import datetime
+
+    from .schedule_watch import GAP_WINDOW_KEY, mark_gap_caught_up
+
+    if not rec or rec.get("caught_up_at") is not None:
+        return
+    min_slots = int(pipe.cfg.scan.get("catchup_min_missed_slots", 2))
+    missed = int(rec.get("missed_slots", 0))
+    if missed >= min_slots:
+        return
+    pipe.store.set_meta(GAP_WINDOW_KEY, mark_gap_caught_up(pipe.store.get_meta(GAP_WINDOW_KEY), datetime.now()))
+    console.print(f"[dim]漏跑 {missed} 格未達補跑門檻 {min_slots}，由本輪正常掃描收尾[/dim]")
+
+
 def _send_gap_review(pipe, rec: dict | None) -> None:
     """補跑模式的收尾：推「漏跑期間狙擊卡成交回顧」，**送達才標 caught_up**。
 
@@ -432,8 +455,8 @@ def _send_gap_review(pipe, rec: dict | None) -> None:
     from .catchup import format_gap_review, gap_sales
     from .schedule_watch import GAP_WINDOW_KEY, mark_gap_caught_up
 
-    if not rec:
-        return
+    if not rec or rec.get("caught_up_at") is not None:
+        return   # 沒帳，或已補跑過的視窗：不重推、不覆蓋 caught_up_at（複審 W1）
     if not bool(pipe.cfg.notify.get("enabled", True)):
         console.print("[yellow]補跑回顧未送出（notify.enabled=false），視窗保留為未補跑[/yellow]")
         return

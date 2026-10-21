@@ -803,6 +803,22 @@ def test_gap_record_replaced_after_caught_up():
     assert rec["missed_slots"] == 3
 
 
+def test_gap_record_does_not_merge_across_a_normal_run():
+    """W2-1：10-12 漏 1 格、10-14 正常跑、10-16 又漏 1 格 → 不連續，換新帳（不合併）。"""
+    prev1, now1 = datetime(2026, 10, 12, 9, 0), datetime(2026, 10, 12, 11, 40)
+    missed1 = sw.detect_missed(prev1.isoformat(), now1)
+    assert len(missed1) == 1
+    raw1 = sw.resolve_gap_record(None, missed1, prev1, now1)
+    # 10-14 正常輪：沒漏格 → 帳原封不動（uncovered_to 仍是 10-12 的 now1）
+    assert sw.resolve_gap_record(raw1, [], datetime(2026, 10, 14, 9, 30), datetime(2026, 10, 14, 9, 31)) == raw1
+    prev2, now2 = datetime(2026, 10, 16, 9, 0), datetime(2026, 10, 16, 11, 40)
+    missed2 = sw.detect_missed(prev2.isoformat(), now2)
+    assert len(missed2) == 1
+    rec = json.loads(sw.resolve_gap_record(raw1, missed2, prev2, now2))
+    assert rec["uncovered_from"] == prev2.isoformat()
+    assert rec["missed_slots"] == 1
+
+
 def test_decode_gap_record_is_lenient():
     assert sw.decode_gap_record(None) is None
     assert sw.decode_gap_record("not json") is None

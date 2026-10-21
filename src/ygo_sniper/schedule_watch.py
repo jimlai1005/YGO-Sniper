@@ -284,15 +284,23 @@ def decode_gap_record(raw: str | None) -> dict | None:
 def resolve_gap_record(
     existing_raw: str | None, missed: list[datetime], prev: datetime, now: datetime
 ) -> str | None:
-    """沒漏格 → 回傳原值（呼叫端據此不寫）。有漏格 → 新帳；若舊帳尚未補跑則合併
-    （from 取舊的、格數相加），已補跑的舊帳直接換掉。
+    """沒漏格 → 回傳原值（呼叫端據此不寫）。有漏格 → 新帳；舊帳尚未補跑**且連續**才合併
+    （from 取舊的、格數相加），已補跑或不連續的舊帳直接換掉。
+
+    連續 = 舊帳的 `uncovered_to` 恰是這一輪的 `prev`（上一輪起跑時刻）——中間沒有任何
+    正常輪次。有正常輪次夾在中間，代表舊視窗之後市場已被正常掃描覆蓋過，合併會讓
+    「未覆蓋」範圍橫跨已覆蓋的日子而說謊（2026-10-20 複審 W2）。
 
     純函式：時間由呼叫端注入（CLAUDE.md 第六節，時效類判斷一律能注入「現在」）。
     """
     if not missed:
         return existing_raw
     prev_rec = decode_gap_record(existing_raw)
-    merge = prev_rec is not None and prev_rec.get("caught_up_at") is None
+    merge = (
+        prev_rec is not None
+        and prev_rec.get("caught_up_at") is None
+        and prev_rec.get("uncovered_to") == prev.isoformat()
+    )
     rec = {
         "uncovered_from": prev_rec["uncovered_from"] if merge else prev.isoformat(),
         "uncovered_to": now.isoformat(),

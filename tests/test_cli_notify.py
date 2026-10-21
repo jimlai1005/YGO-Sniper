@@ -318,11 +318,25 @@ _GAP_REC = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _restore_tz_after_each(monkeypatch):
+    """monkeypatch 的 undo 只還原環境變數 TZ，不會重讀 C 層時區——`_catchup_env` 設了
+    Asia/Taipei + tzset() 之後，沒有這個收尾會外洩到同行程後面的測試（2026-10-20 複審 W3）。
+    autouse fixture 比測試先建立、後拆除，所以這裡的 undo 在最後，之後再 tzset 一次。
+    """
+    import time
+
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
 class _CatchupPipe:
     """daily() 會碰到的面：真的 Store（才能驗帳）＋假 notifier、假 scan。"""
 
     def __init__(self, store, *, alert_ok: bool, active: bool = True, rec=_GAP_REC):
         self.cfg = FakeCfg()
+        self.cfg.scan = {"catchup_min_missed_slots": 2}
         self.store = store
         self.notifier = FakeNotifier(alert_ok=alert_ok)
         self.sources = {}
@@ -338,8 +352,14 @@ class _CatchupPipe:
         self.closed = True
 
 
-def _catchup_env(monkeypatch, tmp_path, *, alert_ok: bool, active: bool = True, with_sale: bool = True):
-    """回傳 (pipe, mine_calls)。除了 `_send_gap_review` 之外的 daily 子步驟全部換成記錄替身。"""
+def _catchup_env(
+    monkeypatch, tmp_path, *, alert_ok: bool, active: bool = True, with_sale: bool = True,
+    gap: dict | None = None,
+):
+    """回傳 (pipe, mine_calls)。除了 `_send_gap_review` 之外的 daily 子步驟全部換成記錄替身。
+
+    `gap`：寫進帳上的視窗（預設 `_GAP_REC`）；假 pipeline 的 `scan()` 回傳同一份當 record。
+    """
     import json
     import time
 
@@ -349,8 +369,9 @@ def _catchup_env(monkeypatch, tmp_path, *, alert_ok: bool, active: bool = True, 
 
     monkeypatch.setenv("TZ", "Asia/Taipei")
     time.tzset()
+    rec = gap if gap is not None else _GAP_REC
     store = Store(tmp_path / "t.db")
-    store.set_meta(GAP_WINDOW_KEY, json.dumps(_GAP_REC))
+    store.set_meta(GAP_WINDOW_KEY, json.dumps(rec))
     if with_sale:
         wid = store.insert_card_watch(grader="ARS", grade=10.0, grade_label="10", name_ja="魔法の筒")
         store.upsert_card_watch_sale(
@@ -358,7 +379,7 @@ def _catchup_env(monkeypatch, tmp_path, *, alert_ok: bool, active: bool = True, 
             site="buyee_yahoo", seller_id="", price_native=3441, currency="JPY",
             sold_at="2026-10-19T03:00:00+00:00", bid_count=1, sale_kind="auction", source="yahoo_closed",
         )
-    pipe = _CatchupPipe(store, alert_ok=alert_ok, active=active)
+    pipe = _CatchupPipe(store, alert_ok=alert_ok, active=active, rec=rec)
     mine_calls: list[dict] = []
     monkeypatch.setattr(cli, "Pipeline", lambda: pipe)
     monkeypatch.setattr(cli, "_print_scan", lambda r: None)
@@ -421,6 +442,38 @@ def test_daily_catchup_no_notify_does_not_consume_the_window(monkeypatch, tmp_pa
     pipe, _ = _catchup_env(monkeypatch, tmp_path, alert_ok=True)
     cli.daily(skip_comps=False, no_notify=True, catchup=True)
     assert pipe.notifier.alerts == [] and _caught_up(pipe) is None
+
+
+def test_daily_catchup_does_not_review_an_already_caught_up_window(monkeypatch, tmp_path):
+    """W1：已補跑的視窗被手動 `--catchup` 再跑，不重推回顧、不覆蓋 caught_up_at 原值。"""
+    from ygo_sniper import cli
+
+    done = {**_GAP_REC, "caught_up_at": "2026-10-19T21:15:00"}
+    pipe, mine_calls = _catchup_env(monkeypatch, tmp_path, alert_ok=True, gap=done)
+    cli.daily(skip_comps=False, no_notify=False, catchup=True)
+    assert mine_calls == [{"force": True}]          # --catchup 仍強制重挖
+    assert pipe.notifier.alerts == []
+    assert _caught_up(pipe) == "2026-10-19T21:15:00"
+
+
+def test_daily_normal_run_closes_below_threshold_window(monkeypatch, tmp_path):
+    """W2-2：漏 1 格（未達門檻 2）、非補跑 → 正常輪收尾時標掉，且不送任何訊息。"""
+    from ygo_sniper import cli
+
+    one = {**_GAP_REC, "missed_slots": 1}
+    pipe, _ = _catchup_env(monkeypatch, tmp_path, alert_ok=True, active=False, gap=one)
+    cli.daily(skip_comps=False, no_notify=False, catchup=False)
+    assert _caught_up(pipe) is not None
+    assert pipe.notifier.alerts == []
+
+
+def test_daily_normal_run_leaves_window_at_threshold_for_catchup(monkeypatch, tmp_path):
+    """反向：達門檻的視窗不能被正常輪吃掉（它要留給補跑回顧）。"""
+    from ygo_sniper import cli
+
+    pipe, _ = _catchup_env(monkeypatch, tmp_path, alert_ok=True, active=False)   # 10 格
+    cli.daily(skip_comps=False, no_notify=False, catchup=False)
+    assert _caught_up(pipe) is None
 
 
 def test_gap_review_not_sent_when_notify_disabled(monkeypatch, tmp_path):

@@ -919,16 +919,28 @@ class Pipeline:
         """決定這一輪是否進補跑模式，結果記在 `self._catchup_*`（`_scan_source` 會讀）。
 
         讀帳失敗不拖垮掃描：當作沒有帳（`decode_gap_record` 對壞資料本來就回 None）。
+        判定本身出錯（例如設定檔 `catchup_min_missed_slots:` 留空）同樣不拖垮掃描——
+        警告＋本輪不補跑，否則例外會讓 `scan_status` 卡在 running（2026-10-20 複審 S1）。
         帳是在 `_update_schedule_state` **之後**讀的——這一輪才剛偵測到的漏跑
         視窗，本輪就能補跑，不必等下一輪。
+
+        `_catchup_record` 只放**未補跑**的帳：已補跑的視窗不再是這一輪要回顧的對象，
+        否則手動 `--catchup` 會把同一段回顧再推一次並覆蓋 `caught_up_at`（複審 W1）。
         """
-        rec = None if high_band else decode_gap_record(self.store.get_meta(GAP_WINDOW_KEY))
-        min_slots = int(self.cfg.scan.get("catchup_min_missed_slots", 2))
-        auto = gap_needs_catchup(rec, min_missed_slots=min_slots)
-        self._catchup_active = bool(catchup or auto) and not watch_only and not high_band
-        self._catchup_record = rec
-        if self._catchup_active:
-            extra = max(0, int(self.cfg.scan.get("catchup_extra_pages", 1)))
+        self._catchup_active = False
+        self._catchup_record = None
+        try:
+            rec = None if high_band else decode_gap_record(self.store.get_meta(GAP_WINDOW_KEY))
+            min_slots = int(self.cfg.scan.get("catchup_min_missed_slots", 2))
+            auto = gap_needs_catchup(rec, min_missed_slots=min_slots)
+            active = bool(catchup or auto) and not watch_only and not high_band
+            extra = max(0, int(self.cfg.scan.get("catchup_extra_pages", 1))) if active else 0
+        except Exception as e:  # noqa: BLE001 - 輔助判定，絕不能連累掃描本身
+            print(f"[warn] 補跑模式判定失敗（本輪不補跑）：{type(e).__name__}: {e}")
+            return
+        self._catchup_active = active
+        self._catchup_record = rec if (rec and rec.get("caught_up_at") is None) else None
+        if active:
             if catchup:
                 why = "--catchup"
             else:
