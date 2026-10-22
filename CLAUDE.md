@@ -428,7 +428,7 @@ n=325 → 是 L3（連卡名都沒認出，退到稀有度池） ← 最弱
 ## 九、常用指令
 
 ```bash
-make test                      # pytest（目前 2090 passed，2026-10-20 實測）
+make test                      # pytest（目前 2151 passed，2026-10-21 實測）
                                #   ⚠️ 別自己再加 `-q`：pyproject 的 addopts 已有一個，
                                #   疊成 `-qq` 會**吃掉最後那行 `N passed`**，而 exit code
                                #   仍是 0——「測試沒跑」與「跑了但看不到綠字」外顯一樣。
