@@ -20,7 +20,7 @@
   img{max-width:100%}
   a{color:var(--accent);text-decoration:none}
   header{position:sticky;top:0;z-index:10;background:rgba(15,17,21,.94);
-         backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:14px 20px}
+         backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:12px 20px}
   .row{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
   h1{font-size:16px;margin:0;letter-spacing:.5px}
   h1 span{color:var(--dim);font-weight:400;font-size:12px;margin-left:8px}
@@ -38,6 +38,42 @@
   .lbl{font-size:11.5px;color:var(--dim);letter-spacing:.4px}
   .pill.live{border-color:var(--accent);color:var(--accent)}
   .pill.stale{border-color:#6b5322;color:var(--warn)}
+
+  /* ---- 標頭（2026-10-24 重排）-------------------------------------------
+     使用者原話：「這一段看起來很凌亂」。原本每個數字各一顆圓 pill、排程的
+     漏跑帳整句話（四十幾個字）跟最後掃描、兩顆按鈕擠在同一列。改法：
+     1. 統計數字收成一條分段條（.stats）：一個框、內部用細線分格。
+     2. 排程狀態收成一顆膠囊（.status）：燈號＋最後掃描＋漏跑小籤（.chip）。
+        長句一律退到 title（滑鼠懸停才看），只有「尚未補跑」才用警示色。
+     3. 按鈕分主次：立即掃描是主按鈕（.primary），補跑 daily 是淡色（.ghost）。 */
+  .topbar{gap:10px 14px}
+  .stats{display:inline-flex;border:1px solid var(--line);border-radius:8px;
+         overflow:hidden;background:var(--panel-2)}
+  .stat{padding:4px 11px;font-size:12px;color:var(--dim);white-space:nowrap}
+  .stat+.stat{border-left:1px solid var(--line)}
+  .stat b{color:var(--ink)}
+  .actions{margin-left:auto;gap:8px}
+  .status{display:inline-flex;align-items:center;gap:8px;padding:4px 11px 4px 10px;
+          border:1px solid var(--line);border-radius:999px;background:var(--panel-2);
+          font-size:12px;color:var(--dim);white-space:nowrap}
+  .status b{color:var(--ink)}
+  .status .dot{width:7px;height:7px;border-radius:50%;background:#3f8f6d;flex:0 0 7px}
+  .status.live{border-color:var(--accent);color:var(--accent)}
+  .status.live .dot{display:none}
+  .status.stale{border-color:#6b5322;color:var(--warn)}
+  .status.stale .dot{background:var(--warn)}
+  .chip{font-size:11px;padding:1px 7px;border-radius:5px;border:1px solid var(--line);
+        color:var(--dim);cursor:help}
+  .chip.warn{border-color:#6b5322;color:var(--warn);background:#33280f}
+  button.primary{border-color:var(--accent);color:var(--accent)}
+  button.primary:hover{background:var(--accent);color:#06231f}
+  button.primary:disabled:hover{background:var(--panel-2);color:var(--accent);border-color:var(--accent)}
+  button.ghost{background:transparent;color:var(--dim)}
+  button.ghost:hover{color:var(--accent)}
+  .tabs{gap:6px}
+  .filterbar button{padding:4px 10px;font-size:11.5px}
+  .count-line{font-size:11.5px;color:var(--dim)}
+  .count-line b{color:var(--ink)}
   main{padding:20px;max-width:1500px;margin:0 auto}
 
   /* ---- 一列一個標的的全寬橫幅 -------------------------------------------
@@ -379,26 +415,33 @@
 <body>
 
 <header>
-  <div class="row">
+  <div class="row topbar">
     <h1>🃏 ygo-sniper<span>1998–2004 · PSA / ARS</span></h1>
-    <span class="pill" id="stat-new">待處理 <b>–</b></span>
-    <!-- 2026-10-20 使用者要求隱藏湊單籃／行情／漂移；要復原拿掉 hidden 即可（loadStats 照常寫值） -->
-    <span class="pill" id="stat-bundle" hidden>湊單籃 <b>–</b></span>
-    <span class="pill" id="stat-comps" hidden>行情 <b>–</b></span>
-    <span class="pill" id="stat-drift" hidden title="市場漂移：同卡重複成交，近 4 週 vs 前 8 週（只顯示，不進估價）">漂移 <b>–</b></span>
-    <span class="pill" id="stat-fx">匯率 <b>–</b></span>
-    <div style="margin-left:auto" class="row">
-      <span class="pill" id="gap-pill" hidden></span>
-      <span class="pill" id="scan-when" title="還沒讀到掃描狀態">最後掃描 <b>–</b></span>
+    <div class="stats">
+      <span class="stat" id="stat-new">待處理 <b>–</b></span>
+      <!-- 2026-10-20 使用者要求隱藏湊單籃／行情／漂移；要復原拿掉 hidden 即可（loadStats 照常寫值） -->
+      <span class="stat" id="stat-bundle" hidden>湊單籃 <b>–</b></span>
+      <span class="stat" id="stat-comps" hidden>行情 <b>–</b></span>
+      <span class="stat" id="stat-drift" hidden title="市場漂移：同卡重複成交，近 4 週 vs 前 8 週（只顯示，不進估價）">漂移 <b>–</b></span>
+      <span class="stat" id="stat-fx">匯率 <b>–</b></span>
+    </div>
+    <div class="row actions">
+      <!-- 排程狀態膠囊：燈號（綠＝正常、黃＝上一輪沒回報完成、掃描中換轉圈）＋
+           最後掃描＋漏跑小籤。完整文字在各自的 title。 -->
+      <div class="status" id="run-status">
+        <span class="dot"></span>
+        <span id="scan-when" title="還沒讀到掃描狀態">最後掃描 <b>–</b></span>
+        <span class="chip" id="gap-pill" hidden></span>
+      </div>
       <!-- 2026-10-20 使用者要求合併：一顆按鈕依序跑低價帶→高價帶（POST /api/scan-both，
            後端同一個背景任務、共用全域 scan 狀態）。 -->
-      <button id="scan-btn" onclick="scanBothNow()" title="先掃低價帶再掃高價帶，一次跑完">立即掃描</button>
+      <button id="scan-btn" class="primary" onclick="scanBothNow()" title="先掃低價帶再掃高價帶，一次跑完">立即掃描</button>
       <!-- 補跑 daily：走 scripts/run_daily.sh --catchup（與 launchd 同一條路：鎖、watchdog、log、ledger）。
            跟上面不同——立即掃描是行程內 Pipeline、不推播、不挖狙擊成交。 -->
-      <button id="catchup-btn" onclick="catchupNow()" title="走 run_daily.sh --catchup：完整 daily（掃描＋狙擊重挖＋推播），給關機重開或鎖卡住後用">補跑 daily</button>
+      <button id="catchup-btn" class="ghost" onclick="catchupNow()" title="走 run_daily.sh --catchup：完整 daily（掃描＋狙擊重挖＋推播），給關機重開或鎖卡住後用">補跑 daily</button>
     </div>
   </div>
-  <div class="row" style="margin-top:10px">
+  <div class="row tabs" style="margin-top:8px">
     <button class="tab on" data-state="new">待處理</button>
     <!-- 2026-10-20 使用者要求狀態分頁只留 待處理／已出價／觀察中／全部；
          其餘六個以 hidden 隱藏（不刪、不改 data 屬性），要復原拿掉 hidden 即可。 -->
@@ -426,7 +469,7 @@
     <button class="tab" data-view="snipe" title="指定卡狙擊：登錄特定卡（鑑定機構＋分數＋卡名＋卡號），出現就推播；比對走在所有過濾規則之前">🎯 狙擊</button>
     <button class="tab" data-view="other" title="湊單籃攤提／破口價／怎麼用／關鍵字搜尋／平台研究">其他</button>
   </div>
-  <div class="row filterbar" id="filterbar" style="margin-top:8px">
+  <div class="row filterbar" id="filterbar" style="margin-top:6px">
     <!-- 2026-10-20 分三排：1 分類／快捷／P 門檻；2 旗標／排序／清除；3 筆數統計 -->
     <div class="filter-row">
     <span class="lbl">篩選</span>
@@ -472,7 +515,7 @@
     <button id="filter-reset" style="display:none" title="回到「全部」，不隱藏任何標的">清除篩選</button>
     </div>
     <div class="filter-row">
-    <span class="pill" id="list-count">– 筆</span>
+    <span class="count-line" id="list-count">– 筆</span>
     </div>
   </div>
 </header>
@@ -2256,7 +2299,8 @@ let scanPollTimer = null;
 let wasRunning = false;
 
 function renderScanStatus(st){
-  const pill = document.getElementById("scan-when");
+  const box  = document.getElementById("run-status");   // 膠囊本體：顏色與燈號掛在這裡
+  const pill = document.getElementById("scan-when");    // 膠囊裡的文字
   const btn  = document.getElementById("scan-btn");
   const btnCatchup = document.getElementById("catchup-btn");
   const last = st.last_run || {};
@@ -2272,7 +2316,7 @@ function renderScanStatus(st){
     : "還沒有任何完成的掃描紀錄";
 
   if(st.running){
-    pill.className = "pill live";
+    box.className = "status live";
     pill.innerHTML = `<span class="spin"></span>${isHigh ? "高價掃描中…" : "掃描中…"} <b>${mmss(st.elapsed_seconds)}</b>`;
     pill.title = `開始於 ${abs(st.started_at)}（${
       st.trigger === "dashboard" || st.trigger === "dashboard-high" ? "你按的" : st.trigger || "?"
@@ -2281,10 +2325,11 @@ function renderScanStatus(st){
     btn.textContent = "掃描中…";
     btnCatchup.disabled = true;
   }else{
-    pill.className = "pill" + (st.stale ? " stale" : "");
+    box.className = "status" + (st.stale ? " stale" : "");
     const rel = ago(lastAt);
+    // stale 的警示由膠囊顏色＋黃燈表達，文字不再堆 emoji
     pill.innerHTML = st.stale
-      ? `⚠️ 上次掃描未回報完成 <b>${rel || "–"}</b>`
+      ? `上次掃描未回報完成 <b>${rel || "–"}</b>`
       : `最後掃描 <b>${rel || "從未"}</b>`;
     pill.title = st.stale
       ? `有一輪掃描開始於 ${abs(st.started_at)} 但超過 ${st.timeout_seconds} 秒沒回報完成`
@@ -2354,29 +2399,35 @@ async function scanBothNow(){
   scanPollTimer = setTimeout(pollScanStatus, 700);
 }
 
-/** 漏跑視窗狀態（`/api/schedule/gap`）。沒有紀錄就隱藏；有但未補跑用 stale 色。 */
+/** 漏跑視窗狀態（`/api/schedule/gap`）。沒有紀錄就隱藏。
+    2026-10-24 改成小籤：畫面上只放「漏跑 N 格 · 已收尾／已補跑／未補跑」，
+    時間窗、門檻、誰收尾的這些全部退到 title——那句四十幾字的話原本把整列撐亂。
+    只有「尚未補跑」才用警示色，收掉的用素色。 */
 async function pollGap(){
   let g, minSlots;
   try{
     const r = await api("/api/schedule/gap");
     g = r.gap; minSlots = Number(r.min_missed_slots) || 2;
   }catch(e){ return; }
-  const pill = document.getElementById("gap-pill");
-  if(!g){ pill.hidden = true; return; }
+  const chip = document.getElementById("gap-pill");
+  if(!g){ chip.hidden = true; return; }
   // 排程帳是台北 naive ISO（clock.schedule_now），不是瀏覽器／機器時區——文字明寫，出差換時區也不會誤讀
   const win = `台北 ${g.uncovered_from.slice(5,16).replace("T"," ")} ～ ${g.uncovered_to.slice(5,16).replace("T"," ")}`;
-  pill.hidden = false;
+  chip.hidden = false;
   if(g.caught_up_at){
-    pill.className = "pill";
+    chip.className = "chip";
     // caught_up_at 有兩種來源：達門檻 → 補跑模式跑過且回顧送達；未達門檻 → 正常輪掃完
     // 直接收掉（沒多翻頁、沒回顧）。兩件事不能都叫「已補跑」。
     const when = g.caught_up_at.slice(5,16).replace("T"," ");
-    pill.textContent = (g.missed_slots < minSlots)
-      ? `上次漏跑 ${g.missed_slots} 格（${win}），未達補跑門檻 ${minSlots}，已由 ${when} 的正常掃描收尾`
-      : `上次漏跑 ${g.missed_slots} 格（${win}），已於 ${when} 補跑`;
+    const below = g.missed_slots < minSlots;
+    chip.textContent = `漏跑 ${g.missed_slots} 格 · ${below ? "已收尾" : "已補跑"}`;
+    chip.title = below
+      ? `上次漏跑 ${g.missed_slots} 格（${win}）\n未達補跑門檻 ${minSlots} 格，已由 ${when} 的正常掃描收尾（沒多翻頁、沒成交回顧）`
+      : `上次漏跑 ${g.missed_slots} 格（${win}）\n已於 ${when} 補跑（多翻一頁＋成交回顧已送達）`;
   }else{
-    pill.className = "pill stale";
-    pill.textContent = `⚠️ 漏跑 ${g.missed_slots} 格（${win}），尚未補跑`;
+    chip.className = "chip warn";
+    chip.textContent = `⚠️ 漏跑 ${g.missed_slots} 格 · 未補跑`;
+    chip.title = `漏跑 ${g.missed_slots} 格（${win}），尚未補跑\n下一輪排程會自動處理，或按「補跑 daily」`;
   }
 }
 
